@@ -1,0 +1,27 @@
+---
+# =============================================================================
+# Vault Unseal Role — Default Variables
+# =============================================================================
+
+# Service account
+vault_unseal_user: "unseal-vault"
+vault_unseal_group: "unseal-vault"
+
+# Network
+vault_unseal_port: 8210
+
+# UI
+vault_unseal_ui_enabled: true
+
+# TLS
+vault_unseal_tls_disable: false
+
+# macOS LaunchDaemon
+vault_unseal_launchd_label: "com.example-lab.vault-unseal"
+
+# Directories
+vault_unseal_data_dir: "/opt/unseal-vault/data"
+vault_unseal_config_dir: "/opt/unseal-vault/config"
+vault_unseal_tls_dir: "/opt/unseal-vault/tls"
+vault_unseal_log_dir: "/opt/unseal-vault/log"
+vault_unseal_binary_path: "/opt/unseal-vault/vault"

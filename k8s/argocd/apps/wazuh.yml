@@ -1,0 +1,36 @@
+# Wazuh SIEM — Security monitoring and threat detection
+# Wave 2: Workload application (depends on ingress, TLS, ESO, MetalLB)
+# Custom Kustomize manifests (no official Helm chart exists)
+#
+# Components: Manager (standalone) + Indexer (single-node) + Dashboard
+# Agent enrollment via MetalLB LoadBalancer on 10.0.20.221:1514/1515
+# Dashboard at wazuh.home.example-lab.org via Traefik
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: wazuh
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://10.0.10.50/infrastructure/firblab.git
+    targetRevision: HEAD
+    path: k8s/platform/wazuh/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: wazuh
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # Indexer requires privileged init container for vm.max_map_count sysctl
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: baseline
+        pod-security.kubernetes.io/audit: baseline
+    syncOptions:
+      - CreateNamespace=true

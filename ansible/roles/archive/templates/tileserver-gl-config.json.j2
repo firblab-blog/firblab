@@ -1,0 +1,16 @@
+{
+  "options": {
+    "paths": {
+      "mbtiles": "/data"
+    }
+  },
+  "data": {
+{% for ds in archive_tileservergl_datasets %}
+    "{{ ds.name }}": {
+      "mbtiles": "{{ ds.mbtiles }}"
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  },
+  "styles": {}
+}

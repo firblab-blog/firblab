@@ -1,0 +1,167 @@
+---
+# =============================================================================
+# K3s Server Installation
+# =============================================================================
+# Installs and configures a K3s server (control plane) node.
+# The deploy playbook runs this in serial: first server initializes the
+# cluster, subsequent servers join via the API endpoint on port 6443.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Install K3s Binary
+# ---------------------------------------------------------------------------
+- name: Install K3s server
+  ansible.builtin.shell:
+    cmd: |
+      curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_SKIP_START=true \
+        INSTALL_K3S_SKIP_ENABLE=true \
+        sh -
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Cluster Token
+# ---------------------------------------------------------------------------
+# First server generates the token; others use it to join.
+- name: Generate cluster token (first server only)
+  ansible.builtin.set_fact:
+    k3s_cluster_token: "{{ lookup('ansible.builtin.password', '/dev/null', length=64, chars=['ascii_letters', 'digits']) }}"
+  when:
+    - inventory_hostname == k3s_init_node
+    - k3s_cluster_token is not defined
+  no_log: true
+  run_once: true
+  tags:
+    - install
+
+- name: Write cluster token file
+  ansible.builtin.copy:
+    content: "{{ k3s_cluster_token }}"
+    dest: "{{ k3s_config_dir }}/cluster-token"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Server Configuration
+# ---------------------------------------------------------------------------
+- name: Deploy K3s server config
+  ansible.builtin.template:
+    src: k3s-server-config.yaml.j2
+    dest: "{{ k3s_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart k3s
+  tags:
+    - install
+    - configure
+
+# ---------------------------------------------------------------------------
+# CoreDNS HelmChartConfig (Custom DNS Zones)
+# ---------------------------------------------------------------------------
+# Deploys a HelmChartConfig manifest that customizes CoreDNS. K3s uses the
+# same embedded Helm controller mechanism as RKE2 — manifests in the server
+# manifests directory are auto-reconciled.
+- name: Ensure K3s server manifests directory exists
+  ansible.builtin.file:
+    path: "{{ k3s_data_dir }}/server/manifests"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: k3s_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - install
+    - configure
+    - coredns
+
+- name: Deploy CoreDNS HelmChartConfig manifest
+  ansible.builtin.template:
+    src: k3s-coredns-config.yaml.j2
+    dest: "{{ k3s_data_dir }}/server/manifests/k3s-coredns-config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  when: k3s_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - install
+    - configure
+    - coredns
+
+# ---------------------------------------------------------------------------
+# Enable and Start
+# ---------------------------------------------------------------------------
+- name: Enable K3s server service
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    daemon_reload: true
+  tags:
+    - install
+
+- name: Start K3s server service
+  ansible.builtin.systemd:
+    name: k3s
+    state: started
+  tags:
+    - install
+
+- name: Wait for K3s server to be ready
+  ansible.builtin.wait_for:
+    port: 6443
+    host: "{{ ansible_host }}"
+    timeout: 300
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Fetch Kubeconfig (first server only)
+# ---------------------------------------------------------------------------
+- name: Wait for node to report Ready
+  ansible.builtin.command:
+    cmd: >-
+      {{ k3s_bin_dir }}/kubectl --kubeconfig {{ k3s_config_dir }}/k3s.yaml
+      get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  register: node_ready
+  until: node_ready.stdout == "True"
+  retries: 30
+  delay: 10
+  changed_when: false
+  tags:
+    - install
+    - verify
+
+# ---------------------------------------------------------------------------
+# Back Up Cluster Token to Vault
+# ---------------------------------------------------------------------------
+# Runs on the init node only (token was generated there). Delegates to
+# localhost so the Ansible controller's Vault token + CA cert are used.
+# NOTE: validate_certs disabled because the Vault CA cert lacks the keyUsage
+# X.509 extension, which Python 3.13+ enforces. The CA cert needs to be
+# regenerated with keyUsage to re-enable strict validation.
+- name: Store cluster token in Vault
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ ansible_hashi_vault_url }}"
+    ca_cert: "{{ ansible_hashi_vault_ca_cert | expanduser }}"
+    auth_method: token
+    validate_certs: false
+    mount_point: secret
+    path: compute/k3s-cluster-token
+    data:
+      token: "{{ k3s_cluster_token }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - install
+    - vault

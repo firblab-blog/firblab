@@ -1,0 +1,37 @@
+---
+# =============================================================================
+# Proxmox GPU Passthrough — Host Preparation Playbook
+# =============================================================================
+# One-time setup on Proxmox hypervisor to enable PCI GPU passthrough.
+# Configures IOMMU, VFIO, driver blacklisting, and initramfs.
+#
+# IMPORTANT: Requires a manual reboot of the Proxmox host after first run!
+# The playbook does NOT reboot automatically because this would affect all
+# running VMs on the node.
+#
+# Prerequisites:
+#   - Physical GPU installed in the host (verify with: lspci | grep VGA)
+#   - GPU PCI device IDs known (verify with: lspci -nn | grep '03:00')
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-gpu-setup.yml
+#
+# To override GPU device IDs:
+#   ansible-playbook ... -e '{"gpu_vfio_device_ids": ["1002:747e", "1002:ab30"]}'
+#
+# After playbook completes:
+#   1. Reboot the Proxmox host: ssh admin@10.0.10.42 'sudo reboot'
+#   2. Verify IOMMU: dmesg | grep -i iommu
+#   3. Verify VFIO: lspci -nnk | grep -A3 '03:00'
+#   4. Then run terraform apply (Layer 05) to create the GPU VM
+#   5. Then run ansible-playbook ai-gpu-deploy.yml
+# =============================================================================
+
+- name: Configure Proxmox host for GPU passthrough
+  hosts: lab-01
+  become: true
+  gather_facts: true
+  serial: 1
+
+  roles:
+    - role: proxmox-gpu

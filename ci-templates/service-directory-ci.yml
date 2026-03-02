@@ -1,0 +1,64 @@
+# =============================================================================
+# GitLab CI/CD Template for Service Directory Generation
+# =============================================================================
+# Auto-generates the service directory from IaC source files (Traefik backends,
+# Ansible inventory, Terraform DNS records). Produces three outputs:
+#
+#   docs/service-catalog.yml    — Machine-readable YAML catalog
+#   docs/SERVICE-DIRECTORY.md   — Emergency reference (works offline, any editor)
+#   docs/service-directory.html — Searchable HTML with filters + click-to-copy
+#
+# Jobs provided:
+#   .service-directory-generate  — Run the generator script
+#
+# Prerequisites:
+#   - PyYAML (pip-installed in before_script)
+#   - Source files: ansible/roles/traefik-standalone/defaults/main.yml,
+#     ansible/inventory/hosts.yml, terraform/layers/00-network/dns.tf
+#
+# Usage in .gitlab-ci.yml:
+#   include:
+#     - local: ci-templates/service-directory-ci.yml
+#
+#   service-directory:generate:
+#     extends: .service-directory-generate
+#     rules:
+#       - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+#         changes:
+#           - ansible/roles/traefik-standalone/defaults/main.yml
+#           - ansible/inventory/hosts.yml
+#           - terraform/layers/00-network/dns.tf
+#           - scripts/generate-service-directory.py
+#           - ci-templates/service-directory-ci.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Service Directory Generator Job
+# -----------------------------------------------------------------------------
+# Parses IaC source files and renders three output formats. All outputs are
+# stored as CI artifacts and automatically picked up by the wiki publish job
+# (docs/*.md → wiki pages).
+#
+# No API calls, no network dependencies — reads files from the repo only.
+# -----------------------------------------------------------------------------
+
+.service-directory-generate:
+  stage: publish
+  image: python:3.12-slim
+  tags: [docker]
+  before_script:
+    - pip install --no-cache-dir -q pyyaml
+  script:
+    - echo "--- Generating service directory ---"
+    - python scripts/generate-service-directory.py
+    - echo "--- Output files ---"
+    - ls -la docs/SERVICE-DIRECTORY.md docs/service-catalog.yml docs/service-directory.html
+    - echo "--- Service count ---"
+    - grep -c '^\|' docs/SERVICE-DIRECTORY.md | head -1 || true
+    - echo "--- Generation complete ---"
+  artifacts:
+    paths:
+      - docs/service-catalog.yml
+      - docs/SERVICE-DIRECTORY.md
+      - docs/service-directory.html
+    expire_in: 90 days

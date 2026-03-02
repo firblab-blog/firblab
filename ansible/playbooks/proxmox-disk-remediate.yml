@@ -1,0 +1,136 @@
+---
+# =============================================================================
+# Proxmox VM Disk Remediation — Enable discard, SSD emulation, iothread
+# =============================================================================
+# One-time remediation playbook to fix disk performance flags on all existing
+# VMs. Audit revealed every VM has discard=ignore, ssd=0, iothread=0 because
+# the bpg/proxmox Terraform provider overrode Packer template settings on clone.
+#
+# What this playbook does:
+#   1. Discovers all VMs on each Proxmox node
+#   2. Checks each VM's SCSI disk config
+#   3. Sets discard=on, ssd=1, iothread=1 on SCSI disks that need updating
+#
+# Important notes:
+#   - discard and ssd take effect immediately (hot-pluggable)
+#   - iothread requires a VM reboot to activate
+#   - Template VMs (base-*) are skipped since they are not running
+#   - Cloudinit disks are skipped (TRIM is irrelevant for 4MB config disks)
+#   - Passthrough disks (raw /dev/ paths) are skipped
+#   - HDD-backed disks (hdd-* storage pools) are skipped (no TRIM on spinning disks)
+#
+# Usage:
+#   # Dry-run (check mode — shows what would change):
+#   ansible-playbook ansible/playbooks/proxmox-disk-remediate.yml --check
+#
+#   # Run on all nodes:
+#   ansible-playbook ansible/playbooks/proxmox-disk-remediate.yml
+#
+#   # Run on a single node:
+#   ansible-playbook ansible/playbooks/proxmox-disk-remediate.yml --limit lab-01
+#
+# Prerequisites:
+#   - SSH access to Proxmox nodes as admin with sudo
+#   - VMs should be running (stopped VMs can also be configured)
+# =============================================================================
+
+- name: "Remediate VM disk flags (discard, ssd, iothread)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Step 1: Get list of all VMs on this node
+    # -----------------------------------------------------------------
+    - name: Get list of VMs on this node
+      ansible.builtin.shell: |
+        qm list 2>/dev/null | tail -n +2 | awk '{print $1}'
+      register: vm_list
+      changed_when: false
+      tags: [disk-remediate]
+
+    - name: Set VM ID list
+      ansible.builtin.set_fact:
+        vm_ids: "{{ vm_list.stdout_lines | default([]) }}"
+      tags: [disk-remediate]
+
+    - name: Display discovered VMs
+      ansible.builtin.debug:
+        msg: "Found {{ vm_ids | length }} VMs: {{ vm_ids | join(', ') }}"
+      tags: [disk-remediate]
+
+    # -----------------------------------------------------------------
+    # Step 2: Get disk config for each VM
+    # -----------------------------------------------------------------
+    - name: Get SCSI disk config for each VM
+      ansible.builtin.shell: |
+        qm config {{ item }} 2>/dev/null | grep -E '^scsi[0-9]+:' || true
+      register: vm_configs
+      loop: "{{ vm_ids }}"
+      changed_when: false
+      tags: [disk-remediate]
+
+    # -----------------------------------------------------------------
+    # Step 3: Build remediation commands
+    # -----------------------------------------------------------------
+    # Parse each VM's disk config and build qm set commands for disks
+    # that need updating. Skip cloudinit disks and passthrough disks.
+    - name: Build remediation list
+      ansible.builtin.set_fact:
+        remediation_commands: >-
+          {%- set commands = [] -%}
+          {%- for vm_result in vm_configs.results -%}
+            {%- set vmid = vm_result.item -%}
+            {%- for line in vm_result.stdout_lines | default([]) -%}
+              {%- set iface = line.split(':')[0] -%}
+              {%- set config = line.split(': ', 1)[1] | default('') -%}
+              {%- if 'cloudinit' not in config and '/dev/' not in config and not config.startswith('hdd-') -%}
+                {%- if 'discard=ignore' in config or 'ssd=0' in config or 'iothread=0' in config -%}
+                  {%- set new_config = config
+                    | regex_replace('discard=ignore', 'discard=on')
+                    | regex_replace('ssd=0', 'ssd=1')
+                    | regex_replace('iothread=0', 'iothread=1') -%}
+                  {%- if commands.append({'vmid': vmid, 'iface': iface, 'config': new_config}) -%}{%- endif -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ commands }}
+      tags: [disk-remediate]
+
+    - name: Display planned changes
+      ansible.builtin.debug:
+        msg: "Will update VM {{ item.vmid }} {{ item.iface }}"
+      loop: "{{ remediation_commands }}"
+      when: remediation_commands | length > 0
+      tags: [disk-remediate]
+
+    - name: Report no changes needed
+      ansible.builtin.debug:
+        msg: "All VMs on {{ inventory_hostname }} already have correct disk flags."
+      when: remediation_commands | length == 0
+      tags: [disk-remediate]
+
+    # -----------------------------------------------------------------
+    # Step 4: Apply disk config changes
+    # -----------------------------------------------------------------
+    - name: Apply disk remediation
+      ansible.builtin.command: >
+        qm set {{ item.vmid }} --{{ item.iface }} {{ item.config }}
+      loop: "{{ remediation_commands }}"
+      when: remediation_commands | length > 0
+      register: remediation_results
+      tags: [disk-remediate]
+
+    # -----------------------------------------------------------------
+    # Step 5: Summary
+    # -----------------------------------------------------------------
+    - name: Remediation summary
+      ansible.builtin.debug:
+        msg: >-
+          Updated {{ remediation_commands | length }} disk(s) on {{ inventory_hostname }}.
+          discard=on and ssd=1 are active immediately.
+          iothread=1 requires a VM reboot to take effect.
+      when: remediation_commands | length > 0
+      tags: [disk-remediate]

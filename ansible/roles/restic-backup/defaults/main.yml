@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# restic-backup — Default Variables
+# =============================================================================
+# Installs Restic and configures per-service backup cron jobs that push to
+# the Restic REST server on lab-01.
+#
+# Each service gets its own backup script and cron entry. Pre-commands
+# (database dumps) run before backup, post-commands (cleanup) run after.
+# =============================================================================
+
+# Enable/disable Restic backup automation
+restic_backup_enabled: false
+
+# ---------------------------------------------------------------------------
+# Restic Binary
+# ---------------------------------------------------------------------------
+# renovate: datasource=github-releases depName=restic/restic
+restic_version: "0.17.3"
+restic_binary: "/usr/local/bin/restic"
+
+# ---------------------------------------------------------------------------
+# Repository Configuration
+# ---------------------------------------------------------------------------
+# REST server URL — each host gets a subdirectory named after its hostname.
+# The deploy playbook sets the full URL with credentials.
+# restic_repo_url: "rest:http://lab-02:pass@10.0.10.42:8500/lab-02/"
+# restic_repo_password: "<from Vault>"
+
+# ---------------------------------------------------------------------------
+# Service Definitions (override per playbook)
+# ---------------------------------------------------------------------------
+# List of services to back up. Each entry defines:
+#   name:             Service identifier (used in script names, tags, logs)
+#   paths:            Absolute paths to back up
+#   pre_commands:     Commands to run before backup (e.g., pg_dump, mysqldump)
+#   extra_paths:      Additional paths to include (e.g., dump files)
+#   post_commands:    Commands to run after backup (e.g., cleanup dump files)
+#   stop_compose:     Docker Compose path — stop before backup, restart after
+#   stop_systemd:     Systemd service name — stop before backup, restart after
+#   tags:             Restic tags applied to the snapshot (for filtering)
+#   cron_hour:        Cron schedule hour (default: "1")
+#   cron_minute:      Cron schedule minute (default: "0")
+#
+# Example:
+#   restic_backup_services:
+#     - name: ghost
+#       stop_compose: /opt/ghost
+#       pre_commands:
+#         - "docker exec ghost-mysql mysqldump -u root -p'secret' --all-databases > /opt/ghost/mysql-dump.sql"
+#       paths:
+#         - /opt/ghost/data
+#         - /opt/ghost/mysql
+#       extra_paths:
+#         - /opt/ghost/mysql-dump.sql
+#       post_commands:
+#         - "rm -f /opt/ghost/mysql-dump.sql"
+#       tags: ["ghost", "blog"]
+#       cron_hour: "1"
+#       cron_minute: "0"
+restic_backup_services: []
+
+# ---------------------------------------------------------------------------
+# Retention Policy
+# ---------------------------------------------------------------------------
+restic_retention_keep_daily: 7
+restic_retention_keep_weekly: 4
+restic_retention_keep_monthly: 3
+restic_retention_keep_yearly: 1
+
+# ---------------------------------------------------------------------------
+# Integrity Check
+# ---------------------------------------------------------------------------
+# Run `restic check` after backup. This is expensive (reads all data blocks),
+# so it only runs on the day specified (0=Sunday, 6=Saturday).
+restic_check_day: 0

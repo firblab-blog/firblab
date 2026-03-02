@@ -1,0 +1,517 @@
+---
+# =============================================================================
+# Vault Kubernetes Auth Configuration for K3s RPi5 Cluster
+# =============================================================================
+# Configures Vault's kubernetes-k3s auth backend to trust the K3s cluster.
+# Creates ServiceAccount + RBAC in k8s, configures Vault auth backend,
+# and distributes the Vault CA cert for pod TLS verification.
+#
+# This is the K3s equivalent of vault-k8s-auth.yml (which configures RKE2).
+# The K3s cluster uses a separate auth backend at auth/kubernetes-k3s/
+# to avoid conflicts with the RKE2 backend at auth/kubernetes/.
+#
+# What already exists (from Terraform 02-vault-config):
+#   - kubernetes-k3s auth backend enabled (auth/kubernetes-k3s/)
+#   - Role: external-secrets (bound to SA external-secrets in ns external-secrets)
+#   - Role: cert-manager (bound to SA cert-manager in ns cert-manager)
+#   - Policy: k8s-external-secrets (read secret/data/k8s/*, secret/data/services/*)
+#   - Policy: cert-manager (issue/sign via pki_int/firblab)
+#   - Full PKI chain: Root CA -> Intermediate CA -> firblab role
+#
+# What THIS playbook creates:
+#   1. vault-auth ServiceAccount + ClusterRoleBinding (token review)
+#   2. Long-lived SA token Secret (for Vault token reviewer JWT)
+#   3. Vault CA cert Secrets in cert-manager + external-secrets namespaces
+#   4. Vault auth/kubernetes-k3s/config (kubernetes_host, ca_cert, jwt)
+#   5. End-to-end verification of kubernetes auth login
+#
+# Prerequisites:
+#   - K3s cluster deployed and healthy (k3s-deploy.yml completed)
+#   - Vault running and accessible from Mac workstation
+#   - Vault CLI available on Mac (brew install vault)
+#   - Environment variables set:
+#       export VAULT_ADDR=https://10.0.10.10:8200
+#       export VAULT_TOKEN=hvs.xxxxx
+#       export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   - Vault CA cert at ~/.lab/tls/ca/ca.pem
+#   - Terraform apply for 02-vault-config completed (creates auth backend + roles)
+#
+# Usage (run from repo root):
+#   cd ~/repos/firb-lab/firblab
+#   ansible-playbook ansible/playbooks/k3s-vault-k8s-auth.yml
+#
+# Tags:
+#   --tags k8s-resources   # Only create k8s SA/RBAC/secrets
+#   --tags vault-config    # Only configure Vault auth backend
+#   --tags verify          # Only run verification checks
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Create Kubernetes Resources (on first K3s server)
+# ---------------------------------------------------------------------------
+- name: "Vault K3s Auth | Create Kubernetes resources"
+  hosts: k3s-server-1
+  become: true
+  gather_facts: false
+
+  vars:
+    _kubectl: "{{ k3s_bin_dir | default('/usr/local/bin') }}/kubectl"
+    _kubeconfig: "{{ k3s_config_dir | default('/etc/rancher/k3s') }}/k3s.yaml"
+    _vault_ca_local_path: "{{ (vault_ca_cert_local_path | default('~/.lab/tls/ca/ca.pem')) | expanduser }}"
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Display configuration
+      ansible.builtin.debug:
+        msg: >
+          Configuring Vault kubernetes-k3s auth for K3s cluster.
+          Vault: {{ vault_addr }}
+          K8s API: https://{{ k3s_init_node_ip }}:6443
+      tags:
+        - always
+
+  tasks:
+    # --- ServiceAccount + RBAC + Token Secret ---
+
+    - name: Write vault-auth Kubernetes manifests to temp file
+      ansible.builtin.copy:
+        content: |
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: vault-auth
+            namespace: kube-system
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: vault-k3s-auth
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: vault-auth-delegator
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: vault-k3s-auth
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: system:auth-delegator
+          subjects:
+            - kind: ServiceAccount
+              name: vault-auth
+              namespace: kube-system
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: vault-auth-token
+            namespace: kube-system
+            annotations:
+              kubernetes.io/service-account.name: vault-auth
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: vault-k3s-auth
+          type: kubernetes.io/service-account-token
+        dest: /tmp/vault-auth-resources.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      tags:
+        - k8s-resources
+
+    - name: Apply vault-auth resources
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          apply -f /tmp/vault-auth-resources.yaml
+      register: _apply_result
+      changed_when: "'configured' in _apply_result.stdout or 'created' in _apply_result.stdout"
+      tags:
+        - k8s-resources
+
+    - name: Display apply result
+      ansible.builtin.debug:
+        msg: "{{ _apply_result.stdout_lines }}"
+      tags:
+        - k8s-resources
+
+    - name: Clean up temp manifest
+      ansible.builtin.file:
+        path: /tmp/vault-auth-resources.yaml
+        state: absent
+      tags:
+        - k8s-resources
+
+    # --- Wait for token population ---
+
+    - name: Wait for vault-auth-token to be populated
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          get secret vault-auth-token -n kube-system
+          -o jsonpath='{.data.token}'
+      register: _token_check
+      retries: 12
+      delay: 5
+      until: _token_check.stdout | length > 0
+      changed_when: false
+      tags:
+        - k8s-resources
+
+    # --- Extract token and CA cert ---
+
+    - name: Extract vault-auth SA token
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          get secret vault-auth-token -n kube-system
+          -o jsonpath='{.data.token}' | base64 -d
+      register: _vault_sa_token_raw
+      changed_when: false
+      no_log: true
+      tags:
+        - k8s-resources
+
+    - name: Set vault SA token fact
+      ansible.builtin.set_fact:
+        vault_k8s_reviewer_jwt: "{{ _vault_sa_token_raw.stdout }}"
+        cacheable: true
+      no_log: true
+      tags:
+        - k8s-resources
+
+    # K3s stores the server CA at a different path than RKE2
+    - name: Read K3s cluster CA certificate
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/tls/server-ca.crt
+      register: _k8s_ca_cert_raw
+      tags:
+        - k8s-resources
+
+    - name: Set k8s CA cert fact
+      ansible.builtin.set_fact:
+        vault_k8s_ca_cert: "{{ _k8s_ca_cert_raw.content | b64decode }}"
+        cacheable: true
+      tags:
+        - k8s-resources
+
+    # --- Create target namespaces ---
+
+    - name: Ensure cert-manager namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          create namespace cert-manager --dry-run=client -o yaml |
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }} apply -f -
+      register: _ns_cm
+      changed_when: "'created' in _ns_cm.stdout"
+      tags:
+        - k8s-resources
+
+    - name: Ensure external-secrets namespace exists
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          create namespace external-secrets --dry-run=client -o yaml |
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }} apply -f -
+      register: _ns_eso
+      changed_when: "'created' in _ns_eso.stdout"
+      tags:
+        - k8s-resources
+
+    # --- Distribute Vault CA cert to k8s ---
+    # cert-manager and external-secrets pods need to verify Vault's TLS cert.
+    # The Vault CA cert lives on the Mac at ~/.lab/tls/ca/ca.pem.
+
+    - name: Read Vault CA cert from localhost
+      ansible.builtin.set_fact:
+        _vault_ca_pem: "{{ lookup('file', _vault_ca_local_path) }}"
+      delegate_to: localhost
+      become: false
+      tags:
+        - k8s-resources
+
+    - name: Write Vault CA cert Secret manifest (cert-manager)
+      ansible.builtin.copy:
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: vault-ca
+            namespace: cert-manager
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: vault-k3s-auth
+          type: Opaque
+          data:
+            ca.crt: "{{ _vault_ca_pem | b64encode }}"
+        dest: /tmp/vault-ca-cert-manager.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      tags:
+        - k8s-resources
+
+    - name: Apply Vault CA cert Secret (cert-manager namespace)
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          apply -f /tmp/vault-ca-cert-manager.yaml
+      register: _ca_cm
+      changed_when: "'configured' in _ca_cm.stdout or 'created' in _ca_cm.stdout"
+      tags:
+        - k8s-resources
+
+    - name: Write Vault CA cert Secret manifest (external-secrets)
+      ansible.builtin.copy:
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: vault-ca
+            namespace: external-secrets
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: vault-k3s-auth
+          type: Opaque
+          data:
+            ca.crt: "{{ _vault_ca_pem | b64encode }}"
+        dest: /tmp/vault-ca-external-secrets.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      tags:
+        - k8s-resources
+
+    - name: Apply Vault CA cert Secret (external-secrets namespace)
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          apply -f /tmp/vault-ca-external-secrets.yaml
+      register: _ca_eso
+      changed_when: "'configured' in _ca_eso.stdout or 'created' in _ca_eso.stdout"
+      tags:
+        - k8s-resources
+
+    - name: Clean up temp Vault CA manifests
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/vault-ca-cert-manager.yaml
+        - /tmp/vault-ca-external-secrets.yaml
+      tags:
+        - k8s-resources
+
+# ---------------------------------------------------------------------------
+# Play 2: Configure Vault Kubernetes Auth Backend (from localhost)
+# ---------------------------------------------------------------------------
+- name: "Vault K3s Auth | Configure Vault auth backend"
+  hosts: k3s-server-1
+  gather_facts: false
+
+  tasks:
+    - name: Verify Vault is reachable
+      ansible.builtin.command:
+        cmd: vault status -format=json
+      delegate_to: localhost
+      become: false
+      register: _vault_status
+      changed_when: false
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      tags:
+        - vault-config
+
+    - name: Display Vault status
+      ansible.builtin.debug:
+        msg: >-
+          Vault is {{ 'sealed' if (_vault_status.stdout | from_json).sealed else 'unsealed' }}
+          (version {{ (_vault_status.stdout | from_json).version }})
+      tags:
+        - vault-config
+
+    - name: Fail if Vault is sealed
+      ansible.builtin.assert:
+        that:
+          - not (_vault_status.stdout | from_json).sealed
+        fail_msg: "Vault is sealed — unseal before running this playbook"
+      tags:
+        - vault-config
+
+    # Write the k8s CA cert to a temp file so vault CLI can read it with @file syntax
+    - name: Write k8s CA cert to temp file
+      ansible.builtin.copy:
+        content: "{{ vault_k8s_ca_cert }}"
+        dest: /tmp/.vault-k8s-ca.pem
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      tags:
+        - vault-config
+
+    # NOTE: auth/kubernetes-k3s/ — separate from RKE2's auth/kubernetes/
+    - name: Configure Vault kubernetes-k3s auth backend
+      ansible.builtin.command:
+        cmd: >-
+          vault write auth/kubernetes-k3s/config
+          kubernetes_host="https://{{ k3s_init_node_ip }}:6443"
+          token_reviewer_jwt="{{ vault_k8s_reviewer_jwt }}"
+          kubernetes_ca_cert=@/tmp/.vault-k8s-ca.pem
+      delegate_to: localhost
+      become: false
+      no_log: true
+      register: _vault_config_result
+      changed_when: "'Success' in _vault_config_result.stdout"
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      tags:
+        - vault-config
+
+    - name: Clean up temp k8s CA cert file
+      ansible.builtin.file:
+        path: /tmp/.vault-k8s-ca.pem
+        state: absent
+      delegate_to: localhost
+      become: false
+      tags:
+        - vault-config
+
+    - name: Vault auth backend configured
+      ansible.builtin.debug:
+        msg: "Vault kubernetes-k3s auth backend configured for https://{{ k3s_init_node_ip }}:6443"
+      tags:
+        - vault-config
+
+# ---------------------------------------------------------------------------
+# Play 3: Verification — test end-to-end auth flow
+# ---------------------------------------------------------------------------
+- name: "Vault K3s Auth | Verify authentication"
+  hosts: k3s-server-1
+  become: true
+  gather_facts: false
+
+  vars:
+    _kubectl: "{{ k3s_bin_dir | default('/usr/local/bin') }}/kubectl"
+    _kubeconfig: "{{ k3s_config_dir | default('/etc/rancher/k3s') }}/k3s.yaml"
+
+  tasks:
+    # Verify Vault has the correct config
+    - name: Read Vault kubernetes-k3s auth config
+      ansible.builtin.command:
+        cmd: vault read -format=json auth/kubernetes-k3s/config
+      delegate_to: localhost
+      become: false
+      register: _vault_k8s_config
+      changed_when: false
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      tags:
+        - verify
+
+    - name: Verify kubernetes_host is configured correctly
+      ansible.builtin.assert:
+        that:
+          - "k3s_init_node_ip in (_vault_k8s_config.stdout | from_json).data.kubernetes_host"
+        fail_msg: >-
+          Vault kubernetes_host does not contain {{ k3s_init_node_ip }}.
+          Got: {{ (_vault_k8s_config.stdout | from_json).data.kubernetes_host }}
+        success_msg: >-
+          Vault kubernetes-k3s auth backend configured:
+          kubernetes_host={{ (_vault_k8s_config.stdout | from_json).data.kubernetes_host }}
+      tags:
+        - verify
+
+    # Create test ServiceAccount matching the Vault role binding.
+    - name: Create test ServiceAccount for auth verification
+      ansible.builtin.shell:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          create serviceaccount external-secrets -n external-secrets
+          --dry-run=client -o yaml |
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }} apply -f -
+      register: _test_sa
+      changed_when: "'created' in _test_sa.stdout"
+      tags:
+        - verify
+
+    - name: Wait for ServiceAccount to be ready
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          get serviceaccount external-secrets -n external-secrets
+          -o jsonpath='{.metadata.name}'
+      register: _sa_check
+      retries: 6
+      delay: 5
+      until: _sa_check.rc == 0 and _sa_check.stdout == 'external-secrets'
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Generate short-lived token for test SA
+      ansible.builtin.command:
+        cmd: >-
+          {{ _kubectl }} --kubeconfig {{ _kubeconfig }}
+          create token external-secrets -n external-secrets
+          --duration=600s
+      register: _test_jwt
+      changed_when: false
+      tags:
+        - verify
+
+    # NOTE: auth/kubernetes-k3s/login — separate from RKE2
+    - name: Test Vault kubernetes-k3s auth login
+      ansible.builtin.command:
+        cmd: >-
+          vault write -format=json auth/kubernetes-k3s/login
+          role=external-secrets
+          jwt={{ _test_jwt.stdout }}
+      delegate_to: localhost
+      become: false
+      register: _vault_login_test
+      changed_when: false
+      no_log: true
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      tags:
+        - verify
+
+    - name: Display auth test result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault K3s Kubernetes Auth: SUCCESS"
+          - "=========================================="
+          - "Token policies: {{ (_vault_login_test.stdout | from_json).auth.policies | join(', ') }}"
+          - "Token TTL: {{ (_vault_login_test.stdout | from_json).auth.lease_duration }}s"
+          - ""
+          - "Resources created in K3s:"
+          - "  - ServiceAccount: vault-auth (kube-system)"
+          - "  - ClusterRoleBinding: vault-auth-delegator"
+          - "  - Secret: vault-auth-token (kube-system)"
+          - "  - Secret: vault-ca (cert-manager)"
+          - "  - Secret: vault-ca (external-secrets)"
+          - ""
+          - "Vault auth configured:"
+          - "  - Path: auth/kubernetes-k3s/"
+          - "  - kubernetes_host: https://{{ k3s_init_node_ip }}:6443"
+          - "  - Roles: external-secrets, cert-manager"
+          - ""
+          - "Next steps:"
+          - "  1. Deploy platform prereqs: ansible-playbook ansible/playbooks/k3s-platform-deploy.yml"
+          - "  2. Deploy monitoring: ansible-playbook ansible/playbooks/k3s-monitoring-deploy.yml"
+          - "=========================================="
+      tags:
+        - verify

@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# Vault Role Handlers
+# =============================================================================
+# Platform-conditional: systemd on Linux, launchctl on macOS.
+# =============================================================================
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: ansible_os_family != "Darwin"
+
+- name: Restart vault
+  ansible.builtin.shell: |
+    if [ "$(uname)" = "Darwin" ]; then
+      launchctl kickstart -k system/com.example-lab.vault
+    else
+      systemctl restart vault
+    fi
+  changed_when: true
+
+- name: Unload vault launch daemon
+  ansible.builtin.command: launchctl bootout system/com.example-lab.vault
+  failed_when: false
+  changed_when: true
+  when: ansible_os_family == "Darwin"
+
+- name: Load vault launch daemon
+  ansible.builtin.command: launchctl bootstrap system /Library/LaunchDaemons/com.example-lab.vault.plist
+  changed_when: true
+  when: ansible_os_family == "Darwin"
+
+- name: Restorecon vault dirs
+  ansible.builtin.command: >
+    restorecon -Rv {{ vault_data_dir }} {{ vault_config_dir }} {{ vault_log_dir }}
+  when: ansible_os_family == "RedHat"
+
+- name: Wait for vault after restart
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ vault_api_port }}/v1/sys/health"
+    method: GET
+    validate_certs: false
+    status_code: [200, 429, 472, 473, 501, 503]
+  retries: 10
+  delay: 3
+  register: vault_health_after_restart
+  until: vault_health_after_restart.status is defined
+  listen: Restart vault

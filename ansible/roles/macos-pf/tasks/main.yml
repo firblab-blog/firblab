@@ -1,0 +1,56 @@
+---
+# =============================================================================
+# macOS pf Firewall
+# =============================================================================
+# Deploys pf.conf with strict inbound rules and a launchd daemon to ensure
+# rules persist across reboots.
+#
+# Based on: lab-macmini/ansible/roles/mac.pf
+# =============================================================================
+
+- name: Deploy pf.conf
+  ansible.builtin.template:
+    src: pf.conf.j2
+    dest: /etc/pf.conf
+    owner: root
+    group: wheel
+    mode: "0644"
+  become: true
+  tags:
+    - firewall
+    - security
+
+# Load the new rules into kernel immediately, BEFORE enabling pf.
+# This prevents a race where pfctl -e activates stale in-kernel rules.
+- name: Load pf rules from config
+  ansible.builtin.command: pfctl -f /etc/pf.conf
+  become: true
+  changed_when: true
+  tags:
+    - firewall
+    - security
+
+- name: Ensure pf is enabled
+  ansible.builtin.command: pfctl -e
+  become: true
+  register: pf_enable
+  changed_when: "'pf enabled' in pf_enable.stderr"
+  failed_when: false
+  tags:
+    - firewall
+    - security
+
+- name: Install pf launch daemon
+  ansible.builtin.template:
+    src: pf.launchd.plist.j2
+    dest: /Library/LaunchDaemons/com.example-lab.pfctl.plist
+    owner: root
+    group: wheel
+    mode: "0644"
+  become: true
+  notify:
+    - Unload pf launch daemon
+    - Load pf launch daemon
+  tags:
+    - firewall
+    - security

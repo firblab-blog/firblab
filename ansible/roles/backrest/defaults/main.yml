@@ -1,0 +1,73 @@
+---
+# =============================================================================
+# Backrest — Default Variables
+# =============================================================================
+# Web UI for monitoring Restic backup repositories. Connects to local
+# filesystem repos (bind-mounted from hdd-mirror-0) for read-only browsing
+# of snapshots, verifying backup health, and restoring files.
+#
+# Backrest is a single Go binary — no Docker, no dependencies, no database.
+# Runs as a systemd service with security hardening.
+#
+# Security: Backrest is behind Traefik reverse proxy + Authentik ForwardAuth.
+# Access via https://backrest.home.example-lab.org (requires Authentik SSO login).
+# Backrest's own bcrypt authentication provides a second layer.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Binary
+# ---------------------------------------------------------------------------
+# Release from https://github.com/garethgeorge/backrest/releases
+# renovate: datasource=github-releases depName=garethgeorge/backrest
+backrest_version: "1.11.2"
+backrest_arch: "x86_64"
+backrest_binary: "/usr/local/bin/backrest"
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+# BACKREST_PORT accepts address:port format.
+# 0.0.0.0 = all interfaces. Protected by UFW + Traefik + Authentik ForwardAuth.
+backrest_listen: "0.0.0.0:9898"
+backrest_port: 9898
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+backrest_config_dir: "/etc/backrest"
+backrest_config_file: "/etc/backrest/config.json"
+backrest_data_dir: "/var/lib/backrest"
+backrest_cache_dir: "/var/cache/backrest"
+
+# ---------------------------------------------------------------------------
+# Service User
+# ---------------------------------------------------------------------------
+# backrest user is added to the restic group for read access to repos.
+# Run as the restic user so Backrest can read restic repos (keys/ dirs are 0700
+# restic:restic — a separate backrest user can't access them even with group membership).
+backrest_user: "restic"
+backrest_group: "restic"
+
+# ---------------------------------------------------------------------------
+# Authentication (set by deploy playbook from Vault)
+# ---------------------------------------------------------------------------
+# backrest_admin_user: "admin"
+# backrest_admin_password_bcrypt: "<bcrypt hash from Vault>"
+
+# ---------------------------------------------------------------------------
+# Repositories to monitor (set by deploy playbook)
+# ---------------------------------------------------------------------------
+# Each repo points to a local path under the bind-mounted ZFS pool.
+# backrest_repos:
+#   - id: "lab-02"
+#     path: "/mnt/restic/lab-02"
+#   - id: "lab-03"
+#     path: "/mnt/restic/lab-03"
+#   - id: "lab-04"
+#     path: "/mnt/restic/lab-04"
+backrest_repos: []
+
+# ---------------------------------------------------------------------------
+# Instance Name
+# ---------------------------------------------------------------------------
+backrest_instance: "firblab-backup"

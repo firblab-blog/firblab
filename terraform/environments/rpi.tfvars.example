@@ -1,0 +1,20 @@
+# =============================================================================
+# Environment: RPi5 CM5 (Vault Standby - Bare Metal)
+# =============================================================================
+# Copy to rpi.tfvars and fill in real values.
+# NEVER commit the real .tfvars file to version control.
+#
+# Note: The RPi5 runs Ubuntu 24.04 ARM64 bare metal.
+# It is not managed by Proxmox — Vault is deployed via Ansible directly.
+# These values are used by Ansible playbooks, not Terraform.
+# =============================================================================
+
+# RPi5 SSH access
+rpi_host     = "10.0.10.13"
+rpi_user     = "admin"
+rpi_ssh_key  = "~/.ssh/id_ed25519"
+
+# Vault configuration
+vault_node_id    = "vault-3"
+vault_api_port   = 8200
+vault_cluster_port = 8201

@@ -1,0 +1,239 @@
+# =============================================================================
+# FirbLab Hetzner Gateway — Docker Compose
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway
+# Playbook: ansible/playbooks/gateway-deploy.yml
+#
+# To add/remove a service: edit this template + traefik-services.yml.j2,
+# then run: ansible-playbook ansible/playbooks/gateway-deploy.yml
+# =============================================================================
+
+networks:
+  firblab:
+    driver: bridge
+
+volumes:
+  uptime-kuma-data:
+  gotify-data:
+  crowdsec-db:
+  crowdsec-config:
+  traefik-certs:
+  wireguard-data:
+  alloy-data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Traefik — reverse proxy + TLS termination
+  # ---------------------------------------------------------------------------
+  # network_mode: host is required so Traefik can reach homelab backend services
+  # at 10.0.20.x/30.x via the wg0 WireGuard routes on the host routing table.
+  # Without this, Traefik on a Docker bridge network cannot route to those IPs.
+  traefik:
+    image: {{ gateway_traefik_image }}
+    container_name: traefik
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - {{ gateway_traefik_dir }}/traefik.yml:/etc/traefik/traefik.yml:ro
+      - {{ gateway_traefik_dir }}/dynamic:/etc/traefik/dynamic:ro
+      - traefik-certs:/letsencrypt
+      - /var/log/traefik:/var/log/traefik
+    environment:
+      - TZ=UTC
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # AdGuard Home — DNS filtering for WireGuard clients
+  # ---------------------------------------------------------------------------
+  adguard:
+    image: {{ gateway_adguard_image }}
+    container_name: adguard
+    restart: unless-stopped
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "853:853/tcp"
+      - "3000:3000/tcp"
+    volumes:
+      - {{ gateway_adguard_dir }}/conf:/opt/adguardhome/conf
+      - {{ gateway_adguard_dir }}/work:/opt/adguardhome/work
+    networks:
+      - firblab
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Uptime Kuma — service uptime monitoring
+  # ---------------------------------------------------------------------------
+  uptime-kuma:
+    image: {{ gateway_uptime_kuma_image }}
+    container_name: uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - firblab
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Gotify — push notification server (Alertmanager webhook target)
+  # ---------------------------------------------------------------------------
+  gotify:
+    image: {{ gateway_gotify_image }}
+    container_name: gotify
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - gotify-data:/app/data
+    environment:
+      - GOTIFY_DEFAULTUSER_NAME=admin
+      - GOTIFY_DEFAULTUSER_PASS={{ gateway_gotify_password }}
+    networks:
+      - firblab
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # CrowdSec — threat detection (reads auth.log + syslog + Traefik logs)
+  # ---------------------------------------------------------------------------
+  crowdsec:
+    image: {{ gateway_crowdsec_image }}
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd crowdsecurity/traefik
+      - GID=1000
+    volumes:
+      - crowdsec-db:/var/lib/crowdsec/data/
+      - crowdsec-config:/etc/crowdsec/
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/syslog:/var/log/syslog:ro
+      - /var/log/traefik:/var/log/traefik:ro
+    networks:
+      - firblab
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Fail2ban — SSH rate limiting (iptables-based)
+  # ---------------------------------------------------------------------------
+  fail2ban:
+    image: {{ gateway_fail2ban_image }}
+    container_name: fail2ban
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - {{ gateway_fail2ban_dir }}:/data
+      - /var/log:/var/log:ro
+    environment:
+      - TZ=UTC
+      - VERBOSITY=-vv
+
+  # ---------------------------------------------------------------------------
+  # Watchtower — container update monitor
+  # ---------------------------------------------------------------------------
+  # NOTE: Since we pin image versions in this compose file, Watchtower is set
+  # to monitor-only mode (WATCHTOWER_MONITOR_ONLY=true). It will report when
+  # updates are available but NOT auto-apply them. Upgrade by updating image
+  # tags in ansible/roles/hetzner-gateway/defaults/main.yml and re-running
+  # the playbook — this creates a tracked, reviewable change.
+  watchtower:
+    image: {{ gateway_watchtower_image }}
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_MONITOR_ONLY=true
+      - WATCHTOWER_SCHEDULE=0 0 3 * * *
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      - WATCHTOWER_REVIVE_STOPPED=false
+      - DOCKER_API_VERSION=1.44
+    networks:
+      - firblab
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # WireGuard — VPN server
+  # ---------------------------------------------------------------------------
+  # NOTE: network_mode: host required for wg0 interface to be on the host's
+  # routing table. Phase 8.6 of cloud-init adds homelab subnet routes through
+  # wg0. Without host networking, those routes would be invisible to Traefik.
+  wireguard:
+    image: {{ gateway_wireguard_image }}
+    container_name: wireguard
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # SERVERURL is already set during bootstrap — do not override here or
+      # WireGuard will regenerate keys and invalidate all existing peer configs.
+      - SERVERPORT={{ gateway_wireguard_port }}
+      - PEERDNS=auto
+      - INTERNAL_SUBNET={{ gateway_wireguard_network }}
+      - ALLOWEDIPS=0.0.0.0/0
+      - LOG_CONFS=true
+    volumes:
+      - wireguard-data:/config
+      - /lib/modules:/lib/modules:ro
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Prometheus node_exporter — host metrics for Prometheus scraping
+  # ---------------------------------------------------------------------------
+  # Binds to the WireGuard interface IP only — not publicly exposed.
+  # Prometheus on the RKE2 cluster (10.0.20.40-52) scrapes via WireGuard.
+  # Verify routing: `ip route show | grep 10.8.0` on an RKE2 node.
+  node-exporter:
+    image: {{ gateway_node_exporter_image }}
+    container_name: node-exporter
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - "--web.listen-address={{ gateway_wireguard_ip }}:9100"
+      - "--path.rootfs=/host"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /:/host:ro,rslave
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Grafana Alloy — log shipping to Loki via WireGuard tunnel
+  # ---------------------------------------------------------------------------
+  # Ships Traefik access logs and auth.log to Loki on the RKE2 cluster.
+  # Pattern: identical to ansible/roles/honeypot/templates/alloy-config.alloy.j2
+  alloy:
+    image: {{ gateway_alloy_image }}
+    container_name: alloy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - {{ gateway_alloy_dir }}/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/log/traefik:/var/log/traefik:ro
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - alloy-data:/var/lib/alloy
+    command: run /etc/alloy/config.alloy
+    security_opt:
+      - no-new-privileges:true

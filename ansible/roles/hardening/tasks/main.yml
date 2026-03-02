@@ -1,0 +1,284 @@
+---
+# =============================================================================
+# Hardening Role - CIS L1 and DevSec Baseline
+# =============================================================================
+# Applies CIS Level 1 hardening controls: SSH hardening, kernel parameters,
+# filesystem restrictions, audit logging, password quality, MAC (AppArmor or
+# SELinux), and AIDE.
+#
+# Supports: Debian/Ubuntu (AppArmor) and RedHat/Rocky (SELinux)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Security Packages (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family security package tasks
+  ansible.builtin.include_tasks: "security-packages-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - packages
+    - security
+
+# ---------------------------------------------------------------------------
+# SSH Hardening
+# ---------------------------------------------------------------------------
+- name: Harden SSH - PermitRootLogin
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PermitRootLogin"
+    line: "PermitRootLogin {{ ssh_permit_root_login | default('no') }}"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - PasswordAuthentication
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PasswordAuthentication"
+    line: "PasswordAuthentication no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - MaxAuthTries
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?MaxAuthTries"
+    line: "MaxAuthTries 3"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - X11Forwarding
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?X11Forwarding"
+    line: "X11Forwarding no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - AllowTcpForwarding
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?AllowTcpForwarding"
+    line: "AllowTcpForwarding {{ ssh_allow_tcp_forwarding | default('no') }}"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - Protocol version
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?Protocol"
+    line: "Protocol 2"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Harden SSH - LoginGraceTime
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?LoginGraceTime"
+    line: "LoginGraceTime 30"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+# ---------------------------------------------------------------------------
+# Password Quality (pam_pwquality)
+# ---------------------------------------------------------------------------
+- name: Configure password quality requirements
+  ansible.builtin.lineinfile:
+    path: /etc/security/pwquality.conf
+    regexp: "^#?\\s*{{ item.key }}"
+    line: "{{ item.key }} = {{ item.value }}"
+    state: present
+  loop:
+    - { key: "minlen", value: "14" }
+    - { key: "dcredit", value: "-1" }
+    - { key: "ucredit", value: "-1" }
+    - { key: "ocredit", value: "-1" }
+    - { key: "lcredit", value: "-1" }
+    - { key: "maxrepeat", value: "3" }
+    - { key: "maxclassrepeat", value: "4" }
+    - { key: "retry", value: "3" }
+  tags:
+    - pam
+    - security
+
+# ---------------------------------------------------------------------------
+# Kernel Security Parameters (sysctl)
+# ---------------------------------------------------------------------------
+- name: Set kernel security parameters
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+  loop:
+    # Reverse path filtering (anti-spoofing)
+    - { name: "net.ipv4.conf.all.rp_filter", value: "1" }
+    - { name: "net.ipv4.conf.default.rp_filter", value: "1" }
+    # ASLR (address space layout randomization)
+    - { name: "kernel.randomize_va_space", value: "2" }
+    # Disable IP source routing
+    - { name: "net.ipv4.conf.all.accept_source_route", value: "0" }
+    - { name: "net.ipv4.conf.default.accept_source_route", value: "0" }
+    # Disable ICMP redirect acceptance
+    - { name: "net.ipv4.conf.all.accept_redirects", value: "0" }
+    - { name: "net.ipv4.conf.default.accept_redirects", value: "0" }
+    - { name: "net.ipv4.conf.all.secure_redirects", value: "0" }
+    - { name: "net.ipv4.conf.default.secure_redirects", value: "0" }
+    # Disable ICMP redirect sending
+    - { name: "net.ipv4.conf.all.send_redirects", value: "0" }
+    - { name: "net.ipv4.conf.default.send_redirects", value: "0" }
+    # Log suspicious packets
+    - { name: "net.ipv4.conf.all.log_martians", value: "1" }
+    - { name: "net.ipv4.conf.default.log_martians", value: "1" }
+    # Ignore ICMP broadcast requests
+    - { name: "net.ipv4.icmp_echo_ignore_broadcasts", value: "1" }
+    # Ignore bogus ICMP error responses
+    - { name: "net.ipv4.icmp_ignore_bogus_error_responses", value: "1" }
+    # SYN flood protection
+    - { name: "net.ipv4.tcp_syncookies", value: "1" }
+    # Disable IPv6 router advertisements
+    - { name: "net.ipv6.conf.all.accept_ra", value: "0" }
+    - { name: "net.ipv6.conf.default.accept_ra", value: "0" }
+    # Restrict kernel pointer access
+    - { name: "kernel.kptr_restrict", value: "2" }
+    # Restrict dmesg access
+    - { name: "kernel.dmesg_restrict", value: "1" }
+    # Restrict core dumps
+    - { name: "fs.suid_dumpable", value: "0" }
+  tags:
+    - sysctl
+    - security
+
+# ---------------------------------------------------------------------------
+# File Permissions (CIS L1)
+# ---------------------------------------------------------------------------
+- name: Set restrictive permissions on cron files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - /etc/crontab
+    - /etc/cron.hourly
+    - /etc/cron.daily
+    - /etc/cron.weekly
+    - /etc/cron.monthly
+    - /etc/cron.d
+  failed_when: false
+  tags:
+    - permissions
+    - security
+
+# Shadow group: Debian uses 'shadow', RedHat uses 'root'
+- name: Set restrictive permissions on passwd and shadow files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/etc/passwd", mode: "0644" }
+    - { path: "/etc/group", mode: "0644" }
+    - { path: "/etc/shadow", mode: "0640", group: "{{ 'root' if ansible_os_family == 'RedHat' else 'shadow' }}" }
+    - { path: "/etc/gshadow", mode: "0640", group: "{{ 'root' if ansible_os_family == 'RedHat' else 'shadow' }}" }
+  tags:
+    - permissions
+    - security
+
+# ---------------------------------------------------------------------------
+# Disable Unused Filesystems
+# ---------------------------------------------------------------------------
+- name: Disable unused filesystems
+  ansible.builtin.copy:
+    dest: "/etc/modprobe.d/{{ item }}.conf"
+    content: |
+      # CIS - Disable {{ item }} filesystem
+      install {{ item }} /bin/true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - cramfs
+    - freevxfs
+    - jffs2
+    - hfs
+    - hfsplus
+    - udf
+  tags:
+    - filesystems
+    - security
+
+# ---------------------------------------------------------------------------
+# Disable USB Storage (removable media policy)
+# ---------------------------------------------------------------------------
+# Prevents data exfiltration and unauthorized device attachment on headless
+# servers. Override with usb_storage_enabled=true for hosts that need it.
+- name: Disable USB storage kernel module
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/usb-storage.conf
+    content: |
+      # Security hardening - disable USB mass storage
+      install usb-storage /bin/true
+      blacklist usb-storage
+    owner: root
+    group: root
+    mode: "0644"
+  when: not (usb_storage_enabled | default(false) | bool)
+  tags:
+    - usb
+    - security
+
+# ---------------------------------------------------------------------------
+# Mandatory Access Control (OS-family dispatch: AppArmor vs SELinux)
+# ---------------------------------------------------------------------------
+- name: Include OS-family MAC tasks
+  ansible.builtin.include_tasks: "mac-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - security
+
+# ---------------------------------------------------------------------------
+# Auditd Configuration (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family audit tasks
+  ansible.builtin.include_tasks: "audit-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - audit
+    - security
+
+# ---------------------------------------------------------------------------
+# AIDE (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family AIDE tasks
+  ansible.builtin.include_tasks: "aide-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - aide
+    - security

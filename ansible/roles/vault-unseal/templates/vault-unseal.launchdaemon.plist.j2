@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Vault Unseal Instance LaunchDaemon
+  Managed by Ansible - DO NOT EDIT MANUALLY
+  Host: {{ inventory_hostname }}
+  Port: {{ vault_unseal_port }}
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ vault_unseal_launchd_label }}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ vault_unseal_binary_path }}</string>
+    <string>server</string>
+    <string>-config={{ vault_unseal_config_dir }}/vault-unseal.hcl</string>
+  </array>
+
+  <key>UserName</key>
+  <string>{{ vault_unseal_user }}</string>
+
+  <key>GroupName</key>
+  <string>{{ vault_unseal_group }}</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VAULT_ADDR</key>
+    <string>https://127.0.0.1:{{ vault_unseal_port }}</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{ vault_unseal_data_dir }}</string>
+
+  <key>StandardOutPath</key>
+  <string>{{ vault_unseal_log_dir }}/vault-unseal.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{ vault_unseal_log_dir }}/vault-unseal-error.log</string>
+
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+    <key>NumberOfProcesses</key>
+    <integer>65536</integer>
+  </dict>
+
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+    <key>NumberOfProcesses</key>
+    <integer>65536</integer>
+  </dict>
+</dict>
+</plist>

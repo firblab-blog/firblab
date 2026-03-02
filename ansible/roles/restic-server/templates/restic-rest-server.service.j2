@@ -1,0 +1,37 @@
+# Managed by Ansible — DO NOT EDIT MANUALLY
+[Unit]
+Description=Restic REST Server (Backup Storage)
+Documentation=https://github.com/restic/rest-server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ restic_server_user }}
+Group={{ restic_server_group }}
+
+ExecStart={{ restic_server_binary }} \
+  --listen {{ restic_server_listen }} \
+  --path {{ restic_server_data_dir }} \
+  --htpasswd-file {{ restic_server_htpasswd_file }} \
+{% if restic_server_append_only %}
+  --append-only \
+{% endif %}
+  --private-repos \
+  --prometheus \
+  --prometheus-no-auth
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths={{ restic_server_data_dir }}
+ReadOnlyPaths={{ restic_server_htpasswd_file }}
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

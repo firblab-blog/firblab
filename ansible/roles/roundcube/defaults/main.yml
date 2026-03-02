@@ -1,0 +1,32 @@
+---
+# =============================================================================
+# Roundcube Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Container images — pinned for reproducibility
+roundcube_image: "roundcube/roundcubemail:1.6.13-apache"
+roundcube_postgres_image: "postgres:16-alpine"
+
+# Install directory
+roundcube_data_dir: /opt/roundcube
+
+# Web port (mapped to container port 80)
+roundcube_port: 8080
+
+# IMAP (Migadu)
+roundcube_imap_host: "ssl://imap.migadu.com"
+roundcube_imap_port: 993
+
+# SMTP (Migadu)
+roundcube_smtp_host: "tls://smtp.migadu.com"
+roundcube_smtp_port: 587
+
+# ManageSieve (Migadu — server-side mail filter editing)
+roundcube_managesieve_host: "ssl://imap.migadu.com"
+
+# UI / behavior
+roundcube_skin: "elastic"
+roundcube_upload_max_filesize: "25M"
+roundcube_plugins: "archive,zipdownload,managesieve"

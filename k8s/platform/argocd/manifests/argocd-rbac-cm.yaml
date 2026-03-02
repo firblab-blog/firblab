@@ -1,0 +1,23 @@
+# =============================================================================
+# ArgoCD RBAC ConfigMap — Group-Based Access Control
+# =============================================================================
+# Maps Authentik groups to ArgoCD roles:
+#   authentik-admins → role:admin (full access)
+#   Everyone else    → role:readonly (view only)
+#
+# The 'groups' scope in the OIDC config provides group membership claims.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  policy.default: role:readonly
+  policy.csv: |
+    g, authentik-admins, role:admin
+  scopes: '[groups]'

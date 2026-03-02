@@ -1,0 +1,143 @@
+---
+# =============================================================================
+# Vault Unseal — Linux User/Group + Binary Install
+# =============================================================================
+# Creates system user/group and downloads the linux binary.
+# Extracted from the original vault-unseal/tasks/main.yml.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service Account
+# ---------------------------------------------------------------------------
+- name: Create unseal-vault group
+  ansible.builtin.group:
+    name: "{{ vault_unseal_group }}"
+    system: true
+    state: present
+  tags:
+    - install
+
+- name: Create unseal-vault user
+  ansible.builtin.user:
+    name: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /opt/unseal-vault
+    create_home: false
+    comment: "Vault unseal service account"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Determine architecture and OS for download
+# ---------------------------------------------------------------------------
+- name: Set resolved architecture and OS for unseal vault download
+  ansible.builtin.set_fact:
+    vault_unseal_arch_resolved: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+    vault_unseal_os_resolved: "linux"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Download and Install Vault Binary
+# ---------------------------------------------------------------------------
+- name: Check if unseal vault binary is already installed at desired version
+  ansible.builtin.command:
+    cmd: "{{ vault_unseal_binary_path }} version"
+  register: vault_unseal_current_version
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Set vault_unseal_needs_install fact
+  ansible.builtin.set_fact:
+    vault_unseal_needs_install: >-
+      {{ vault_unseal_current_version.rc != 0 or
+         ('Vault v' + vault_version) not in (vault_unseal_current_version.stdout | default('')) }}
+  tags:
+    - install
+
+- name: Download Vault binary archive for unseal instance
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_linux_{{ vault_unseal_arch_resolved }}.zip"
+    dest: "/tmp/vault-unseal_{{ vault_version }}_linux_{{ vault_unseal_arch_resolved }}.zip"
+    mode: "0644"
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+
+- name: Download Vault SHA256SUMS for verification
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_SHA256SUMS"
+    dest: "/tmp/vault-unseal_{{ vault_version }}_SHA256SUMS"
+    mode: "0644"
+    force: true
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+
+- name: Verify unseal vault archive checksum (Linux)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected=$(grep "vault_{{ vault_version }}_linux_{{ vault_unseal_arch_resolved }}.zip" \
+      /tmp/vault-unseal_{{ vault_version }}_SHA256SUMS | awk '{print $1}')
+    actual=$(sha256sum /tmp/vault-unseal_{{ vault_version }}_linux_{{ vault_unseal_arch_resolved }}.zip | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+      echo "CHECKSUM MISMATCH: expected=$expected actual=$actual" >&2
+      exit 1
+    fi
+    echo "Checksum verified: $actual"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+    - verify
+
+- name: Ensure /opt/unseal-vault directory exists
+  ansible.builtin.file:
+    path: /opt/unseal-vault
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - install
+
+- name: Extract Vault binary for unseal instance (Linux)
+  ansible.builtin.unarchive:
+    src: "/tmp/vault-unseal_{{ vault_version }}_linux_{{ vault_unseal_arch_resolved }}.zip"
+    dest: /opt/unseal-vault/
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: vault_unseal_needs_install | bool
+  notify: Restart vault-unseal
+  tags:
+    - install
+
+- name: Set IPC_LOCK capability on unseal Vault binary
+  community.general.capabilities:
+    path: "{{ vault_unseal_binary_path }}"
+    capability: cap_ipc_lock=+ep
+    state: present
+  tags:
+    - install
+
+- name: Verify unseal vault binary is functional
+  ansible.builtin.command:
+    cmd: "{{ vault_unseal_binary_path }} version"
+  register: vault_unseal_version_check
+  changed_when: false
+  tags:
+    - install
+
+- name: Display installed unseal vault version
+  ansible.builtin.debug:
+    msg: "Unseal Vault: {{ vault_unseal_version_check.stdout }}"
+  tags:
+    - install

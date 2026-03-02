@@ -1,0 +1,19 @@
+---
+# =============================================================================
+# Security Packages — Debian/Ubuntu
+# =============================================================================
+
+- name: Install security packages (Debian)
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+      - aide
+      - aide-common
+      - apparmor-utils
+      - libpam-pwquality
+    state: present
+    update_cache: true
+  tags:
+    - packages
+    - security

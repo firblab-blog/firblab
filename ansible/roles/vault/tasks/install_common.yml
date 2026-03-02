@@ -1,0 +1,183 @@
+---
+# =============================================================================
+# Vault — Common Installation Tasks (Cross-Platform)
+# =============================================================================
+# Directories, binary download/verify, and configuration templating.
+# User/group must already be created by install_linux.yml or install_darwin.yml.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Vault directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default(vault_user) }}"
+    group: "{{ item.group | default(vault_group) }}"
+    mode: "{{ item.mode | default('0750') }}"
+  loop:
+    - path: "{{ vault_data_dir }}"
+      mode: "0700"
+    - path: "{{ vault_config_dir }}"
+      mode: "0750"
+    - path: "{{ vault_tls_dir }}"
+      mode: "0750"
+    - path: "{{ vault_log_dir }}"
+      mode: "0750"
+  tags:
+    - install
+    - directories
+
+# ---------------------------------------------------------------------------
+# Download and Install Vault Binary
+# ---------------------------------------------------------------------------
+- name: Determine system architecture and OS for Vault download
+  ansible.builtin.set_fact:
+    vault_arch_resolved: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+    vault_os_resolved: "{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}"
+  tags:
+    - install
+
+- name: Check if Vault is already installed at desired version
+  ansible.builtin.command:
+    cmd: "{{ vault_binary_path }} version"
+  register: vault_current_version
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Set vault_needs_install fact
+  ansible.builtin.set_fact:
+    vault_needs_install: >-
+      {{ vault_current_version.rc != 0 or
+         ('Vault v' + vault_version) not in (vault_current_version.stdout | default('')) }}
+  tags:
+    - install
+
+- name: Download Vault SHA256SUMS
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_SHA256SUMS"
+    dest: "/tmp/vault_{{ vault_version }}_SHA256SUMS"
+    mode: "0644"
+    force: true
+  when: vault_needs_install | bool
+  tags:
+    - install
+
+- name: Download Vault SHA256SUMS signature
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_SHA256SUMS.sig"
+    dest: "/tmp/vault_{{ vault_version }}_SHA256SUMS.sig"
+    mode: "0644"
+    force: true
+  when: vault_needs_install | bool
+  tags:
+    - install
+
+- name: Download Vault binary archive
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_{{ vault_os_resolved }}_{{ vault_arch_resolved }}.zip"
+    dest: "/tmp/vault_{{ vault_version }}_{{ vault_os_resolved }}_{{ vault_arch_resolved }}.zip"
+    mode: "0644"
+  when: vault_needs_install | bool
+  tags:
+    - install
+
+- name: Verify Vault archive checksum against SHA256SUMS
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ARCHIVE="vault_{{ vault_version }}_{{ vault_os_resolved }}_{{ vault_arch_resolved }}.zip"
+    expected=$(grep "$ARCHIVE" /tmp/vault_{{ vault_version }}_SHA256SUMS | awk '{print $1}')
+    {% if ansible_os_family == 'Darwin' %}
+    actual=$(shasum -a 256 /tmp/$ARCHIVE | awk '{print $1}')
+    {% else %}
+    actual=$(sha256sum /tmp/$ARCHIVE | awk '{print $1}')
+    {% endif %}
+    if [ "$expected" != "$actual" ]; then
+      echo "CHECKSUM MISMATCH: expected=$expected actual=$actual" >&2
+      exit 1
+    fi
+    echo "Checksum verified: $actual"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: vault_needs_install | bool
+  tags:
+    - install
+    - verify
+
+- name: Extract Vault binary
+  ansible.builtin.unarchive:
+    src: "/tmp/vault_{{ vault_version }}_{{ vault_os_resolved }}_{{ vault_arch_resolved }}.zip"
+    dest: "{{ vault_binary_path | dirname }}"
+    remote_src: true
+    owner: root
+    group: "{{ 'wheel' if ansible_os_family == 'Darwin' else 'root' }}"
+    mode: "0755"
+  when: vault_needs_install | bool
+  notify: Restart vault
+  tags:
+    - install
+
+- name: Verify Vault binary is functional
+  ansible.builtin.command:
+    cmd: "{{ vault_binary_path }} version"
+  register: vault_installed_version
+  changed_when: false
+  tags:
+    - install
+    - verify
+
+- name: Display installed Vault version
+  ansible.builtin.debug:
+    msg: "Installed: {{ vault_installed_version.stdout }}"
+  tags:
+    - install
+    - verify
+
+# ---------------------------------------------------------------------------
+# Vault Configuration
+# ---------------------------------------------------------------------------
+- name: Template Vault configuration file
+  ansible.builtin.template:
+    src: vault.hcl.j2
+    dest: "{{ vault_config_dir }}/vault.hcl"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0640"
+    backup: true
+  notify: Restart vault
+  tags:
+    - configure
+
+- name: Template Vault environment file
+  ansible.builtin.copy:
+    dest: "{{ vault_config_dir }}/vault.env"
+    content: |
+      VAULT_ADDR={{ vault_api_addr }}
+      VAULT_CACERT={{ vault_tls_ca_file }}
+      {% if ansible_os_family != 'Darwin' %}
+      DBUS_SESSION_BUS_ADDRESS=/dev/null
+      {% endif %}
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0640"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Clean up downloaded archives
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/vault_{{ vault_version }}_{{ vault_os_resolved }}_{{ vault_arch_resolved }}.zip"
+    - "/tmp/vault_{{ vault_version }}_SHA256SUMS"
+    - "/tmp/vault_{{ vault_version }}_SHA256SUMS.sig"
+  tags:
+    - install
+    - cleanup

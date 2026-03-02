@@ -1,0 +1,11 @@
+---
+# =============================================================================
+# Honeypot Server Host Variables
+# =============================================================================
+# Firewall rules for the honeypot (consumed by common role if applied).
+# The ansible_host IP is set in hosts.yml and kept in sync with Terraform
+# output (secret/infra/hetzner/server_ips in Vault).
+#
+# The honeypot-deploy.yml playbook resolves the live IP from Vault at
+# runtime, so deploys always use the correct IP even if hosts.yml is stale.
+# =============================================================================

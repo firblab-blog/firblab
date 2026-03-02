@@ -1,0 +1,254 @@
+# =============================================================================
+# Archive Appliance Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+#
+# Prepper-grade offline knowledge base stack:
+#   - Kiwix Serve:   Offline Wikipedia, StackExchange, iFixit, Gutenberg
+#   - ArchiveBox:    Web page archiving (HTML, PDF, WARC, screenshots)
+#   - BookStack:     Personal wiki / knowledge base
+#   - Stirling PDF:  PDF merge/split/OCR tools
+#   - Wallabag:      Read-it-later / article archiver
+#   - FileBrowser:   Web file manager for all storage
+#   - TileServer GL: Offline vector map tiles (OpenMapTiles/OpenFreeMap)
+#   - Calibre-Web:   Ebook library browser (EPUB, MOBI, PDF)
+# =============================================================================
+
+services:
+{% if archive_filebrowser_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # FileBrowser — Web file manager for NFS archive + local storage
+  # -------------------------------------------------------------------
+  filebrowser:
+    image: {{ archive_filebrowser_image }}
+    container_name: filebrowser
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_filebrowser_port }}:80"
+    volumes:
+      - {{ archive_data_dir }}:/srv/data
+      - {{ archive_cold_dir }}:/srv/cold
+{% if archive_nfs_enabled | default(false) | bool %}
+      - {{ archive_mount_point }}:/srv/archive
+{% endif %}
+      - {{ archive_install_dir }}/filebrowser.db:/database/filebrowser.db
+    environment:
+      FB_NOAUTH: "false"
+{% endif %}
+
+{% if archive_kiwix_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # Kiwix Serve — Offline Wikipedia, StackExchange, iFixit, etc.
+  # -------------------------------------------------------------------
+  # NOTE: Kiwix will restart-loop until ZIM files are downloaded into
+  # {{ archive_kiwix_zim_dir }}. This is expected on first deploy.
+  # Run: /opt/archive/scripts/zim-download.sh
+  kiwix:
+    image: {{ archive_kiwix_image }}
+    container_name: kiwix
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_kiwix_port }}:8080"
+    volumes:
+      - {{ archive_kiwix_zim_dir }}:/data:ro
+    command: ['*.zim']
+{% endif %}
+
+{% if archive_archivebox_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # ArchiveBox — Web page archiving
+  # -------------------------------------------------------------------
+  archivebox:
+    image: {{ archive_archivebox_image }}
+    container_name: archivebox
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_archivebox_port }}:8000"
+    volumes:
+      - {{ archive_data_dir }}/archivebox:/data
+    environment:
+      ALLOWED_HOSTS: "*"
+      SEARCH_BACKEND_ENGINE: ""
+      CHECK_SSL_VALIDITY: "true"
+{% endif %}
+
+{% if archive_bookstack_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # BookStack — Personal wiki / knowledge base
+  # -------------------------------------------------------------------
+  bookstack:
+    image: {{ archive_bookstack_image }}
+    container_name: bookstack
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_bookstack_port }}:80"
+    volumes:
+      - {{ archive_data_dir }}/bookstack/uploads:/config
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "America/New_York"
+      APP_KEY: "{{ archive_bookstack_app_key }}"
+      APP_URL: "{{ archive_bookstack_app_url }}"
+      DB_HOST: bookstack-db
+      DB_PORT: "3306"
+      DB_USERNAME: "{{ archive_bookstack_db_user }}"
+      DB_PASSWORD: "{{ archive_bookstack_db_password }}"
+      DB_DATABASE: "{{ archive_bookstack_db_name }}"
+    depends_on:
+      bookstack-db:
+        condition: service_healthy
+    networks:
+      - archive-net
+
+  bookstack-db:
+    image: {{ archive_bookstack_mariadb_image }}
+    container_name: bookstack-db
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - {{ archive_data_dir }}/bookstack/db:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ archive_bookstack_db_root_password }}"
+      MYSQL_DATABASE: "{{ archive_bookstack_db_name }}"
+      MYSQL_USER: "{{ archive_bookstack_db_user }}"
+      MYSQL_PASSWORD: "{{ archive_bookstack_db_password }}"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - archive-net
+{% endif %}
+
+{% if archive_stirlingpdf_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # Stirling PDF — Local PDF tools (merge, split, OCR, convert)
+  # -------------------------------------------------------------------
+  stirlingpdf:
+    image: {{ archive_stirlingpdf_image }}
+    container_name: stirlingpdf
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_stirlingpdf_port }}:8080"
+    volumes:
+      - {{ archive_data_dir }}/stirlingpdf/training:/usr/share/tessdata
+      - {{ archive_data_dir }}/stirlingpdf/config:/configs
+{% endif %}
+
+{% if archive_wallabag_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # Wallabag — Read-it-later / article archiver
+  # -------------------------------------------------------------------
+  wallabag:
+    image: {{ archive_wallabag_image }}
+    container_name: wallabag
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_wallabag_port }}:80"
+    volumes:
+      - {{ archive_data_dir }}/wallabag/data:/var/www/wallabag/data
+      - {{ archive_data_dir }}/wallabag/images:/var/www/wallabag/web/assets/images
+    environment:
+      SYMFONY__ENV__DATABASE_DRIVER: pdo_mysql
+      SYMFONY__ENV__DATABASE_HOST: wallabag-db
+      SYMFONY__ENV__DATABASE_PORT: "3306"
+      SYMFONY__ENV__DATABASE_NAME: "{{ archive_wallabag_db_name }}"
+      SYMFONY__ENV__DATABASE_USER: "{{ archive_wallabag_db_user }}"
+      SYMFONY__ENV__DATABASE_PASSWORD: "{{ archive_wallabag_db_password }}"
+      SYMFONY__ENV__DOMAIN_NAME: "{{ archive_wallabag_domain }}"
+      SYMFONY__ENV__SERVER_NAME: "Archive Wallabag"
+    depends_on:
+      wallabag-db:
+        condition: service_healthy
+    networks:
+      - archive-net
+
+  wallabag-db:
+    image: {{ archive_wallabag_mariadb_image }}
+    container_name: wallabag-db
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - {{ archive_data_dir }}/wallabag/db:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ archive_wallabag_db_root_password }}"
+      MYSQL_DATABASE: "{{ archive_wallabag_db_name }}"
+      MYSQL_USER: "{{ archive_wallabag_db_user }}"
+      MYSQL_PASSWORD: "{{ archive_wallabag_db_password }}"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - archive-net
+{% endif %}
+
+{% if archive_tileservergl_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # TileServer GL — Offline vector map tiles (OpenMapTiles schema)
+  # -------------------------------------------------------------------
+  # Serves MBTiles files from /mnt/cold/maps. Start with no datasets;
+  # download tiles with /opt/archive/scripts/map-download.sh, then
+  # re-run Ansible to register the dataset in config.json.
+  tileservergl:
+    image: {{ archive_tileservergl_image }}
+    container_name: tileservergl
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_tileservergl_port }}:8080"
+    volumes:
+      - {{ archive_cold_dir }}/maps:/data
+{% endif %}
+
+{% if archive_calibreweb_enabled | default(true) | bool %}
+  # -------------------------------------------------------------------
+  # Calibre-Web — Ebook library browser
+  # -------------------------------------------------------------------
+  # Books volume: /mnt/data/calibre/books — drop EPUB/MOBI/PDF here.
+  # Calibre-Web auto-initializes an empty library on first start.
+  # DOCKER_MODS enables ebook format conversion (EPUB → MOBI, etc.)
+  calibreweb:
+    image: {{ archive_calibreweb_image }}
+    container_name: calibreweb
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ archive_calibreweb_port }}:8083"
+    volumes:
+      - {{ archive_data_dir }}/calibre/config:/config
+      - {{ archive_data_dir }}/calibre/books:/books
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "America/New_York"
+      DOCKER_MODS: "linuxserver/mods:universal-calibre"
+{% endif %}
+
+{% if (archive_bookstack_enabled | default(true) | bool) or (archive_wallabag_enabled | default(true) | bool) %}
+networks:
+  archive-net:
+    driver: bridge
+{% endif %}

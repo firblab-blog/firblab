@@ -1,0 +1,95 @@
+# =============================================================================
+# Wazuh Indexer — StatefulSet (Single-Node)
+# =============================================================================
+# OpenSearch-based data storage for Wazuh alerts and events.
+# Requires vm.max_map_count=262144 (set via privileged init container).
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-indexer
+  namespace: wazuh
+  labels:
+    app: wazuh-indexer
+spec:
+  replicas: 1
+  serviceName: wazuh-indexer
+  selector:
+    matchLabels:
+      app: wazuh-indexer
+  template:
+    metadata:
+      labels:
+        app: wazuh-indexer
+    spec:
+      # Schedule on agent nodes (server nodes only have 4GB)
+      nodeSelector:
+        node-role.kubernetes.io/agent: "true"
+      initContainers:
+        # OpenSearch hard requirement: vm.max_map_count >= 262144
+        - name: increase-vm-max-map-count
+          image: busybox:1.37
+          command: ['sysctl', '-w', 'vm.max_map_count=262144']
+          securityContext:
+            privileged: true
+        # Fix data directory ownership for wazuh-indexer user (UID 1000)
+        - name: volume-mount-hack
+          image: busybox:1.37
+          command: ['sh', '-c', 'chown -R 1000:1000 /var/lib/wazuh-indexer']
+          volumeMounts:
+            - name: wazuh-indexer-data
+              mountPath: /var/lib/wazuh-indexer
+      containers:
+        - name: wazuh-indexer
+          image: wazuh/wazuh-indexer:4.14.3
+          ports:
+            - containerPort: 9200
+              name: http
+              protocol: TCP
+          env:
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: 500m
+              memory: 1536Mi
+          volumeMounts:
+            - name: wazuh-indexer-data
+              mountPath: /var/lib/wazuh-indexer
+            - name: indexer-config
+              mountPath: /usr/share/wazuh-indexer/config/opensearch.yml
+              subPath: opensearch.yml
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: indexer-config
+          configMap:
+            name: wazuh-indexer-config
+  volumeClaimTemplates:
+    - metadata:
+        name: wazuh-indexer-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 5Gi

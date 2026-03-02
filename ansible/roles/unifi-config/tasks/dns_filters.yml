@@ -1,0 +1,15 @@
+# =============================================================================
+# DNS Content Filtering Configuration (Future — Phase 2)
+# =============================================================================
+# Manages CyberSecure DNS content filtering settings.
+# The filipowm/unifi provider's Read function returns empty lists for
+# dns_filters, causing perpetual "element vanished" errors in Terraform.
+# This Ansible task bypasses the provider and hits the API directly.
+#
+# TODO: Implement when requirements are defined.
+# =============================================================================
+---
+
+- name: DNS content filter configuration (placeholder)
+  ansible.builtin.debug:
+    msg: "DNS content filter management is planned for Phase 2. No changes made."

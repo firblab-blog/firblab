@@ -1,0 +1,55 @@
+# =============================================================================
+# Authentik Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Post-2025.10: No Redis needed. Just PostgreSQL + server + worker.
+# =============================================================================
+
+services:
+  postgresql:
+    image: {{ authentik_pg_image }}
+    container_name: authentik-db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    volumes:
+      - {{ authentik_install_dir }}/postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: {{ authentik_db_password }}
+
+  server:
+    image: {{ authentik_image }}
+    container_name: authentik-server
+    restart: unless-stopped
+    command: server
+    env_file:
+      - {{ authentik_install_dir }}/config/authentik.env
+    ports:
+      - "{{ authentik_port }}:9000"
+    volumes:
+      - {{ authentik_install_dir }}/media:/media
+      - {{ authentik_install_dir }}/custom-templates:/templates
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+  worker:
+    image: {{ authentik_image }}
+    container_name: authentik-worker
+    restart: unless-stopped
+    command: worker
+    env_file:
+      - {{ authentik_install_dir }}/config/authentik.env
+    volumes:
+      - {{ authentik_install_dir }}/media:/media
+      - {{ authentik_install_dir }}/custom-templates:/templates
+      - {{ authentik_install_dir }}/certs:/certs
+    depends_on:
+      postgresql:
+        condition: service_healthy

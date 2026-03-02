@@ -1,0 +1,100 @@
+---
+# =============================================================================
+# Generate TLS Certificate for a Single Vault Node
+# =============================================================================
+# Included by vault-tls-generate.yml for each node in vault_nodes.
+#
+# Expected variables:
+#   node_id        — e.g., "vault-1"
+#   node_ip        — e.g., "10.0.10.10"
+#   tls_base_dir   — e.g., "~/.lab/tls"
+#   ca_dir         — e.g., "~/.lab/tls/ca"
+#   domain_name    — e.g., "example-lab.local"
+#   cert_validity_days — e.g., 365
+# =============================================================================
+
+- name: "{{ node_id }} — Generate private key (ECDSA P-256)"
+  ansible.builtin.command: >
+    openssl ecparam -genkey -name prime256v1
+    -out {{ tls_base_dir }}/{{ node_id }}/vault-key.pem
+
+- name: "{{ node_id }} — Set key permissions"
+  ansible.builtin.file:
+    path: "{{ tls_base_dir }}/{{ node_id }}/vault-key.pem"
+    mode: "0600"
+
+- name: "{{ node_id }} — Create OpenSSL extension config"
+  ansible.builtin.copy:
+    dest: "{{ tls_base_dir }}/{{ node_id }}/openssl-ext.cnf"
+    mode: "0600"
+    content: |
+      [req]
+      default_bits       = 256
+      prompt             = no
+      distinguished_name = dn
+      req_extensions     = v3_req
+
+      [dn]
+      C  = US
+      ST = Virginia
+      L  = Arlington
+      O  = firblab
+      OU = Vault Cluster
+      CN = {{ node_id }}.{{ domain_name }}
+
+      [v3_req]
+      basicConstraints     = CA:FALSE
+      keyUsage             = digitalSignature, keyEncipherment
+      extendedKeyUsage     = serverAuth, clientAuth
+      subjectAltName       = @alt_names
+
+      [alt_names]
+      DNS.1 = {{ node_id }}.{{ domain_name }}
+      DNS.2 = {{ node_id }}
+      DNS.3 = localhost
+      IP.1  = {{ node_ip }}
+      IP.2  = 127.0.0.1
+
+- name: "{{ node_id }} — Generate CSR"
+  ansible.builtin.command: >
+    openssl req -new -sha256
+    -key {{ tls_base_dir }}/{{ node_id }}/vault-key.pem
+    -out {{ tls_base_dir }}/{{ node_id }}/vault.csr
+    -config {{ tls_base_dir }}/{{ node_id }}/openssl-ext.cnf
+
+- name: "{{ node_id }} — Sign certificate with CA"
+  ansible.builtin.command: >
+    openssl x509 -req -sha256
+    -in {{ tls_base_dir }}/{{ node_id }}/vault.csr
+    -CA {{ ca_dir }}/ca.pem
+    -CAkey {{ ca_dir }}/ca-key.pem
+    -CAcreateserial
+    -out {{ tls_base_dir }}/{{ node_id }}/vault-cert.pem
+    -days {{ cert_validity_days }}
+    -extensions v3_req
+    -extfile {{ tls_base_dir }}/{{ node_id }}/openssl-ext.cnf
+
+- name: "{{ node_id }} — Copy CA cert to node directory"
+  ansible.builtin.copy:
+    src: "{{ ca_dir }}/ca.pem"
+    dest: "{{ tls_base_dir }}/{{ node_id }}/ca.pem"
+    mode: "0644"
+
+- name: "{{ node_id }} — Clean up intermediate files"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ tls_base_dir }}/{{ node_id }}/vault.csr"
+    - "{{ tls_base_dir }}/{{ node_id }}/openssl-ext.cnf"
+
+- name: "{{ node_id }} — Display certificate SANs"
+  ansible.builtin.command: >
+    openssl x509 -in {{ tls_base_dir }}/{{ node_id }}/vault-cert.pem
+    -noout -ext subjectAltName
+  register: san_output
+  changed_when: false
+
+- name: "{{ node_id }} — Show SANs"
+  ansible.builtin.debug:
+    msg: "{{ node_id }}: {{ san_output.stdout }}"

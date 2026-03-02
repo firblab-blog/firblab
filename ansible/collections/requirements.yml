@@ -1,0 +1,12 @@
+---
+# =============================================================================
+# Ansible Galaxy Collection Dependencies
+# =============================================================================
+# Install with: ansible-galaxy collection install -r collections/requirements.yml
+# =============================================================================
+
+collections:
+  - name: community.hashi_vault
+    version: ">=6.0.0"
+  - name: arensb.truenas
+    version: ">=1.14.0"

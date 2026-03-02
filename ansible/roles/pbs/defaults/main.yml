@@ -1,0 +1,87 @@
+---
+# =============================================================================
+# PBS Role - Default Variables
+# =============================================================================
+# Configures a Proxmox Backup Server instance after VM provisioning.
+# Handles ZFS mirror setup, datastore creation, user/token management,
+# retention policies, and garbage collection scheduling.
+#
+# Prerequisites:
+#   - PBS VM provisioned by Terraform Layer 05 (clone from PBS Packer template)
+#   - PBS services running (proxmox-backup, proxmox-backup-proxy)
+#   - Physical HDDs passed through by Terraform (scsi1 + scsi2)
+#   - PBS 4.x ships ZFS built-in — no extra packages needed
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/pbs-deploy.yml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ZFS Mirror (Data Storage)
+# ---------------------------------------------------------------------------
+# Two physical HDDs are passed through from the Proxmox host to the PBS VM
+# by Terraform (attach-passthrough-disks.sh). PBS creates a ZFS mirror
+# internally for backup data with native checksumming, compression, and dedup.
+#
+# The ZFS pool auto-mounts at /<pool-name> — no fstab entry needed.
+# If the VM is destroyed and rebuilt, `zpool import` recovers the existing
+# pool data from the physical HDDs.
+pbs_zfs_pool_name: "pbs-backup"
+pbs_zfs_disks:
+  - "/dev/sdb"
+  - "/dev/sdc"
+pbs_zfs_compression: "lz4"
+pbs_zfs_ashift: 12
+
+# ---------------------------------------------------------------------------
+# Datastore
+# ---------------------------------------------------------------------------
+# PBS datastore name and path. Created on the ZFS pool mount point.
+# ZFS auto-mounts at /<pool-name>, so datastore lives at /pbs-backup/backups.
+pbs_datastore_name: "backups"
+pbs_datastore_path: "/{{ pbs_zfs_pool_name }}/backups"
+
+# ---------------------------------------------------------------------------
+# Backup User & API Token
+# ---------------------------------------------------------------------------
+# PBS user for PVE node authentication. Each PVE node uses this
+# user's API token to authenticate backup/restore operations.
+pbs_backup_user: "backup@pbs"
+pbs_backup_user_comment: "PVE backup user for all Proxmox nodes"
+pbs_api_token_name: "pve-backup"
+
+# ---------------------------------------------------------------------------
+# Retention Policy (Prune Schedule)
+# ---------------------------------------------------------------------------
+# Applied automatically by PBS prune jobs. GC runs after prune
+# to reclaim space from orphaned chunks.
+pbs_keep_daily: 7
+pbs_keep_weekly: 4
+pbs_keep_monthly: 3
+
+# ---------------------------------------------------------------------------
+# Garbage Collection Schedule
+# ---------------------------------------------------------------------------
+# GC reclaims space from orphaned dedup chunks after pruning.
+# Runs daily at 02:00 to avoid overlapping with backup windows.
+pbs_gc_schedule: "daily"
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+# PBS API port — used for UFW rules
+pbs_api_port: 8007
+
+# ---------------------------------------------------------------------------
+# Vault Integration
+# ---------------------------------------------------------------------------
+# PBS credentials (fingerprint, API token) are stored in Vault
+# for consumption by the proxmox-pbs-register.yml playbook.
+pbs_vault_secret_path: "secret/infra/pbs"
+
+# ---------------------------------------------------------------------------
+# PBS Debian Distribution
+# ---------------------------------------------------------------------------
+# PBS 4.x = trixie (Debian 13), PBS 3.x = bookworm (Debian 12)
+# Used for repository configuration in tasks/main.yml.
+pbs_debian_codename: "trixie"

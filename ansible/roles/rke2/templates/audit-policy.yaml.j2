@@ -1,0 +1,49 @@
+# Kubernetes API Server Audit Policy
+# DISA STIG V-242402, V-242403
+# Managed by Ansible — DO NOT EDIT MANUALLY
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Skip high-volume, low-value events
+  - level: None
+    resources:
+      - group: ""
+        resources: ["events"]
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+    resources:
+      - group: ""
+        resources: ["endpoints", "services", "services/status"]
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get"]
+    resources:
+      - group: ""
+        resources: ["nodes", "nodes/status"]
+
+  # Secret/configmap access — metadata only (no request body logged)
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps", "tokenreviews"]
+
+  # Cluster-scoped mutations — full request/response
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+        resources: ["namespaces", "persistentvolumes", "nodes"]
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles", "clusterrolebindings"]
+
+  # Pod exec/attach/portforward — full audit (STIG requirement)
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/portforward", "pods/attach"]
+
+  # Everything else — metadata
+  - level: Metadata
+    omitStages:
+      - RequestReceived

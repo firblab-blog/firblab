@@ -1,0 +1,6 @@
+# K3s CIS Benchmark Required Kernel Parameters
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# These must be applied BEFORE K3s starts when protect-kernel-defaults is true.
+{% for key, value in k3s_sysctl.items() %}
+{{ key }} = {{ value }}
+{% endfor %}

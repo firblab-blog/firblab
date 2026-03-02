@@ -1,0 +1,27 @@
+---
+# =============================================================================
+# Vault — Linux User and Group Creation
+# =============================================================================
+# Creates a dedicated system user and group for the Vault service.
+# Uses standard useradd/groupadd (works on Debian/Ubuntu and RedHat/Rocky).
+# =============================================================================
+
+- name: Create vault group
+  ansible.builtin.group:
+    name: "{{ vault_group }}"
+    system: true
+    state: present
+  tags:
+    - install
+
+- name: Create vault user
+  ansible.builtin.user:
+    name: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ vault_data_dir }}"
+    create_home: false
+    comment: "HashiCorp Vault service account"
+  tags:
+    - install

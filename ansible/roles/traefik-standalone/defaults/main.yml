@@ -1,0 +1,308 @@
+---
+# =============================================================================
+# Traefik Standalone Reverse Proxy - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Traefik image — pinned for reproducibility
+# https://github.com/traefik/traefik/releases
+traefik_image: "traefik:v3.3"
+
+# Install directory
+traefik_install_dir: /opt/traefik
+
+# Ports — HTTP, HTTPS, and dashboard (localhost-only)
+traefik_http_port: 80
+traefik_https_port: 443
+traefik_dashboard_port: 8888
+
+# Logging
+traefik_log_level: INFO
+traefik_access_log: true
+
+# ACME / Let's Encrypt
+traefik_acme_email: "admin@example-lab.org"
+traefik_acme_storage: /etc/traefik/acme/acme.json
+traefik_acme_ca_server: "https://acme-v02.api.letsencrypt.org/directory"
+traefik_domain: "home.example-lab.org"
+
+# Cloudflare DNS-01 (token read from Vault by deploy playbook)
+traefik_cloudflare_api_token: ""
+
+# Authentik ForwardAuth
+traefik_authentik_url: "http://10.0.10.16:9000"
+
+# ---------------------------------------------------------------------------
+# Backend Service Map
+# ---------------------------------------------------------------------------
+# Each entry defines a service that Traefik will reverse-proxy.
+# Keys:
+#   subdomain       — becomes <subdomain>.home.example-lab.org
+#   aliases         — (optional) list of additional subdomains for the same backend
+#   backend_url     — where Traefik forwards the request
+#   forwardauth     — true = require Authentik ForwardAuth
+#   insecure_backend — true = skip TLS verify for self-signed backends
+#   websocket       — true = enable WebSocket passthrough
+# ---------------------------------------------------------------------------
+traefik_backends:
+  gitlab:
+    subdomain: gitlab
+    aliases:
+      - git
+    backend_url: "http://10.0.10.50:80"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true         # KAS uses WebSocket for agent connections
+  authentik:
+    subdomain: auth
+    backend_url: "http://10.0.10.16:9000"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true
+  pbs:
+    subdomain: pbs
+    backend_url: "https://10.0.10.15:8007"
+    forwardauth: true
+    insecure_backend: true
+    websocket: false
+  ghost:
+    subdomain: ghost
+    backend_url: "http://10.0.20.10:2368"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  roundcube:
+    subdomain: mail
+    backend_url: "http://10.0.20.11:8080"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  foundryvtt:
+    subdomain: foundryvtt
+    backend_url: "http://10.0.20.12:30000"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true
+  mealie:
+    subdomain: mealie
+    backend_url: "http://10.0.20.13:9000"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  netbox:
+    subdomain: netbox
+    backend_url: "http://10.0.20.14:8080"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  patchmon:
+    subdomain: patchmon
+    backend_url: "http://10.0.20.15:3000"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true
+  actualbudget:
+    subdomain: actualbudget
+    backend_url: "http://10.0.20.16:5006"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true
+    # SharedArrayBuffer requires cross-origin isolation headers
+    custom_response_headers:
+      Cross-Origin-Opener-Policy: "same-origin"
+      Cross-Origin-Embedder-Policy: "require-corp"
+  vaultwarden:
+    subdomain: vaultwarden
+    backend_url: "http://10.0.20.19:8000"
+    forwardauth: false            # Native OIDC via Authentik, no ForwardAuth
+    insecure_backend: false
+    websocket: true               # Bitwarden clients use WebSocket for live sync
+  # Archive appliance (ZimaBlade 7700 bare-metal, Services VLAN 20)
+  archive:
+    subdomain: archive
+    backend_url: "http://10.0.20.20:8080"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  kiwix:
+    subdomain: kiwix
+    backend_url: "http://10.0.20.20:8081"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  archivebox:
+    subdomain: archivebox
+    backend_url: "http://10.0.20.20:8082"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  bookstack:
+    subdomain: bookstack
+    backend_url: "http://10.0.20.20:8083"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  stirlingpdf:
+    subdomain: stirlingpdf
+    backend_url: "http://10.0.20.20:8084"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  wallabag:
+    subdomain: wallabag
+    backend_url: "http://10.0.20.20:8085"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  maps:
+    subdomain: maps
+    backend_url: "http://10.0.20.20:8086"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  calibreweb:
+    subdomain: calibreweb
+    backend_url: "http://10.0.20.20:8087"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  openwebui:
+    subdomain: openwebui
+    backend_url: "http://10.0.20.18:3000"
+    forwardauth: false            # Native OIDC via Authentik
+    insecure_backend: false
+    websocket: true               # Streaming LLM responses use WebSocket
+  n8n:
+    subdomain: n8n
+    backend_url: "http://10.0.20.18:5678"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true               # n8n uses WebSocket for real-time updates
+  # Backrest backup monitoring UI (LXC on Management VLAN 10)
+  # ForwardAuth for SSO — Backrest also has its own bcrypt login (double layer).
+  backrest:
+    subdomain: backrest
+    backend_url: "http://10.0.10.18:9898"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  # Home Assistant (HAOS RPi5 on IoT VLAN 60)
+  # ForwardAuth for SSO — HA has no native OIDC support.
+  # WebSocket required for HA frontend live updates + mobile app.
+  homeassistant:
+    subdomain: homeassistant
+    backend_url: "http://10.0.60.10:8123"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true
+  # -------------------------------------------------------------------------
+  # TrueNAS apps (Storage VLAN 40, 10.0.40.2)
+  # All have native auth — no ForwardAuth.
+  # -------------------------------------------------------------------------
+  mailarchiver:
+    subdomain: archiver
+    backend_url: "http://10.0.40.2:30315"
+    forwardauth: false            # Native OIDC via Authentik
+    insecure_backend: false
+    websocket: false
+  truenas:
+    subdomain: truenas
+    backend_url: "https://10.0.40.2"
+    forwardauth: false
+    insecure_backend: true            # TrueNAS self-signed cert
+    websocket: true                   # Shell and real-time dashboard updates
+  immich:
+    subdomain: immich
+    backend_url: "http://10.0.40.2:30041"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  linkwarden:
+    subdomain: linkwarden
+    backend_url: "http://10.0.40.2:30243"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  paperless:
+    subdomain: paperless
+    backend_url: "http://10.0.40.2:30070"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  plex:
+    subdomain: plex
+    backend_url: "http://10.0.40.2:32400"
+    forwardauth: false
+    insecure_backend: false           # HTTP backend — no TLS to skip
+    websocket: true                   # Live playback status + notifications
+  portracker:
+    subdomain: portracker
+    backend_url: "http://10.0.40.2:30233"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  ittools:
+    subdomain: tools
+    backend_url: "http://10.0.40.2:30063"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false
+  searxng:
+    subdomain: search
+    backend_url: "http://10.0.40.2:30053"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false
+  # -------------------------------------------------------------------------
+  # Proxmox node UIs (Management VLAN 10)
+  # Self-signed backend certs, WebSocket for noVNC/xterm.js console.
+  # -------------------------------------------------------------------------
+  pve-01:
+    subdomain: pve-01
+    backend_url: "https://10.0.10.42:8006"
+    forwardauth: false
+    insecure_backend: true            # Proxmox self-signed cert
+    websocket: true                   # noVNC/xterm.js console
+  pve-02:
+    subdomain: pve-02
+    backend_url: "https://10.0.10.2:8006"
+    forwardauth: false
+    insecure_backend: true
+    websocket: true
+  pve-03:
+    subdomain: pve-03
+    backend_url: "https://10.0.10.3:8006"
+    forwardauth: false
+    insecure_backend: true
+    websocket: true
+  pve-04:
+    subdomain: pve-04
+    backend_url: "https://10.0.10.4:8006"
+    forwardauth: false
+    insecure_backend: true
+    websocket: true
+  status:
+    subdomain: status
+    backend_url: "http://10.0.10.19:3001"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true     # Uptime Kuma uses Socket.IO — websocket passthrough required
+  # -------------------------------------------------------------------------
+  # Hetzner Gateway services — proxied to *.example-lab.org public HTTPS endpoints
+  # Both have their own native auth — no ForwardAuth wrapper.
+  # NOTE: Gotify cannot use ForwardAuth: notification clients (Uptime Kuma,
+  # Alertmanager) authenticate via app tokens and don't follow SSO redirects.
+  # -------------------------------------------------------------------------
+  gotify:
+    subdomain: gotify
+    backend_url: "https://gotify.example-lab.org"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true               # Gotify uses WebSocket for real-time push
+  adguard:
+    subdomain: adguard
+    backend_url: "https://adguard.example-lab.org"
+    forwardauth: false
+    insecure_backend: false
+    websocket: false

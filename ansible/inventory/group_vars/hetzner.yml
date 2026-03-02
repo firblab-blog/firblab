@@ -1,0 +1,154 @@
+---
+# =============================================================================
+# Hetzner Group Variables
+# =============================================================================
+# Consumed by: ansible/roles/hetzner-gateway/
+# Applies to: lab-hetzner (gateway)
+#
+# Secrets (passwords, bcrypt hashes) are NOT stored here — they are read from
+# Vault by gateway-deploy.yml and injected as vars into the role:
+#   secret/infra/hetzner/credentials → gateway_gotify_password,
+#                                       gateway_traefik_dashboard_hash,
+#                                       gateway_adguard_password_hash
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Gateway identity
+# ---------------------------------------------------------------------------
+gateway_domain: "example-lab.org"
+gateway_letsencrypt_email: "admin@example-lab.org"
+gateway_services_dir: "/opt/firblab/services"
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+gateway_wireguard_network: "10.8.0.0/24"
+gateway_wireguard_ip: "10.8.0.1"       # gateway's WireGuard interface IP (used for node_exporter bind)
+gateway_docker_network: "172.18.0.0/24"
+gateway_wireguard_port: 51820
+# Homelab subnets routed through the WireGuard tunnel.
+# Must stay in sync with homelab_subnets in terraform/layers/06-hetzner/variables.tf.
+# Internal management VLANs (10, 50) are not routed here — the Hetzner gateway
+# only needs to reach service backends (VLAN 20) and the DMZ WireGuard LXC (VLAN 30).
+# Internal monitoring is handled by a separate Uptime Kuma instance inside the homelab.
+gateway_homelab_subnets:
+  - "10.0.20.0/24"   # Services VLAN (RKE2, standalone VMs — Traefik backends)
+  - "10.0.30.0/24"   # DMZ VLAN (WireGuard LXC)
+
+# ---------------------------------------------------------------------------
+# Homelab service backends — Services VLAN 20, reached via WireGuard tunnel
+# ---------------------------------------------------------------------------
+# These are the upstream targets for Traefik. Traefik runs network_mode:host
+# and routes to homelab IPs via wg0 kernel routes (set in Phase 8.6 of cloud-init).
+gateway_ghost_backend: "10.0.20.10:2368"
+gateway_mealie_backend: "10.0.20.13:9000"
+gateway_foundryvtt_backend: "10.0.20.12:30000"
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+# Loki on K3s RPi5 cluster — MetalLB VIP. Alloy ships gateway logs via WireGuard.
+# Migrated from RKE2 NodePort (10.0.20.40:31100) to K3s LoadBalancer.
+gateway_loki_url: "http://10.0.20.201:3100"
+gateway_alloy_host_label: "lab-gateway"
+
+# ---------------------------------------------------------------------------
+# Backup (backup role vars)
+# ---------------------------------------------------------------------------
+# S3 creds + age key are read from Vault in gateway-deploy.yml and passed
+# as: backup_s3_access_key, backup_s3_secret_key, backup_s3_endpoint, backup_age_recipient
+backup_enabled: true
+backup_s3_bucket: "firblab-service-backups"
+backup_cron_hour: "4"
+backup_cron_minute: "30"
+backup_local_dir: "/backups"
+backup_local_retention_days: 3
+backup_services:
+  - name: gateway
+    paths:
+      - /opt/firblab/traefik/letsencrypt   # acme.json — CRITICAL: rebuild without this = ACME rate limits
+      - /opt/firblab/adguard/conf          # AdGuard filter rules, blocklists, query log config
+      - /opt/firblab/adguard/work          # AdGuard working data
+      - /opt/firblab/wireguard             # WireGuard peer generation script (volume is Docker-managed)
+    # NOTE: Docker named volumes (gotify-data, uptime-kuma-data, wireguard-data)
+    # are not backed up here. Gotify is stateless enough (app tokens re-seeded to Vault).
+    # WireGuard peer configs are in /config inside wireguard-data volume — backed up
+    # at the S3 level (Phase 8.5 of cloud-init uploads peers to firblab-wireguard bucket).
+
+# ---------------------------------------------------------------------------
+# Gotify — apps to create (tokens stored in Vault)
+# ---------------------------------------------------------------------------
+# Adding an app: add one entry here, run gateway-deploy.yml --tags gotify
+# vault_merge: true  → vault kv patch (preserves other keys at same path, e.g. uptime-kuma creds)
+# vault_merge: false → vault kv put   (creates new secret at the path)
+gotify_apps:
+  - name: "Alertmanager"
+    description: "K8s Alertmanager alert notifications"
+    vault_path: "secret/k8s/alertmanager-gotify"
+    vault_key: "secret"
+    vault_merge: false
+
+  - name: "Uptime Kuma"
+    description: "Uptime Kuma monitor-down notifications"
+    vault_path: "secret/infra/hetzner/uptime-kuma"
+    vault_key: "gotify_token"
+    vault_merge: true   # path already has username+password from prerequisite vault kv put
+
+  - name: "firblab"
+    description: "General firblab notifications"
+    vault_path: "secret/infra/hetzner/gotify-general"
+    vault_key: "token"
+    vault_merge: false
+
+  - name: "Uptime Kuma (Internal)"
+    description: "Internal homelab Uptime Kuma monitor-down notifications"
+    vault_path: "secret/services/uptime-kuma-internal"
+    vault_key: "gotify_token"
+    vault_merge: true   # path already has username+password from prerequisite vault kv put
+
+# ---------------------------------------------------------------------------
+# Uptime Kuma — monitor definitions (PUBLIC / HETZNER-REACHABLE only)
+# ---------------------------------------------------------------------------
+# This Uptime Kuma instance runs on the Hetzner gateway and can only reach:
+#   - Public internet (*.example-lab.org via Traefik)
+#   - Gateway-local services (127.0.0.1/10.8.0.1)
+#   - VLAN 20 and VLAN 30 backends (via WireGuard tunnel)
+#
+# Internal services (home.example-lab.org, Vault, Proxmox) are monitored by a
+# separate Uptime Kuma instance inside the homelab.
+#
+# Adding a monitor: add one entry here, run gateway-deploy.yml --tags uptime-kuma
+# type options: http, port, ping, dns, keyword
+#   NOTE: "port" is the Uptime Kuma Socket.IO API name for TCP port checks.
+uptime_kuma_monitors:
+
+  # ---- Public HTTPS (Hetzner Traefik → homelab via WireGuard) ---------------
+  - name: "Blog (Ghost)"
+    type: http
+    url: "https://blog.example-lab.org"
+
+  - name: "Mealie"
+    type: http
+    url: "https://food.example-lab.org"
+
+  - name: "FoundryVTT"
+    type: http
+    url: "https://foundryvtt.example-lab.org"
+
+  - name: "Gotify"
+    type: http
+    url: "https://gotify.example-lab.org"
+
+  - name: "AdGuard Home"
+    type: http
+    url: "https://adguard.example-lab.org"
+
+  # ---- Gateway internal (WireGuard direct) ----------------------------------
+  - name: "Traefik (gateway)"
+    type: http
+    url: "http://10.8.0.1:8888/ping"
+
+  - name: "Gateway SSH"
+    type: port
+    hostname: "203.0.113.10"
+    port: 2222

@@ -1,0 +1,228 @@
+---
+# =============================================================================
+# TrueNAS SCALE — Configuration Deployment Playbook
+# =============================================================================
+# Brings TrueNAS configuration under IaC management using the arensb.truenas
+# Ansible collection. Manages services, NFS/SMB shares, snapshot tasks, SMART
+# tests, and scrub tasks declaratively.
+#
+# This is NOT a standard Linux deploy playbook — TrueNAS SCALE is an
+# appliance OS. The common/hardening roles do NOT apply. TrueNAS manages its
+# own firewall, packages, NTP, and SSH configuration.
+#
+# Hardware:
+#   Dell OptiPlex 3070: i5-9500, 16 GB RAM, 10.0.40.2 (Storage VLAN 40)
+#   Pools: media (~12 TB mirror), backups (~8 TB mirror)
+#   Apps (TrueNAS-managed): Plex, Immich, Linkwarden, Paperless-NGX,
+#                           Portracker, PostgreSQL
+#
+# Prerequisites:
+#   - arensb.truenas collection installed:
+#       ansible-galaxy collection install -r collections/requirements.yml
+#   - SSH access: truenas_admin@10.0.40.2:2222 (~/.ssh/truenas_admin)
+#   - TrueNAS SCALE 25.04+ (uses midclt middleware CLI)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/truenas-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags services    # Only service state management
+#   ansible-playbook ... --tags nfs         # Only NFS share config
+#   ansible-playbook ... --tags smb         # Only SMB share config
+#   ansible-playbook ... --tags shares      # Both NFS + SMB
+#   ansible-playbook ... --tags snapshots   # Only snapshot tasks
+#   ansible-playbook ... --tags smart       # Only SMART test scheduling
+#   ansible-playbook ... --tags scrubs      # Only scrub task config
+#   ansible-playbook ... --tags verify      # Only post-deploy checks
+# =============================================================================
+
+- name: Deploy TrueNAS configuration
+  hosts: truenas
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for TrueNAS to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+      tags:
+        - always
+
+    - name: Gather TrueNAS facts via midclt
+      ansible.builtin.command:
+        cmd: midclt call system.info
+      register: truenas_system_info
+      changed_when: false
+      tags:
+        - always
+
+    - name: Parse system info
+      ansible.builtin.set_fact:
+        truenas_version: "{{ (truenas_system_info.stdout | from_json).version }}"
+        truenas_hostname: "{{ (truenas_system_info.stdout | from_json).hostname }}"
+        truenas_uptime_days: "{{ (truenas_system_info.stdout | from_json).uptime_seconds | int // 86400 }}"
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying TrueNAS config on {{ truenas_hostname }}
+          (version={{ truenas_version }}, ip={{ ansible_host }},
+          uptime={{ truenas_uptime_days }}d)
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Pre-flight: Verify pools are online
+    # -----------------------------------------------------------------
+    - name: Query pool status
+      ansible.builtin.command:
+        cmd: midclt call pool.query
+      register: pool_query
+      changed_when: false
+      tags:
+        - always
+
+    - name: Verify all pools are ONLINE
+      ansible.builtin.assert:
+        that:
+          - item.status == 'ONLINE'
+        fail_msg: "Pool {{ item.name }} is {{ item.status }} — aborting deployment"
+        success_msg: "Pool {{ item.name }} is ONLINE (healthy={{ item.healthy }})"
+      loop: "{{ pool_query.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - always
+
+    - name: Warn about unhealthy pool
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Pool {{ item.name }} is ONLINE but healthy={{ item.healthy }}.
+          Run 'zpool status {{ item.name }}' to investigate.
+      when: not item.healthy
+      loop: "{{ pool_query.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Auto-discover disk names for SMART tests
+    # -----------------------------------------------------------------
+    # The smart_test_task module requires an explicit disk list (no
+    # "all_disks" option). Query midclt to discover all pool disks.
+    - name: Query disk inventory
+      ansible.builtin.command:
+        cmd: midclt call disk.query
+      register: disk_query
+      changed_when: false
+      tags:
+        - smart
+        - always
+
+    - name: Set disk names for SMART tests
+      ansible.builtin.set_fact:
+        truenas_disk_names: "{{ disk_query.stdout | from_json | map(attribute='name') | list }}"
+      when: truenas_disk_names | length == 0
+      tags:
+        - smart
+        - always
+
+    - name: Display discovered disks
+      ansible.builtin.debug:
+        msg: "Discovered {{ truenas_disk_names | length }} disks: {{ truenas_disk_names | join(', ') }}"
+      tags:
+        - smart
+
+  roles:
+    - role: truenas
+      tags: [truenas]
+
+  post_tasks:
+    # -----------------------------------------------------------------
+    # Verification: Query actual state after apply
+    # -----------------------------------------------------------------
+    - name: Query NFS shares
+      ansible.builtin.command:
+        cmd: midclt call sharing.nfs.query
+      register: verify_nfs
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Query SMB shares
+      ansible.builtin.command:
+        cmd: midclt call sharing.smb.query
+      register: verify_smb
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Query snapshot tasks
+      ansible.builtin.command:
+        cmd: midclt call pool.snapshottask.query
+      register: verify_snapshots
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Query SMART tests
+      ansible.builtin.command:
+        cmd: midclt call smart.test.query
+      register: verify_smart
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          === TrueNAS Configuration Applied ===
+          Host:          {{ truenas_hostname }} ({{ ansible_host }})
+          Version:       {{ truenas_version }}
+          NFS Shares:    {{ (verify_nfs.stdout | from_json) | length }}
+          SMB Shares:    {{ (verify_smb.stdout | from_json) | length }}
+          Snap Tasks:    {{ (verify_snapshots.stdout | from_json) | length }}
+          SMART Tests:   {{ (verify_smart.stdout | from_json) | length }}
+
+          Security Fixes Applied:
+            - NFS shares restricted to Management + LAN subnets
+            - SMB firb-lab-01 guest access DISABLED
+            - SMB shares restricted via hostsallow
+
+          Protection Added:
+            - Daily snapshots: backups (2 week retention), media (1 week)
+            - SMART SHORT test: weekly (Saturdays 06:00)
+            - SMART LONG test: monthly (1st of month, 02:00)
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------
+    # Verify security fixes
+    # -----------------------------------------------------------------
+    - name: Verify no NFS shares are world-accessible
+      ansible.builtin.assert:
+        that:
+          - item.networks | length > 0
+        fail_msg: "NFS share {{ item.path }} has NO network restrictions — still world-accessible!"
+        success_msg: "NFS share {{ item.path }} restricted to {{ item.networks | join(', ') }}"
+      loop: "{{ verify_nfs.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.path }}"
+      tags:
+        - verify
+
+    - name: Verify no SMB shares allow guest access
+      ansible.builtin.assert:
+        that:
+          - not item.guestok
+        fail_msg: "SMB share {{ item.name }} still has guest access ENABLED!"
+        success_msg: "SMB share {{ item.name }} — guest access disabled"
+      loop: "{{ verify_smb.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - verify

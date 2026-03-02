@@ -1,0 +1,74 @@
+# =============================================================================
+# upsmon Monitor Configuration — /etc/nut/upsmon.conf
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Mode: {{ nut_mode }}
+#
+{% if nut_mode == "netclient" %}
+# NETCLIENT: Monitors remote UPS at {{ nut_server_ups_name }}@{{ nut_server_host }}.
+# Runs as secondary — shuts down when the master signals FSD (forced shutdown).
+{% else %}
+# NETSERVER: Monitors local UPS and initiates safe shutdown on low battery.
+# Runs as primary — can command the UPS to signal FSD to all secondary clients.
+{% endif %}
+# Passwords sourced from Vault: secret/services/nut
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# UPS Monitor
+# ---------------------------------------------------------------------------
+# MONITOR <ups>@<host> <power_value> <user> <password> <type>
+# power_value=1: this system has 1 power supply from this UPS
+{% if nut_mode == "netclient" %}
+# type=secondary: this host cannot command the UPS — it shuts down when told
+MONITOR {{ nut_server_ups_name }}@{{ nut_server_host }} {{ nut_min_supplies }} {{ nut_monitor_user }} {{ nut_monitor_password }} secondary
+{% else %}
+# type=primary: this host can command the UPS (FSD = forced shutdown)
+MONITOR {{ nut_ups_name }}@localhost {{ nut_min_supplies }} {{ nut_monitor_user }} {{ nut_monitor_password }} primary
+{% endif %}
+
+MINSUPPLIES {{ nut_min_supplies }}
+
+# ---------------------------------------------------------------------------
+# Shutdown Behavior
+# ---------------------------------------------------------------------------
+SHUTDOWNCMD "{{ nut_shutdown_command }}"
+POWERDOWNFLAG {{ nut_powerdown_flag }}
+FINALDELAY {{ nut_finaldelay }}
+{% if nut_mode != "netclient" %}
+# HOSTSYNC: seconds to wait for secondary clients to disconnect before FSD.
+# Gives remote NUT clients time to shut down gracefully before the master
+# commands the UPS to cut power.
+HOSTSYNC {{ nut_hostsync }}
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# Polling
+# ---------------------------------------------------------------------------
+POLLFREQ {{ nut_poll_freq }}
+POLLFREQALERT {{ nut_poll_freq_alert }}
+DEADTIME {{ nut_deadtime }}
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+NOTIFYMSG ONLINE    "UPS %s on line power"
+NOTIFYMSG ONBATT    "UPS %s on battery!"
+NOTIFYMSG LOWBATT   "UPS %s battery is low!"
+NOTIFYMSG FSD       "UPS %s: forced shutdown in progress!"
+NOTIFYMSG COMMOK    "Communications with UPS %s established"
+NOTIFYMSG COMMBAD   "Communications with UPS %s lost"
+NOTIFYMSG SHUTDOWN  "Auto logout and shutdown proceeding"
+NOTIFYMSG REPLBATT  "UPS %s battery needs to be replaced"
+
+# SYSLOG: log to syslog
+# WALL: broadcast to all logged-in users
+NOTIFYFLAG ONLINE   SYSLOG
+NOTIFYFLAG ONBATT   SYSLOG+WALL
+NOTIFYFLAG LOWBATT  SYSLOG+WALL
+NOTIFYFLAG FSD      SYSLOG+WALL
+NOTIFYFLAG COMMOK   SYSLOG
+NOTIFYFLAG COMMBAD  SYSLOG+WALL
+NOTIFYFLAG SHUTDOWN SYSLOG+WALL
+NOTIFYFLAG REPLBATT SYSLOG+WALL

@@ -1,0 +1,511 @@
+---
+# =============================================================================
+# TrueNAS SCALE — State Probe Playbook
+# =============================================================================
+# Queries all TrueNAS middleware endpoints via midclt, strips sensitive fields
+# (password hashes, tokens, serial numbers), and writes a sanitized YAML
+# report to the local machine for review.
+#
+# Prerequisites:
+#   - SSH access to TrueNAS (truenas_admin@10.0.40.2:2222)
+#   - TrueNAS added to inventory (ansible/inventory/hosts.yml, truenas group)
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/truenas-probe.yml
+#   cat /tmp/truenas-probe-report.yml
+#
+# Output:
+#   /tmp/truenas-probe-report.yml — structured YAML with:
+#     - Pools: names, sizes, health
+#     - Datasets: names, used/avail, mountpoints, compression, quotas
+#     - NFS shares: paths, networks, maproot/mapall
+#     - SMB shares: paths, purpose, guest access
+#     - Users: usernames, UIDs, groups, shells (NO password hashes)
+#     - Groups: names, GIDs, members
+#     - Snapshot tasks: datasets, schedules, retention
+#     - Scrub tasks: pool, schedule, threshold
+#     - S.M.A.R.T. tests: type, schedule, disks
+#     - Services: enabled/running state
+#     - Apps: name, version, state
+#     - Replication tasks: source, target, schedule
+#     - Cloud sync tasks: provider, direction, schedule
+#     - System info: version, hostname, uptime (NO serial/license)
+#     - Network interfaces: names, IPs, type
+#     - Certificates: name, issuer, expiry (NO private keys)
+# =============================================================================
+
+- name: Probe TrueNAS Current State
+  hosts: truenas
+  become: true
+  gather_facts: false
+
+  vars:
+    # Sensitive field names to strip from all query results.
+    # Applied recursively to all JSON objects.
+    sensitive_fields:
+      - unixhash
+      - smbhash
+      - nt_password
+      - password
+      - secret
+      - token
+      - api_key
+      - apikey
+      - private_key
+      - privatekey
+      - serial
+      - license
+      - credential
+      - encryption_key
+
+    # Output file path (on Ansible controller)
+    probe_report_path: /tmp/truenas-probe-report.yml
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Query all middleware endpoints
+    # -------------------------------------------------------------------------
+    - name: Query pools
+      ansible.builtin.command:
+        cmd: midclt call pool.query
+      register: raw_pools
+      changed_when: false
+
+    - name: Query datasets
+      ansible.builtin.command:
+        cmd: midclt call pool.dataset.query
+      register: raw_datasets
+      changed_when: false
+
+    - name: Query NFS shares
+      ansible.builtin.command:
+        cmd: midclt call sharing.nfs.query
+      register: raw_nfs
+      changed_when: false
+
+    - name: Query SMB shares
+      ansible.builtin.command:
+        cmd: midclt call sharing.smb.query
+      register: raw_smb
+      changed_when: false
+
+    - name: Query users
+      ansible.builtin.command:
+        cmd: midclt call user.query
+      register: raw_users
+      changed_when: false
+
+    - name: Query groups
+      ansible.builtin.command:
+        cmd: midclt call group.query
+      register: raw_groups
+      changed_when: false
+
+    - name: Query snapshot tasks
+      ansible.builtin.command:
+        cmd: midclt call pool.snapshottask.query
+      register: raw_snapshots
+      changed_when: false
+
+    - name: Query scrub tasks
+      ansible.builtin.command:
+        cmd: midclt call pool.scrub.query
+      register: raw_scrubs
+      changed_when: false
+
+    - name: Query S.M.A.R.T. test tasks
+      ansible.builtin.command:
+        cmd: midclt call smart.test.query
+      register: raw_smart
+      changed_when: false
+
+    - name: Query services
+      ansible.builtin.command:
+        cmd: midclt call service.query
+      register: raw_services
+      changed_when: false
+
+    - name: Query apps
+      ansible.builtin.command:
+        cmd: midclt call app.query
+      register: raw_apps
+      changed_when: false
+
+    - name: Query replication tasks
+      ansible.builtin.command:
+        cmd: midclt call replication.query
+      register: raw_replication
+      changed_when: false
+
+    - name: Query cloud sync tasks
+      ansible.builtin.command:
+        cmd: midclt call cloudsync.query
+      register: raw_cloudsync
+      changed_when: false
+
+    - name: Query system info
+      ansible.builtin.command:
+        cmd: midclt call system.info
+      register: raw_system
+      changed_when: false
+
+    - name: Query network interfaces
+      ansible.builtin.command:
+        cmd: midclt call interface.query
+      register: raw_network
+      changed_when: false
+
+    - name: Query certificates
+      ansible.builtin.command:
+        cmd: midclt call certificate.query
+      register: raw_certificates
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Parse JSON responses
+    # -------------------------------------------------------------------------
+    - name: Parse all query results
+      ansible.builtin.set_fact:
+        parsed_pools: "{{ raw_pools.stdout | from_json }}"
+        parsed_datasets: "{{ raw_datasets.stdout | from_json }}"
+        parsed_nfs: "{{ raw_nfs.stdout | from_json }}"
+        parsed_smb: "{{ raw_smb.stdout | from_json }}"
+        parsed_users: "{{ raw_users.stdout | from_json }}"
+        parsed_groups: "{{ raw_groups.stdout | from_json }}"
+        parsed_snapshots: "{{ raw_snapshots.stdout | from_json }}"
+        parsed_scrubs: "{{ raw_scrubs.stdout | from_json }}"
+        parsed_smart: "{{ raw_smart.stdout | from_json }}"
+        parsed_services: "{{ raw_services.stdout | from_json }}"
+        parsed_apps: "{{ raw_apps.stdout | from_json }}"
+        parsed_replication: "{{ raw_replication.stdout | from_json }}"
+        parsed_cloudsync: "{{ raw_cloudsync.stdout | from_json }}"
+        parsed_system: "{{ raw_system.stdout | from_json }}"
+        parsed_network: "{{ raw_network.stdout | from_json }}"
+        parsed_certificates: "{{ raw_certificates.stdout | from_json }}"
+
+    # -------------------------------------------------------------------------
+    # Build sanitized report — extract only safe fields
+    # -------------------------------------------------------------------------
+
+    # Pools: name, size, health, topology summary
+    - name: Build sanitized pools report
+      ansible.builtin.set_fact:
+        report_pools: >-
+          {{ parsed_pools | json_query('[].{
+            id: id,
+            name: name,
+            path: path,
+            status: status,
+            healthy: healthy,
+            is_decrypted: is_decrypted,
+            size: size,
+            allocated: allocated,
+            free: free,
+            freeing: freeing
+          }') }}
+
+    # Datasets: name, used, available, mountpoint, compression, quota
+    - name: Build sanitized datasets report
+      ansible.builtin.set_fact:
+        report_datasets: >-
+          {{ parsed_datasets | json_query('[].{
+            id: id,
+            name: name,
+            pool: pool,
+            type: type,
+            mountpoint: mountpoint,
+            used: used,
+            available: available,
+            compression: compression,
+            quota: quota,
+            refquota: refquota,
+            reservation: reservation,
+            refreservation: refreservation,
+            atime: atime,
+            deduplication: deduplication,
+            comments: comments,
+            readonly: readonly,
+            recordsize: recordsize,
+            sync: sync
+          }') }}
+
+    # NFS shares: path, networks, maproot/mapall, enabled
+    - name: Build sanitized NFS report
+      ansible.builtin.set_fact:
+        report_nfs: >-
+          {{ parsed_nfs | json_query('[].{
+            id: id,
+            path: path,
+            aliases: aliases,
+            comment: comment,
+            networks: networks,
+            hosts: hosts,
+            maproot_user: maproot_user,
+            maproot_group: maproot_group,
+            mapall_user: mapall_user,
+            mapall_group: mapall_group,
+            enabled: enabled,
+            ro: ro
+          }') }}
+
+    # SMB shares: name, path, purpose, guest access
+    - name: Build sanitized SMB report
+      ansible.builtin.set_fact:
+        report_smb: >-
+          {{ parsed_smb | json_query('[].{
+            id: id,
+            name: name,
+            path: path,
+            path_local: path_local,
+            comment: comment,
+            purpose: purpose,
+            enabled: enabled,
+            ro: ro,
+            browsable: browsable,
+            guestok: guestok,
+            abe: abe,
+            acl: acl,
+            hostsallow: hostsallow,
+            hostsdeny: hostsdeny
+          }') }}
+
+    # Users: username, uid, group, home, shell (NO password hashes)
+    - name: Build sanitized users report
+      ansible.builtin.set_fact:
+        report_users: >-
+          {{ parsed_users | json_query('[].{
+            id: id,
+            uid: uid,
+            username: username,
+            full_name: full_name,
+            home: home,
+            shell: shell,
+            builtin: builtin,
+            group: group,
+            groups: groups,
+            locked: locked,
+            smb: smb,
+            immutable: immutable,
+            local: local
+          }') }}
+
+    # Groups: name, gid, members
+    - name: Build sanitized groups report
+      ansible.builtin.set_fact:
+        report_groups: >-
+          {{ parsed_groups | json_query('[].{
+            id: id,
+            gid: gid,
+            name: name,
+            group: group,
+            builtin: builtin,
+            smb: smb,
+            users: users,
+            local: local,
+            immutable: immutable
+          }') }}
+
+    # Snapshot tasks: dataset, schedule, retention
+    - name: Build sanitized snapshot tasks report
+      ansible.builtin.set_fact:
+        report_snapshots: >-
+          {{ parsed_snapshots | json_query('[].{
+            id: id,
+            dataset: dataset,
+            recursive: recursive,
+            lifetime_value: lifetime_value,
+            lifetime_unit: lifetime_unit,
+            enabled: enabled,
+            naming_schema: naming_schema,
+            schedule: schedule,
+            allow_empty: allow_empty
+          }') }}
+
+    # Scrub tasks
+    - name: Build sanitized scrub tasks report
+      ansible.builtin.set_fact:
+        report_scrubs: >-
+          {{ parsed_scrubs | json_query('[].{
+            id: id,
+            pool: pool,
+            pool_name: pool_name,
+            threshold: threshold,
+            enabled: enabled,
+            schedule: schedule
+          }') }}
+
+    # S.M.A.R.T. tests
+    - name: Build sanitized S.M.A.R.T. report
+      ansible.builtin.set_fact:
+        report_smart: >-
+          {{ parsed_smart | json_query('[].{
+            id: id,
+            type: type,
+            schedule: schedule,
+            all_disks: all_disks,
+            disks: disks
+          }') }}
+
+    # Services: name, enabled, running
+    - name: Build sanitized services report
+      ansible.builtin.set_fact:
+        report_services: >-
+          {{ parsed_services | json_query('[].{
+            id: id,
+            service: service,
+            enable: enable,
+            state: state
+          }') }}
+
+    # Apps: name, version, state
+    - name: Build sanitized apps report
+      ansible.builtin.set_fact:
+        report_apps: >-
+          {{ parsed_apps | json_query('[].{
+            id: id,
+            name: name,
+            state: state,
+            version: version,
+            human_version: human_version,
+            upgrade_available: upgrade_available,
+            metadata: metadata
+          }') }}
+
+    # Replication tasks (strip credentials)
+    - name: Build sanitized replication report
+      ansible.builtin.set_fact:
+        report_replication: >-
+          {{ parsed_replication | json_query('[].{
+            id: id,
+            name: name,
+            direction: direction,
+            transport: transport,
+            source_datasets: source_datasets,
+            target_dataset: target_dataset,
+            recursive: recursive,
+            enabled: enabled,
+            schedule: schedule,
+            retention_policy: retention_policy
+          }') }}
+
+    # Cloud sync tasks (strip credentials)
+    - name: Build sanitized cloud sync report
+      ansible.builtin.set_fact:
+        report_cloudsync: >-
+          {{ parsed_cloudsync | json_query('[].{
+            id: id,
+            description: description,
+            direction: direction,
+            path: path,
+            enabled: enabled,
+            schedule: schedule,
+            transfer_mode: transfer_mode
+          }') }}
+
+    # System info (strip serial, license)
+    - name: Build sanitized system info report
+      ansible.builtin.set_fact:
+        report_system:
+          version: "{{ parsed_system.version | default('unknown') }}"
+          hostname: "{{ parsed_system.hostname | default('unknown') }}"
+          uptime_seconds: "{{ parsed_system.uptime_seconds | default(0) }}"
+          uptime_days: "{{ (parsed_system.uptime_seconds | default(0) | int // 86400) }}"
+          timezone: "{{ parsed_system.timezone | default('unknown') }}"
+          model: "{{ parsed_system.system_product | default('unknown') }}"
+          cores: "{{ parsed_system.cores | default(0) }}"
+          physical_cores: "{{ parsed_system.physical_cores | default(0) }}"
+          loadavg: "{{ parsed_system.loadavg | default([]) }}"
+          physmem: "{{ parsed_system.physmem | default(0) }}"
+
+    # Network interfaces: name, IPs, type
+    - name: Build sanitized network report
+      ansible.builtin.set_fact:
+        report_network: >-
+          {{ parsed_network | json_query('[].{
+            id: id,
+            name: name,
+            type: type,
+            state: state,
+            aliases: aliases,
+            ipv4_dhcp: ipv4_dhcp,
+            ipv6_auto: ipv6_auto,
+            description: description
+          }') }}
+
+    # Certificates: name, issuer, expiry (NO private keys)
+    - name: Build sanitized certificates report
+      ansible.builtin.set_fact:
+        report_certificates: >-
+          {{ parsed_certificates | json_query('[].{
+            id: id,
+            name: name,
+            issuer: issuer,
+            common: common,
+            san: san,
+            from: from,
+            until: until,
+            expired: expired,
+            cert_type: cert_type,
+            revoked: revoked
+          }') }}
+
+    # -------------------------------------------------------------------------
+    # Assemble and write the full report
+    # -------------------------------------------------------------------------
+    - name: Assemble probe report
+      ansible.builtin.set_fact:
+        probe_report:
+          generated_at: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+          truenas_host: "{{ ansible_host }}"
+          system: "{{ report_system }}"
+          pools: "{{ report_pools }}"
+          datasets: "{{ report_datasets }}"
+          nfs_shares: "{{ report_nfs }}"
+          smb_shares: "{{ report_smb }}"
+          users: "{{ report_users }}"
+          groups: "{{ report_groups }}"
+          snapshot_tasks: "{{ report_snapshots }}"
+          scrub_tasks: "{{ report_scrubs }}"
+          smart_tests: "{{ report_smart }}"
+          services: "{{ report_services }}"
+          apps: "{{ report_apps }}"
+          replication_tasks: "{{ report_replication }}"
+          cloud_sync_tasks: "{{ report_cloudsync }}"
+          network_interfaces: "{{ report_network }}"
+          certificates: "{{ report_certificates }}"
+
+    - name: Write sanitized probe report to controller
+      ansible.builtin.copy:
+        content: |
+          # =============================================================================
+          # TrueNAS Probe Report
+          # =============================================================================
+          # Generated by: ansible-playbook truenas-probe.yml
+          # Sensitive fields (password hashes, tokens, keys, serial) have been stripped.
+          # This file is safe to share and review.
+          # =============================================================================
+
+          {{ probe_report | to_nice_yaml(indent=2) }}
+        dest: "{{ probe_report_path }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Display report summary
+      ansible.builtin.debug:
+        msg: |
+          === TrueNAS Probe Complete ===
+          Host:       {{ report_system.hostname }} ({{ ansible_host }})
+          Version:    {{ report_system.version }}
+          Uptime:     {{ report_system.uptime_days }} days
+          Pools:      {{ report_pools | length }}
+          Datasets:   {{ report_datasets | length }}
+          NFS Shares: {{ report_nfs | length }}
+          SMB Shares: {{ report_smb | length }}
+          Users:      {{ report_users | length }} ({{ report_users | selectattr('builtin', 'equalto', false) | list | length }} non-builtin)
+          Groups:     {{ report_groups | length }} ({{ report_groups | selectattr('builtin', 'equalto', false) | list | length }} non-builtin)
+          Snap Tasks: {{ report_snapshots | length }}
+          Scrub Tasks:{{ report_scrubs | length }}
+          SMART Tests:{{ report_smart | length }}
+          Apps:       {{ report_apps | length }}
+          Report:     {{ probe_report_path }}

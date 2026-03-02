@@ -1,0 +1,20 @@
+# =============================================================================
+# Environment: Mac Mini M4 (Vault Primary - UTM VM)
+# =============================================================================
+# Copy to macmini.tfvars and fill in real values.
+# NEVER commit the real .tfvars file to version control.
+#
+# Note: The Mac Mini runs an Ubuntu 24.04 ARM64 VM via UTM.
+# It is not managed by Proxmox — Vault is deployed via Ansible directly.
+# These values are used by Ansible playbooks, not Terraform.
+# =============================================================================
+
+# Mac Mini VM SSH access
+macmini_host     = "10.0.10.11"
+macmini_user     = "admin"
+macmini_ssh_key  = "~/.ssh/id_ed25519"
+
+# Vault configuration
+vault_node_id    = "vault-1"
+vault_api_port   = 8200
+vault_cluster_port = 8201

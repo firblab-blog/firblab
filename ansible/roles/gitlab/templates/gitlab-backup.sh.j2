@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# =============================================================================
+# GitLab Backup Script — {{ inventory_hostname }}
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+#
+# Creates a GitLab backup (incremental or full), encrypts with age, uploads
+# to Hetzner S3, and cleans up old backups.
+#
+# Schedule:
+#   - Full backup every Sunday (day {{ gitlab_backup_full_day }})
+#   - Incremental backup all other days (INCREMENTAL=yes)
+#   - Incremental backups are independently restorable — no chain dependency
+#
+# Backup contents:
+#   - GitLab application backup (repos, DB, uploads, packages)
+#   - gitlab-secrets.json (encryption keys — WITHOUT THIS, backups are useless)
+#   - gitlab.rb (configuration)
+#
+# Restore procedure (same for full or incremental):
+#   1. Install same GitLab version
+#   2. Restore gitlab-secrets.json and gitlab.rb
+#   3. gitlab-ctl reconfigure
+#   4. gitlab-backup restore BACKUP=<timestamp>
+#   5. gitlab-ctl restart
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+BACKUP_DIR="{{ gitlab_backup_path }}"
+S3_BUCKET="{{ gitlab_backup_s3_bucket }}"
+S3_ENDPOINT="https://{{ gitlab_backup_s3_endpoint }}"
+AGE_RECIPIENT="{{ gitlab_backup_age_recipient }}"
+FULL_BACKUP_DAY="{{ gitlab_backup_full_day }}"
+
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+
+# ---------------------------------------------------------
+# Functions
+# ---------------------------------------------------------
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+cleanup() {
+  log "Cleaning up temporary files..."
+  rm -f /tmp/gitlab-config-backup-*.tar.age
+  rm -f /tmp/gitlab-config-backup-*.tar
+}
+
+trap cleanup EXIT
+
+# ---------------------------------------------------------
+# Step 1: Create GitLab application backup
+# ---------------------------------------------------------
+{% if gitlab_backup_incremental | default(true) | bool %}
+DOW=$(date +%w)  # 0=Sunday, 1=Monday, ..., 6=Saturday
+if [[ "${DOW}" -eq "${FULL_BACKUP_DAY}" ]]; then
+  log "Full backup day (day ${DOW}) — creating full backup..."
+  BACKUP_MODE="full"
+  INCREMENTAL_FLAG=""
+else
+  # Find the most recent existing backup to use as the incremental base.
+  # GitLab requires PREVIOUS_BACKUP when multiple backups exist locally.
+  PREV_BACKUP=$(ls -t "${BACKUP_DIR}"/*_gitlab_backup.tar 2>/dev/null | head -1)
+  if [[ -n "${PREV_BACKUP}" ]]; then
+    # Extract the backup ID: filename format is <timestamp>_<date>_<version>_gitlab_backup.tar
+    PREV_ID=$(basename "${PREV_BACKUP}" | sed 's/_gitlab_backup\.tar$//')
+    log "Incremental backup day (day ${DOW}) — base: ${PREV_ID}"
+    BACKUP_MODE="incremental"
+    INCREMENTAL_FLAG="INCREMENTAL=yes PREVIOUS_BACKUP=${PREV_ID}"
+  else
+    log "No previous backup found — falling back to full backup..."
+    BACKUP_MODE="full"
+    INCREMENTAL_FLAG=""
+  fi
+fi
+{% else %}
+BACKUP_MODE="full"
+INCREMENTAL_FLAG=""
+log "Creating full GitLab backup..."
+{% endif %}
+
+# shellcheck disable=SC2086
+gitlab-backup create STRATEGY=copy SKIP=artifacts ${INCREMENTAL_FLAG} 2>&1 | tail -5
+
+# Find the latest backup file
+LATEST_BACKUP=$(ls -t "${BACKUP_DIR}"/*_gitlab_backup.tar 2>/dev/null | head -1)
+if [[ -z "${LATEST_BACKUP}" ]]; then
+  log "ERROR: No backup file found in ${BACKUP_DIR}"
+  exit 1
+fi
+BACKUP_FILENAME=$(basename "${LATEST_BACKUP}")
+BACKUP_SIZE=$(du -h "${LATEST_BACKUP}" | cut -f1)
+log "Backup created: ${BACKUP_FILENAME} (${BACKUP_SIZE}, mode=${BACKUP_MODE})"
+
+# ---------------------------------------------------------
+# Step 2: Backup gitlab-secrets.json + gitlab.rb
+# ---------------------------------------------------------
+log "Backing up GitLab config files (secrets + config)..."
+CONFIG_ARCHIVE="/tmp/gitlab-config-backup-${TIMESTAMP}.tar"
+tar cf "${CONFIG_ARCHIVE}" \
+  -C / \
+  etc/gitlab/gitlab-secrets.json \
+  etc/gitlab/gitlab.rb
+log "Config archive created: $(du -h "${CONFIG_ARCHIVE}" | cut -f1)"
+
+# ---------------------------------------------------------
+# Step 3: Encrypt with age
+# ---------------------------------------------------------
+log "Encrypting backup with age..."
+ENCRYPTED_BACKUP="${LATEST_BACKUP}.age"
+age -r "${AGE_RECIPIENT}" -o "${ENCRYPTED_BACKUP}" "${LATEST_BACKUP}"
+
+ENCRYPTED_CONFIG="${CONFIG_ARCHIVE}.age"
+age -r "${AGE_RECIPIENT}" -o "${ENCRYPTED_CONFIG}" "${CONFIG_ARCHIVE}"
+log "Encryption complete."
+
+# ---------------------------------------------------------
+# Step 4: Upload to Hetzner S3 (with verification)
+# ---------------------------------------------------------
+log "Uploading to S3 (s3://${S3_BUCKET})..."
+
+upload_and_verify() {
+  local LOCAL_FILE="$1"
+  local S3_KEY="$2"
+  local LABEL="$3"
+
+  LOCAL_SIZE=$(stat -c %s "${LOCAL_FILE}" 2>/dev/null || stat -f %z "${LOCAL_FILE}")
+
+  if aws s3 cp \
+    --endpoint-url "${S3_ENDPOINT}" \
+    "${LOCAL_FILE}" \
+    "s3://${S3_BUCKET}/${S3_KEY}" \
+    --quiet; then
+
+    # Verify upload by checking remote object size
+    REMOTE_SIZE=$(aws s3api head-object \
+      --endpoint-url "${S3_ENDPOINT}" \
+      --bucket "${S3_BUCKET}" \
+      --key "${S3_KEY}" \
+      --query 'ContentLength' \
+      --output text 2>/dev/null || echo "0")
+
+    if [[ "${LOCAL_SIZE}" -eq "${REMOTE_SIZE}" ]]; then
+      log "${LABEL} uploaded and verified (${LOCAL_SIZE} bytes)."
+    else
+      log "ERROR: ${LABEL} size mismatch — local=${LOCAL_SIZE}, remote=${REMOTE_SIZE}. Upload may be corrupt!"
+      exit 1
+    fi
+  else
+    log "ERROR: ${LABEL} S3 upload failed."
+    exit 1
+  fi
+}
+
+upload_and_verify "${ENCRYPTED_BACKUP}" "${BACKUP_FILENAME}.age" "Application backup (${BACKUP_MODE})"
+upload_and_verify "${ENCRYPTED_CONFIG}" "gitlab-config-backup-${TIMESTAMP}.tar.age" "Config backup"
+
+# S3 retention is handled by a server-side lifecycle policy (30-day expiration)
+# configured in Terraform Layer 06-hetzner. No script-based cleanup needed.
+
+# ---------------------------------------------------------
+# Step 5: Clean up local encrypted files (keep originals per retention)
+# ---------------------------------------------------------
+rm -f "${ENCRYPTED_BACKUP}"
+log "GitLab backup complete."
+log "  Mode:    ${BACKUP_MODE}"
+log "  Local:   ${LATEST_BACKUP}"
+log "  S3:      s3://${S3_BUCKET}/${BACKUP_FILENAME}.age"
+log "  Config:  s3://${S3_BUCKET}/gitlab-config-backup-${TIMESTAMP}.tar.age"

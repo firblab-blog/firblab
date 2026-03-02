@@ -1,0 +1,139 @@
+# =============================================================================
+# Traefik Dynamic Routing Configuration — Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: traefik-services.yml.j2
+#
+# TO ADD A ROUTE: Add a router + service entry below, then run:
+#   ansible-playbook ansible/playbooks/gateway-deploy.yml
+# Traefik watches this directory (watch: true) and hot-reloads — no restart.
+#
+# Backends routed via WireGuard tunnel to Services VLAN 20 (10.0.20.0/24).
+# Local Docker services (Gotify, AdGuard, Uptime Kuma) reached via 127.0.0.1
+# because Traefik runs network_mode: host.
+# =============================================================================
+
+http:
+  routers:
+    # ---- Homelab services (via WireGuard tunnel to 10.0.20.x) ----------
+
+    ghost-router:
+      rule: "Host(`blog.{{ gateway_domain }}`)"
+      service: ghost-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+    mealie-router:
+      rule: "Host(`food.{{ gateway_domain }}`)"
+      service: mealie-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+    foundryvtt-router:
+      rule: "Host(`foundryvtt.{{ gateway_domain }}`)"
+      service: foundryvtt-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+    # ---- Traefik dashboard (admin, restricted) ------------------------------
+
+    traefik-dashboard:
+      rule: "Host(`traefik.{{ gateway_domain }}`)"
+      service: api@internal
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - dashboard-auth
+
+    # ---- Local Docker services (127.0.0.1 via host network) ----------------
+
+    gotify-router:
+      rule: "Host(`gotify.{{ gateway_domain }}`)"
+      service: gotify-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+    adguard-router:
+      rule: "Host(`adguard.{{ gateway_domain }}`)"
+      service: adguard-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+    status-router:
+      rule: "Host(`status.{{ gateway_domain }}`)"
+      service: status-service
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - security-headers
+
+  services:
+    # ---- Homelab backends (via WireGuard tunnel) ----------------------------
+    ghost-service:
+      loadBalancer:
+        servers:
+          - url: "http://{{ gateway_ghost_backend }}"
+    mealie-service:
+      loadBalancer:
+        servers:
+          - url: "http://{{ gateway_mealie_backend }}"
+    foundryvtt-service:
+      loadBalancer:
+        servers:
+          - url: "http://{{ gateway_foundryvtt_backend }}"
+
+    # ---- Local Docker service backends (host network) ----------------------
+    # Traefik runs network_mode: host so it reaches these via localhost
+    gotify-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8080"
+    adguard-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3000"
+    status-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3001"
+
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 63072000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        forceSTSHeader: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customFrameOptionsValue: "SAMEORIGIN"
+
+    dashboard-auth:
+      basicAuth:
+        users:
+          - "admin:{{ gateway_traefik_dashboard_hash }}"

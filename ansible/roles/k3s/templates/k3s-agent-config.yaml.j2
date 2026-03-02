@@ -1,0 +1,16 @@
+# K3s Agent Configuration — CIS Hardened
+# Managed by Ansible — DO NOT EDIT MANUALLY
+
+# Join the cluster via the API endpoint
+server: {{ k3s_server_url }}
+token-file: {{ k3s_config_dir }}/cluster-token
+
+# CIS hardening
+protect-kernel-defaults: {{ k3s_protect_kernel_defaults | lower }}
+
+{% if k3s_kubelet_args %}
+kubelet-arg:
+{% for arg in k3s_kubelet_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}

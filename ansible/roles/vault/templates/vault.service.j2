@@ -1,0 +1,72 @@
+# =============================================================================
+# HashiCorp Vault systemd Service Unit
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Node: {{ vault_node_id }}
+# =============================================================================
+
+[Unit]
+Description=HashiCorp Vault - A tool for managing secrets
+Documentation=https://developer.hashicorp.com/vault/docs
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty={{ vault_config_dir }}/vault.hcl
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+User={{ vault_user }}
+Group={{ vault_group }}
+EnvironmentFile=-{{ vault_config_dir }}/vault.env
+ExecStart={{ vault_binary_path }} server -config={{ vault_config_dir }}/vault.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# ---------------------------------------------------------------------------
+# Security Hardening
+# ---------------------------------------------------------------------------
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ vault_data_dir }} {{ vault_log_dir }}
+
+# Capability restrictions
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+
+# Limit access to system calls
+SeccompProfile=@system-service
+SystemCallFilter=~@mount @reboot @swap @obsolete @clock @cpu-emulation @debug @module @raw-io
+
+# Restrict namespace creation
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+# Lock memory to prevent secrets from swapping to disk
+LockPersonality=true
+
+# ---------------------------------------------------------------------------
+# Resource Limits
+# ---------------------------------------------------------------------------
+LimitNOFILE=65536
+LimitNPROC=65536
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vault
+
+[Install]
+WantedBy=multi-user.target

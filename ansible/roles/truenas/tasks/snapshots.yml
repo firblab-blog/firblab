@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# TrueNAS — Snapshot Task Configuration
+# =============================================================================
+# Creates periodic snapshot tasks. Protection fix: probe found zero snapshot
+# tasks — both pools had no automated snapshots.
+#
+# Uses arensb.truenas.pool_snapshot_task module.
+# Module params: dataset, recursive, lifetime_value, lifetime_unit, name_format,
+#   minute, hour, day (alias: dom), month, weekday (alias: dow),
+#   begin_time, end_time, exclude, allow_empty, enabled, match, state.
+# Note: lifetime_unit is LOWERCASE (hour/day/week/month/year).
+# =============================================================================
+
+- name: "Configure snapshot task for {{ item.dataset }}"
+  arensb.truenas.pool_snapshot_task:
+    match:
+      dataset: "{{ item.dataset }}"
+      name_format: "{{ item.name_format | default('auto-') }}"
+    dataset: "{{ item.dataset }}"
+    recursive: "{{ item.recursive | default(true) }}"
+    lifetime_value: "{{ item.lifetime_value }}"
+    lifetime_unit: "{{ item.lifetime_unit }}"
+    name_format: "{{ item.name_format | default('auto-%Y-%m-%d_%H-%M') }}"
+    minute: "{{ item.minute | default('0') }}"
+    hour: "{{ item.hour | default('0') }}"
+    day: "{{ item.day | default('*') }}"
+    month: "{{ item.month | default('*') }}"
+    weekday: "{{ item.weekday | default('*') }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    allow_empty: "{{ item.allow_empty | default(false) }}"
+    state: present
+  loop: "{{ truenas_snapshot_tasks }}"
+  loop_control:
+    label: "{{ item.dataset }} ({{ item.lifetime_value }} {{ item.lifetime_unit }})"

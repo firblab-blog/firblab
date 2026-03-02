@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# FoundryVTT Role Handlers
+# =============================================================================
+
+- name: Restart foundryvtt
+  ansible.builtin.systemd:
+    name: foundryvtt
+    state: restarted
+    daemon_reload: true

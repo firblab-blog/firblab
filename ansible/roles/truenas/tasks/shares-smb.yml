@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# TrueNAS — SMB Share Configuration
+# =============================================================================
+# Manages SMB/CIFS shares. Security fix: disables guest access on firb-lab-01
+# share (probe found guestok=true). Adds hostsallow for subnet restriction.
+#
+# Uses arensb.truenas.sharing_smb module (wraps midclt call sharing.smb.*).
+# =============================================================================
+
+- name: "Configure SMB share {{ item.name }}"
+  arensb.truenas.sharing_smb:
+    name: "{{ item.name }}"
+    path: "{{ item.path }}"
+    comment: "{{ item.comment | default(omit) }}"
+    purpose: "{{ item.purpose | default('DEFAULT_SHARE') }}"
+    guestok: "{{ item.guestok | default(false) }}"
+    browsable: "{{ item.browsable | default(true) }}"
+    ro: "{{ item.ro | default(false) }}"
+    hostsallow: "{{ item.hostsallow | default([]) }}"
+    hostsdeny: "{{ item.hostsdeny | default([]) }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    state: present
+  loop: "{{ truenas_smb_shares }}"
+  loop_control:
+    label: "{{ item.name }}"

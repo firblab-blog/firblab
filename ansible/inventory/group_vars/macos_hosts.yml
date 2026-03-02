@@ -1,0 +1,58 @@
+---
+# =============================================================================
+# macOS Hosts - Group Variables
+# =============================================================================
+# Variables for macOS physical hosts (Mac Mini M4).
+# These hosts run macOS 15+ and are hardened via playbooks/macos-bootstrap.yml.
+# vault-1 runs natively on this host as a LaunchDaemon.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Ansible behavior
+# ---------------------------------------------------------------------------
+ansible_become_method: sudo
+ansible_python_interpreter: /usr/bin/python3
+
+# ---------------------------------------------------------------------------
+# SSH Hardening
+# ---------------------------------------------------------------------------
+sshd_port: 22
+sshd_permit_root_login: "no"
+sshd_password_authentication: "no"
+sshd_pubkey_authentication: "yes"
+sshd_challenge_response_authentication: "no"
+sshd_allow_users:
+  - admin
+
+# ---------------------------------------------------------------------------
+# pf Firewall
+# ---------------------------------------------------------------------------
+# Networks allowed to access this host
+pf_management_network: "10.0.10.0/24"
+pf_security_network: "10.0.50.0/24"
+pf_lan_network: "10.0.4.0/24"
+
+# Ports open from management VLAN and LAN (workstation access)
+pf_mgmt_tcp_ports:
+  - 22     # SSH
+
+# Ports open from both management and security VLANs
+# (Vault runs natively on this host as a LaunchDaemon)
+pf_vault_tcp_ports:
+  - 8200   # Vault API
+  - 8201   # Vault Raft cluster
+
+# Ports open only from management VLAN (unseal vault)
+pf_unseal_tcp_ports:
+  - 8210   # Unseal Vault API
+
+# ---------------------------------------------------------------------------
+# Homebrew
+# ---------------------------------------------------------------------------
+homebrew_taps: []
+
+homebrew_packages:
+  - jq
+  - htop
+
+homebrew_casks: []

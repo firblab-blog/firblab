@@ -1,0 +1,51 @@
+# K3s Server Configuration — CIS Hardened
+# Managed by Ansible — DO NOT EDIT MANUALLY
+
+{% if inventory_hostname == k3s_init_node %}
+# First server: initialize new cluster with embedded etcd
+cluster-init: true
+{% else %}
+# Additional server: join existing cluster
+server: {{ k3s_server_url }}
+{% endif %}
+
+token-file: {{ k3s_config_dir }}/cluster-token
+write-kubeconfig-mode: "0600"
+
+# TLS SANs for API server certificate
+tls-san:
+{% for san in k3s_tls_san %}
+  - "{{ san }}"
+{% endfor %}
+
+# Networking — MUST differ from RKE2 cluster on same VLAN
+flannel-backend: {{ k3s_flannel_backend }}
+cluster-cidr: "{{ k3s_cluster_cidr }}"
+service-cidr: "{{ k3s_service_cidr }}"
+cluster-dns: "{{ k3s_cluster_dns }}"
+
+# Disable built-in components we replace with custom installs
+{% if k3s_disable %}
+disable:
+{% for component in k3s_disable %}
+  - {{ component }}
+{% endfor %}
+{% endif %}
+
+# CIS hardening flags (K3s does not have RKE2's profile: "cis")
+protect-kernel-defaults: {{ k3s_protect_kernel_defaults | lower }}
+secrets-encryption: {{ k3s_secrets_encryption | lower }}
+
+{% if k3s_kube_apiserver_args %}
+kube-apiserver-arg:
+{% for arg in k3s_kube_apiserver_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}
+
+{% if k3s_kubelet_args %}
+kubelet-arg:
+{% for arg in k3s_kubelet_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}

@@ -1,0 +1,43 @@
+# =============================================================================
+# UniFi Config Role — Main Task Dispatcher
+# =============================================================================
+# Fills provider gaps by calling the UniFi local REST API directly.
+# Auth: X-API-KEY header (same as seed-unifi-to-vault.sh and Terraform provider).
+#
+# Each sub-task file follows the idempotency pattern:
+#   1. GET current state from the API
+#   2. Compare with desired state
+#   3. PUT only if different
+#   4. Report changed accurately
+# =============================================================================
+---
+
+- name: Validate UniFi API key is provided
+  ansible.builtin.assert:
+    that:
+      - unifi_api_key | length > 0
+    fail_msg: >-
+      unifi_api_key is required. Pass via extra-vars (-e unifi_api_key=...)
+      or Vault lookup. Never hardcode API keys.
+
+- name: Verify UniFi controller is reachable
+  ansible.builtin.uri:
+    url: "{{ unifi_controller_url }}/proxy/network/api/s/default/stat/health"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_api_key }}"
+    validate_certs: "{{ unifi_validate_certs }}"
+    status_code: 200
+  register: unifi_health_check
+
+- name: Configure STP priorities
+  ansible.builtin.include_tasks: stp.yml
+  when: unifi_manage_stp | bool and (unifi_stp_priorities | length > 0)
+
+- name: Configure DNS content filters
+  ansible.builtin.include_tasks: dns_filters.yml
+  when: unifi_manage_dns_filters | bool
+
+- name: Configure ad blocking
+  ansible.builtin.include_tasks: ad_blocking.yml
+  when: unifi_manage_ad_blocking | bool

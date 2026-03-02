@@ -1,0 +1,84 @@
+---
+# =============================================================================
+# Proxmox fstab nofail Remediation
+# =============================================================================
+# Ensures all non-root fstab entries for data disks (HDD directory pools)
+# include the 'nofail' mount option. Without nofail, a missing or failed
+# disk causes systemd to drop to emergency mode on boot.
+#
+# This is a one-time remediation for fstab entries created by the
+# proxmox-disks role before nofail was added to the default mount options.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/proxmox-fstab-nofail.yml
+#
+# What it does:
+#   1. Finds fstab entries under /mnt/ (data disk mount points)
+#   2. Checks if they already have nofail
+#   3. Adds nofail to any that are missing it
+#   4. Runs systemctl daemon-reload to pick up fstab changes
+# =============================================================================
+
+- name: "Ensure nofail on all data disk fstab entries"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read current fstab
+      ansible.builtin.slurp:
+        src: /etc/fstab
+      register: fstab_content
+      tags: [fstab-nofail]
+
+    - name: Find data disk entries missing nofail
+      ansible.builtin.set_fact:
+        fstab_fixes: >-
+          {%- set fixes = [] -%}
+          {%- for line in (fstab_content.content | b64decode).split('\n') -%}
+            {%- set stripped = line | trim -%}
+            {%- if stripped and not stripped.startswith('#') and '/mnt/' in stripped -%}
+              {%- set fields = stripped.split() -%}
+              {%- if fields | length >= 4 and 'nofail' not in fields[3] -%}
+                {%- set old_opts = fields[3] -%}
+                {%- set new_opts = old_opts + ',nofail' -%}
+                {%- if fixes.append({'mount': fields[1], 'old_opts': old_opts, 'new_opts': new_opts}) -%}{%- endif -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ fixes }}
+      tags: [fstab-nofail]
+
+    - name: Display planned changes
+      ansible.builtin.debug:
+        msg: "Will add nofail to {{ item.mount }} ({{ item.old_opts }} → {{ item.new_opts }})"
+      loop: "{{ fstab_fixes }}"
+      when: fstab_fixes | length > 0
+      tags: [fstab-nofail]
+
+    - name: Report no changes needed
+      ansible.builtin.debug:
+        msg: "All data disk fstab entries on {{ inventory_hostname }} already have nofail."
+      when: fstab_fixes | length == 0
+      tags: [fstab-nofail]
+
+    - name: Add nofail to fstab entries
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: "^(\\S+\\s+{{ item.mount | regex_escape }}\\s+\\S+\\s+){{ item.old_opts | regex_escape }}(\\s+.*)$"
+        replace: "\\g<1>{{ item.new_opts }}\\g<2>"
+      loop: "{{ fstab_fixes }}"
+      when: fstab_fixes | length > 0
+      tags: [fstab-nofail]
+
+    - name: Reload systemd to pick up fstab changes
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: fstab_fixes | length > 0
+      tags: [fstab-nofail]
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "Updated {{ fstab_fixes | length }} fstab entry/entries on {{ inventory_hostname }}."
+      when: fstab_fixes | length > 0
+      tags: [fstab-nofail]

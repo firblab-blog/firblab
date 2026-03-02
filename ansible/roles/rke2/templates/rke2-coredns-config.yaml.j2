@@ -1,0 +1,57 @@
+# CoreDNS HelmChartConfig — Custom DNS Zone Configuration
+# Managed by Ansible — DO NOT EDIT MANUALLY
+#
+# Deployed to {{ rke2_data_dir }}/server/manifests/ on RKE2 server nodes.
+# The RKE2 embedded Helm controller reconciles this against the rke2-coredns
+# HelmChart. CoreDNS hot-reloads the Corefile via its 'reload' plugin.
+#
+# Purpose: Add dedicated server blocks for internal DNS zones with longer
+# cache TTLs and explicit upstream forwarding, preventing intermittent
+# NXDOMAIN for *.home.example-lab.org inside Kubernetes pods.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-coredns
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    servers:
+{% for zone in rke2_coredns_custom_zones %}
+      - zones:
+          - zone: {{ zone.zone }}
+        port: 53
+        plugins:
+          - name: errors
+          - name: forward
+            parameters: . {{ zone.upstreams | join(' ') }}
+            configBlock: |-
+              policy {{ zone.forward_policy }}
+          - name: cache
+            parameters: {{ zone.cache_ttl }}
+          - name: reload
+          - name: loadbalance
+{% endfor %}
+      - zones:
+          - zone: .
+        port: 53
+        plugins:
+          - name: errors
+          - name: health
+            configBlock: |-
+              lameduck 10s
+          - name: ready
+          - name: kubernetes
+            parameters: cluster.local in-addr.arpa ip6.arpa
+            configBlock: |-
+              pods insecure
+              fallthrough in-addr.arpa ip6.arpa
+              ttl 30
+          - name: prometheus
+            parameters: 0.0.0.0:9153
+          - name: forward
+            parameters: . /etc/resolv.conf
+          - name: cache
+            parameters: {{ rke2_coredns_default_cache_ttl }}
+          - name: loop
+          - name: reload
+          - name: loadbalance

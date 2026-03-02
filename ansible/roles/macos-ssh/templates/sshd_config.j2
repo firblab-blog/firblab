@@ -1,0 +1,65 @@
+# Hardened SSH Configuration - Managed by Ansible
+# Do not edit manually
+# Host: {{ inventory_hostname }}
+
+Port {{ sshd_port }}
+AddressFamily any
+ListenAddress 0.0.0.0
+
+# Host keys
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Authentication
+LoginGraceTime 30
+PermitRootLogin {{ sshd_permit_root_login }}
+StrictModes yes
+MaxAuthTries {{ ssh_max_auth_tries | default(3) }}
+MaxSessions 10
+
+PubkeyAuthentication {{ sshd_pubkey_authentication }}
+AuthorizedKeysFile .ssh/authorized_keys
+
+PasswordAuthentication {{ sshd_password_authentication }}
+PermitEmptyPasswords no
+ChallengeResponseAuthentication {{ sshd_challenge_response_authentication }}
+
+# Kerberos
+KerberosAuthentication no
+
+# GSSAPI
+GSSAPIAuthentication no
+
+UsePAM yes
+
+{% if sshd_allow_users is defined and sshd_allow_users | length > 0 %}
+AllowUsers {{ sshd_allow_users | join(' ') }}
+{% endif %}
+
+# Forwarding and tunneling
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+
+# Session
+PrintMotd yes
+PrintLastLog yes
+TCPKeepAlive yes
+PermitUserEnvironment no
+Compression delayed
+ClientAliveInterval 300
+ClientAliveCountMax 2
+UseDNS no
+MaxStartups 10:30:100
+
+# Accept locale-related environment variables
+AcceptEnv LANG LC_*
+
+# SFTP subsystem
+Subsystem sftp /usr/libexec/sftp-server

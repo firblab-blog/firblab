@@ -1,0 +1,199 @@
+---
+# =============================================================================
+# RKE2 Server Installation
+# =============================================================================
+# Installs and configures an RKE2 server (control plane) node.
+# The deploy playbook runs this in serial: first server initializes the
+# cluster, subsequent servers join via the registration endpoint.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Install RKE2 Binary
+# ---------------------------------------------------------------------------
+- name: Install RKE2 server
+  ansible.builtin.shell:
+    cmd: |
+      curl -sfL https://get.rke2.io | \
+        INSTALL_RKE2_VERSION="{{ rke2_version }}" \
+        INSTALL_RKE2_TYPE="server" \
+        sh -
+    creates: /usr/local/bin/rke2
+  environment:
+    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Cluster Token
+# ---------------------------------------------------------------------------
+# First server generates the token; others use it to join.
+- name: Generate cluster token (first server only)
+  ansible.builtin.set_fact:
+    rke2_cluster_token: "{{ lookup('ansible.builtin.password', '/dev/null', length=64, chars=['ascii_letters', 'digits']) }}"
+  when:
+    - inventory_hostname == rke2_init_node
+    - rke2_cluster_token is not defined
+  no_log: true
+  run_once: true
+  tags:
+    - install
+
+- name: Write cluster token file
+  ansible.builtin.copy:
+    content: "{{ rke2_cluster_token }}"
+    dest: "{{ rke2_config_dir }}/cluster-token"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Server Configuration
+# ---------------------------------------------------------------------------
+- name: Deploy RKE2 server config
+  ansible.builtin.template:
+    src: rke2-server-config.yaml.j2
+    dest: "{{ rke2_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart rke2-server
+  tags:
+    - install
+    - configure
+
+# ---------------------------------------------------------------------------
+# CoreDNS HelmChartConfig (Custom DNS Zones)
+# ---------------------------------------------------------------------------
+# Deploys a HelmChartConfig manifest that customizes the rke2-coredns Helm
+# release. RKE2's embedded Helm controller picks up manifests from the server
+# manifests directory and reconciles them. CoreDNS hot-reloads the updated
+# Corefile via its 'reload' plugin.
+#
+# On fresh installs: manifest is in place before RKE2 starts, so CoreDNS
+# boots with the custom Corefile immediately.
+# On running clusters: the Helm controller reconciles the change and CoreDNS
+# hot-reloads within ~30 seconds (no pod restart needed).
+- name: Ensure RKE2 server manifests directory exists
+  ansible.builtin.file:
+    path: "{{ rke2_data_dir }}/server/manifests"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: rke2_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - install
+    - configure
+    - coredns
+
+- name: Deploy CoreDNS HelmChartConfig manifest
+  ansible.builtin.template:
+    src: rke2-coredns-config.yaml.j2
+    dest: "{{ rke2_data_dir }}/server/manifests/rke2-coredns-config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  when: rke2_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - install
+    - configure
+    - coredns
+
+# ---------------------------------------------------------------------------
+# Enable and Start
+# ---------------------------------------------------------------------------
+- name: Enable RKE2 server service
+  ansible.builtin.systemd:
+    name: rke2-server
+    enabled: true
+    daemon_reload: true
+  tags:
+    - install
+
+- name: Start RKE2 server service
+  ansible.builtin.systemd:
+    name: rke2-server
+    state: started
+  tags:
+    - install
+
+- name: Wait for RKE2 server to be ready
+  ansible.builtin.wait_for:
+    port: 6443
+    host: "{{ ansible_host }}"
+    timeout: 300
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Add RKE2 binaries to PATH
+# ---------------------------------------------------------------------------
+- name: Add RKE2 bin to system PATH
+  ansible.builtin.copy:
+    dest: /etc/profile.d/rke2.sh
+    content: |
+      # RKE2 — managed by Ansible
+      export PATH="$PATH:{{ rke2_bin_dir }}"
+      export KUBECONFIG="{{ rke2_data_dir }}/server/cred/admin.kubeconfig"
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Fetch Kubeconfig (first server only)
+# ---------------------------------------------------------------------------
+- name: Fetch kubeconfig to controller
+  ansible.builtin.fetch:
+    src: "{{ rke2_data_dir }}/server/cred/admin.kubeconfig"
+    dest: "~/.kube/rke2-config"
+    flat: true
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Wait for Node Ready
+# ---------------------------------------------------------------------------
+- name: Wait for node to report Ready
+  ansible.builtin.command:
+    cmd: >-
+      {{ rke2_bin_dir }}/kubectl --kubeconfig {{ rke2_data_dir }}/server/cred/admin.kubeconfig
+      get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  register: node_ready
+  until: node_ready.stdout == "True"
+  retries: 30
+  delay: 10
+  changed_when: false
+  tags:
+    - install
+    - verify
+
+# ---------------------------------------------------------------------------
+# Back Up Cluster Token to Vault
+# ---------------------------------------------------------------------------
+# Runs on the init node only (token was generated there). Delegates to
+# localhost so the Ansible controller's Vault token + CA cert are used.
+# Vault path: secret/compute/rke2-cluster-token
+# Required to rejoin nodes if the init node's /etc/rancher/rke2/cluster-token
+# file is ever lost (e.g., after full VM rebuild).
+- name: Store cluster token in Vault
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ ansible_hashi_vault_url }}"
+    ca_cert: "{{ ansible_hashi_vault_ca_cert }}"
+    auth_method: token
+    mount_point: secret
+    path: compute/rke2-cluster-token
+    data:
+      token: "{{ rke2_cluster_token }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - install
+    - vault

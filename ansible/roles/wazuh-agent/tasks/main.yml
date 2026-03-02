@@ -1,0 +1,54 @@
+---
+# =============================================================================
+# Wazuh Agent Role - SIEM Agent Installation
+# =============================================================================
+# Installs and configures the Wazuh agent to report to the Wazuh manager.
+# Supports: Debian/Ubuntu (apt) and RedHat/Rocky (dnf)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Install (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family Wazuh agent install tasks
+  ansible.builtin.include_tasks: "install-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Configure Agent (cross-platform — same paths and config on all distros)
+# ---------------------------------------------------------------------------
+- name: Configure Wazuh manager address
+  ansible.builtin.lineinfile:
+    path: /var/ossec/etc/ossec.conf
+    regexp: "<address>.*</address>"
+    line: "      <address>{{ wazuh_manager_address }}</address>"
+    state: present
+  tags:
+    - configure
+
+- name: Set Wazuh agent name to inventory hostname
+  ansible.builtin.lineinfile:
+    path: /var/ossec/etc/ossec.conf
+    regexp: "<agent_name>.*</agent_name>"
+    line: "    <agent_name>{{ inventory_hostname }}</agent_name>"
+    insertafter: "</server>"
+    state: present
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Enable and Start Service
+# ---------------------------------------------------------------------------
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  tags:
+    - service
+
+- name: Enable and start wazuh-agent service
+  ansible.builtin.systemd:
+    name: wazuh-agent
+    enabled: true
+    state: started
+  tags:
+    - service

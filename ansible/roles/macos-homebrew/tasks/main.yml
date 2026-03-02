@@ -1,0 +1,66 @@
+---
+# =============================================================================
+# macOS Homebrew Package Management
+# =============================================================================
+# Installs Homebrew taps, formulae, and casks.
+# Runs as the non-root user (Homebrew does not support sudo).
+#
+# Based on: lab-macmini/ansible/roles/mac.homebrew
+# =============================================================================
+
+- name: Add Homebrew to PATH in .zprofile
+  ansible.builtin.lineinfile:
+    path: "/Users/{{ ansible_user }}/.zprofile"
+    line: 'eval "$(/opt/homebrew/bin/brew shellenv)"'
+    owner: "{{ ansible_user }}"
+    group: staff
+    create: true
+    mode: "0644"
+  become: true
+  tags:
+    - packages
+    - homebrew
+
+- name: Ensure Homebrew taps
+  community.general.homebrew_tap:
+    name: "{{ item }}"
+    path: /opt/homebrew/bin
+  loop: "{{ homebrew_taps }}"
+  when: homebrew_taps | length > 0
+  become: true
+  become_user: "{{ ansible_user }}"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    HOME: "/Users/{{ ansible_user }}"
+  tags:
+    - packages
+    - homebrew
+
+- name: Install Homebrew packages
+  community.general.homebrew:
+    name: "{{ homebrew_packages }}"
+    state: present
+    path: /opt/homebrew/bin
+  when: homebrew_packages | length > 0
+  become: true
+  become_user: "{{ ansible_user }}"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    HOME: "/Users/{{ ansible_user }}"
+  tags:
+    - packages
+    - homebrew
+
+- name: Install Homebrew casks
+  community.general.homebrew_cask:
+    name: "{{ homebrew_casks }}"
+    state: present
+  when: homebrew_casks | length > 0
+  become: true
+  become_user: "{{ ansible_user }}"
+  environment:
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    HOME: "/Users/{{ ansible_user }}"
+  tags:
+    - packages
+    - homebrew

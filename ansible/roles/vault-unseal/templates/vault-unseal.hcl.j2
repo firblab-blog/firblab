@@ -1,0 +1,38 @@
+# =============================================================================
+# Vault Unseal Instance Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }} ({{ ansible_host }})
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global Settings
+# ---------------------------------------------------------------------------
+ui            = {{ vault_unseal_ui_enabled | default(true) | lower }}
+disable_mlock = {{ 'true' if ansible_os_family == 'Darwin' else 'false' }}
+log_level     = "info"
+
+cluster_name = "firblab-unseal"
+
+# ---------------------------------------------------------------------------
+# TCP Listener
+# ---------------------------------------------------------------------------
+listener "tcp" {
+  address     = "0.0.0.0:{{ vault_unseal_port }}"
+  tls_disable = {{ vault_unseal_tls_disable | default(false) | lower }}
+
+{% if not (vault_unseal_tls_disable | default(false) | bool) %}
+  tls_cert_file      = "{{ vault_unseal_tls_dir }}/vault-cert.pem"
+  tls_key_file       = "{{ vault_unseal_tls_dir }}/vault-key.pem"
+  tls_client_ca_file = "{{ vault_unseal_tls_dir }}/ca.pem"
+  tls_min_version    = "tls12"
+{% endif %}
+}
+
+# ---------------------------------------------------------------------------
+# File Storage Backend
+# ---------------------------------------------------------------------------
+storage "file" {
+  path = "{{ vault_unseal_data_dir }}"
+}

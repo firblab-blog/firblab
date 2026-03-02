@@ -1,0 +1,25 @@
+# =============================================================================
+# Allow DNS Egress — Network Policy
+# =============================================================================
+# Required by all pods that need DNS resolution (virtually all of them).
+# Apply alongside default-deny to each workload namespace.
+# =============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

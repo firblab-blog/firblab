@@ -1,0 +1,73 @@
+# =============================================================================
+# GitLab Agent for Kubernetes — Helm Values
+# =============================================================================
+# Chart: gitlab/gitlab-agent (https://charts.gitlab.io)
+# Deployed by ArgoCD (wave 0) into the gitlab-agent namespace.
+#
+# The agent maintains an outbound WebSocket tunnel to GitLab's KAS
+# service for CI/CD pipeline access and cluster observability.
+# No inbound firewall rules needed — agent initiates all connections.
+#
+# Token injection: ESO syncs Vault secret/k8s/gitlab-agent → K8s Secret
+# "gitlab-agent-token" in this namespace.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# KAS Connection
+# ---------------------------------------------------------------------------
+# WebSocket Secure through the standalone Traefik proxy (TLS termination).
+# Traffic path: Agent pod (VLAN 20) → Traefik (10.0.10.17, VLAN 10) →
+#               GitLab NGINX (10.0.10.50) → KAS (localhost:8150)
+config:
+  kasAddress: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
+  # Agent token stored in a K8s Secret created by External Secrets Operator.
+  # The Secret must have a key named "token" with the agent registration token.
+  secretName: "gitlab-agent-token"
+
+# ---------------------------------------------------------------------------
+# Resources — lightweight agent footprint
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Replicas — single replica is sufficient for homelab
+# ---------------------------------------------------------------------------
+replicas: 1
+
+# ---------------------------------------------------------------------------
+# Pod Security — run as non-root (CIS compliance)
+# ---------------------------------------------------------------------------
+# Chart key: podSecurityContext → pod-level spec.securityContext
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Chart key: securityContext → container-level securityContext
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Service Account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: gitlab-agent
+
+# ---------------------------------------------------------------------------
+# Observability — enable Prometheus metrics scraping
+# ---------------------------------------------------------------------------
+observability:
+  enabled: true

@@ -1,0 +1,13 @@
+---
+- name: Unload launchd job
+  ansible.builtin.command: >
+    launchctl bootout system/{{ item.label }}
+  become: true
+  changed_when: true
+  failed_when: false
+
+- name: Load launchd job
+  ansible.builtin.command: >
+    launchctl bootstrap system {{ item.dest | default('/Library/LaunchDaemons/' ~ item.label ~ '.plist') }}
+  become: true
+  changed_when: true

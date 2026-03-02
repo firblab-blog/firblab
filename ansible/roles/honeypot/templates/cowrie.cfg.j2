@@ -1,0 +1,36 @@
+# =============================================================================
+# Cowrie SSH/Telnet Honeypot Configuration
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Interactive SSH/Telnet honeypot with session recording and malware capture.
+# Cowrie listens on container ports 2222 (SSH) and 2223 (Telnet), mapped to
+# host ports {{ honeypot_cowrie_ssh_host_port }} and {{ honeypot_cowrie_telnet_host_port }} via Docker.
+# =============================================================================
+
+[honeypot]
+hostname = {{ honeypot_cowrie_hostname }}
+log_path = var/log/cowrie
+download_path = dl
+download_limit_size = {{ honeypot_cowrie_download_limit }}
+contents_path = honeyfs
+share_path = share
+state_path = var/lib/cowrie
+etc_path = etc
+
+[ssh]
+enabled = true
+listen_endpoints = tcp:2222:interface=0.0.0.0
+version = {{ honeypot_cowrie_ssh_version }}
+
+[telnet]
+enabled = true
+listen_endpoints = tcp:2223:interface=0.0.0.0
+
+[output_jsonlog]
+enabled = true
+logfile = var/log/cowrie/cowrie.json
+epoch_timestamp = false
+
+[output_textlog]
+enabled = true
+logfile = var/log/cowrie/cowrie.log

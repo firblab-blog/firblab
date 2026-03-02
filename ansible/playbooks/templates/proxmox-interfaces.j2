@@ -1,0 +1,56 @@
+# =============================================================================
+# Proxmox VE Network Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Management bridge port: {{ proxmox_mgmt_bridge_ports }}
+{% if proxmox_storage_bridge_ports is defined %}
+# Storage bridge port: {{ proxmox_storage_bridge_ports }}
+{% endif %}
+# =============================================================================
+
+auto lo
+iface lo inet loopback
+
+iface {{ proxmox_mgmt_bridge_ports }} inet manual
+{% if proxmox_mgmt_ethtool_speed is defined %}
+	pre-up ethtool -s {{ proxmox_mgmt_bridge_ports }} speed {{ proxmox_mgmt_ethtool_speed }} duplex full autoneg off
+{% endif %}
+
+auto {{ proxmox_mgmt_interface }}
+iface {{ proxmox_mgmt_interface }} inet static
+	address {{ ansible_host }}/24
+	gateway 10.0.10.1
+	bridge-ports {{ proxmox_mgmt_bridge_ports }}
+	bridge-stp off
+	bridge-fd 0
+	bridge-vlan-aware yes
+	bridge-vids 2-4094
+
+{% if proxmox_storage_bridge_ports is defined %}
+# ---------------------------------------------------------
+# Storage Bridge (vmbr1) — dedicated 10G point-to-point
+# ---------------------------------------------------------
+# Non-VLAN-aware bridge for dedicated storage traffic.
+# Connected via DAC to TrueNAS 10G NIC (VLAN 40 subnet).
+# Bypasses switch fabric for storage I/O.
+# ---------------------------------------------------------
+
+iface {{ proxmox_storage_bridge_ports }} inet manual
+{% if proxmox_storage_mtu is defined %}
+	mtu {{ proxmox_storage_mtu }}
+{% endif %}
+
+auto {{ proxmox_storage_interface | default('vmbr1') }}
+iface {{ proxmox_storage_interface | default('vmbr1') }} inet static
+	address {{ proxmox_storage_ip }}
+	bridge-ports {{ proxmox_storage_bridge_ports }}
+	bridge-stp off
+	bridge-fd 0
+	bridge-vlan-aware no
+{% if proxmox_storage_mtu is defined %}
+	mtu {{ proxmox_storage_mtu }}
+{% endif %}
+
+{% endif %}
+source /etc/network/interfaces.d/*

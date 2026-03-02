@@ -1,0 +1,140 @@
+# =============================================================================
+# NetBox Docker Compose
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  netbox:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    image: netbox-custom:{{ netbox_version }}
+    container_name: netbox
+    restart: unless-stopped
+    user: "netbox:root"
+    ports:
+      - "{{ netbox_port }}:8080"
+    env_file:
+      - {{ netbox_base_path }}/config/netbox.env
+    volumes:
+      - netbox-media:/opt/netbox/netbox/media
+      - netbox-reports:/opt/netbox/netbox/reports
+      - netbox-scripts:/opt/netbox/netbox/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/login/\")' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    networks:
+      - netbox-network
+
+  netbox-worker:
+    image: netbox-custom:{{ netbox_version }}
+    container_name: netbox-worker
+    restart: unless-stopped
+    user: "netbox:root"
+    command: /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py rqworker high default low
+    env_file:
+      - {{ netbox_base_path }}/config/netbox.env
+    volumes:
+      - netbox-media:/opt/netbox/netbox/media
+      - netbox-reports:/opt/netbox/netbox/reports
+      - netbox-scripts:/opt/netbox/netbox/scripts
+    depends_on:
+      netbox:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q rqworker"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - netbox-network
+
+  netbox-housekeeping:
+    image: netbox-custom:{{ netbox_version }}
+    container_name: netbox-housekeeping
+    restart: unless-stopped
+    user: "netbox:root"
+    command: /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py housekeeping
+    env_file:
+      - {{ netbox_base_path }}/config/netbox.env
+    volumes:
+      - netbox-media:/opt/netbox/netbox/media
+      - netbox-reports:/opt/netbox/netbox/reports
+      - netbox-scripts:/opt/netbox/netbox/scripts
+    depends_on:
+      netbox:
+        condition: service_healthy
+    networks:
+      - netbox-network
+
+  postgres:
+    image: {{ netbox_pg_image }}
+    container_name: netbox-postgres
+    restart: unless-stopped
+    env_file:
+      - {{ netbox_base_path }}/config/postgres.env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ netbox_db_user }} -d {{ netbox_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - netbox-network
+
+  redis:
+    image: {{ netbox_redis_image }}
+    container_name: netbox-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass {{ netbox_redis_password }}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "{{ netbox_redis_password }}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - netbox-network
+
+  redis-cache:
+    image: {{ netbox_redis_image }}
+    container_name: netbox-redis-cache
+    restart: unless-stopped
+    command: redis-server --requirepass {{ netbox_redis_cache_password }}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "{{ netbox_redis_cache_password }}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - netbox-network
+
+volumes:
+  netbox-media:
+  netbox-reports:
+  netbox-scripts:
+  postgres-data:
+  redis-data:
+
+networks:
+  netbox-network:
+    driver: bridge

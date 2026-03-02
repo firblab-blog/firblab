@@ -1,0 +1,115 @@
+---
+# =============================================================================
+# proxmox-disks — Default Variables
+# =============================================================================
+# These defaults control how uninitialized disks are discovered, classified,
+# and configured as Proxmox storage pools. Override in host_vars or group_vars.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Safety Gate
+# ---------------------------------------------------------------------------
+# CRITICAL: Disk initialization is OFF by default. The role runs in
+# discovery-only mode unless this is explicitly set to true.
+# This prevents accidentally formatting disks on production nodes.
+#
+#   # Safe discovery run:
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02
+#
+#   # Actually initialize (after reviewing discovery output):
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true
+proxmox_disks_initialize: false
+
+# ---------------------------------------------------------------------------
+# Wipe & Reinitialize
+# ---------------------------------------------------------------------------
+# List of device paths to wipe clean before discovery. This destroys ALL
+# data on the listed disks — LVM structures, filesystems, partition tables,
+# Proxmox storage registrations, and fstab entries are all removed.
+#
+# The OS disk is NEVER wipeable regardless of this setting (hard safety check).
+#
+# After wiping, the disk appears as "uninitialized" and flows through the
+# normal discovery → classify → configure pipeline.
+#
+# Requires BOTH proxmox_disks_initialize=true AND explicit disk paths.
+#
+#   # Wipe /dev/sda and reinitialize:
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true \
+#     -e '{"proxmox_disks_wipe": ["/dev/sda"]}'
+proxmox_disks_wipe: []
+
+# ---------------------------------------------------------------------------
+# Storage Strategy: LVM-Thin (SSD / NVMe)
+# ---------------------------------------------------------------------------
+# Content types allowed on LVM-thin pools.
+# "images" = VM disk images, "rootdir" = container root filesystems
+proxmox_lvmthin_content: "images,rootdir"
+
+# ---------------------------------------------------------------------------
+# Storage Strategy: Directory (HDD)
+# ---------------------------------------------------------------------------
+# Content types allowed on directory storage pools.
+# Directory storage supports all Proxmox content types.
+proxmox_dir_content: "images,rootdir,backup,iso,snippets,vztmpl"
+
+# Filesystem type for directory storage
+proxmox_dir_filesystem: "ext4"
+
+# Mount options for directory storage in /etc/fstab.
+# nofail prevents emergency mode if the disk is absent at boot (e.g., removed
+# for passthrough, hardware failure, or disconnected USB). Without nofail,
+# systemd drops to emergency shell after a 90-second timeout.
+proxmox_dir_mount_opts: "defaults,noatime,nofail"
+
+# Base path for directory storage mount points
+proxmox_dir_mount_base: "/mnt"
+
+# ---------------------------------------------------------------------------
+# Storage Strategy: ZFS Mirror (HDD pairs)
+# ---------------------------------------------------------------------------
+# When 2+ HDDs of the same size are found, they are automatically paired
+# into a ZFS mirror instead of individual directory pools. ZFS provides
+# checksumming, self-healing, compression, and snapshots — ideal for
+# bulk storage (backups, ISOs, templates).
+#
+# Single HDDs (no matching pair) still get the 'dir' strategy above.
+# Override with proxmox_disk_overrides to force a specific strategy.
+
+# Content types for ZFS mirror pools registered as 'zfspool' storage.
+# IMPORTANT: Proxmox 'zfspool' type ONLY supports 'images' and 'rootdir'
+# (ZFS zvol-backed block devices). File-based types (backup, iso, snippets,
+# vztmpl) require directory storage — use proxmox_zfs_mirror_dir_content.
+# Set to "" to skip zfspool registration entirely (e.g., when you only
+# want directory storage on the ZFS mount point).
+proxmox_zfs_mirror_content: "images,rootdir"
+
+# File-based content types to register as directory storage on the ZFS
+# mount point (/<pool-name>/). This creates a second Proxmox storage entry
+# named <pool-name>-dir that supports ISOs, backups, templates, snippets.
+# ZFS still provides checksumming, compression, and self-healing underneath.
+# Set to "" to skip directory registration (default — only zfspool).
+proxmox_zfs_mirror_dir_content: ""
+
+# ZFS pool properties set at creation time
+proxmox_zfs_mirror_compression: "lz4"
+proxmox_zfs_mirror_ashift: 12
+
+# Minimum number of same-size HDDs required to form a mirror
+# (2 = mirror vdev, which is the only supported layout currently)
+proxmox_zfs_mirror_min_disks: 2
+
+# ---------------------------------------------------------------------------
+# Per-Host Overrides
+# ---------------------------------------------------------------------------
+# Override auto-detection for specific disks. Keys are device paths.
+# Example:
+#   proxmox_disk_overrides:
+#     /dev/sdb:
+#       strategy: "lvmthin"     # Force LVM-thin instead of auto-detected type
+#       pool_name: "fast-data"  # Custom pool name (instead of auto-generated)
+#     /dev/sdc:
+#       skip: true              # Exclude this disk entirely
+proxmox_disk_overrides: {}

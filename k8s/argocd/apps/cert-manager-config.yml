@@ -1,0 +1,23 @@
+# cert-manager Config — ClusterIssuer for Vault PKI
+# Wave 1: Applied after cert-manager controller + CRDs are running (wave 0)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://10.0.10.50/infrastructure/firblab.git
+    targetRevision: HEAD
+    path: k8s/platform/cert-manager
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

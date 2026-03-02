@@ -1,0 +1,53 @@
+// =============================================================================
+// Grafana Alloy Configuration — Hetzner Gateway Log Shipping
+// =============================================================================
+// Managed by Ansible — DO NOT EDIT MANUALLY
+// Role: ansible/roles/hetzner-gateway, template: alloy-config.alloy.j2
+//
+// Ships Traefik access logs and auth.log to Loki on the RKE2 cluster via
+// the WireGuard tunnel. Pattern identical to honeypot role.
+// Alloy buffers locally and retries if Loki is unreachable — no data loss.
+//
+// Routing: gateway (10.8.0.1) → WireGuard tunnel → 10.0.20.201:3100 (K3s Loki MetalLB VIP)
+// =============================================================================
+
+// --- Loki destination ---
+loki.write "default" {
+  endpoint {
+    url = "{{ gateway_loki_url }}/loki/api/v1/push"
+    retry_on_http_429 = true
+  }
+  external_labels = {
+    host        = "{{ gateway_alloy_host_label }}",
+    environment = "production",
+    location    = "hetzner",
+  }
+}
+
+// --- Traefik access log ---
+local.file_match "traefik_access" {
+  path_targets = [{
+    __path__ = "/var/log/traefik/access.log",
+    job      = "traefik",
+    service  = "gateway",
+  }]
+}
+
+loki.source.file "traefik_access" {
+  targets    = local.file_match.traefik_access.targets
+  forward_to = [loki.write.default.receiver]
+}
+
+// --- Auth log (SSH logins, sudo, fail2ban events) ---
+local.file_match "auth_log" {
+  path_targets = [{
+    __path__ = "/var/log/auth.log",
+    job      = "auth",
+    service  = "gateway",
+  }]
+}
+
+loki.source.file "auth_log" {
+  targets    = local.file_match.auth_log.targets
+  forward_to = [loki.write.default.receiver]
+}

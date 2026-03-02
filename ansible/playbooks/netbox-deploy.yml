@@ -1,0 +1,390 @@
+---
+# =============================================================================
+# NetBox DCIM/IPAM Deployment Playbook
+# =============================================================================
+# Deploys NetBox with PostgreSQL, Redis, worker, and housekeeping services
+# via Docker Compose on a full VM (CIS L1 hardened).
+#
+# Prerequisites:
+#   - NetBox VM provisioned by Terraform Layer 05 (cloned from Packer template)
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Secrets are managed automatically:
+#   - First run: generates random passwords and stores them in Vault
+#     at secret/services/netbox (db_password, secret_key, superuser_password,
+#     api_token, redis_password, redis_cache_password)
+#   - Subsequent runs: reads existing secrets from Vault
+#   - Override: pass -e netbox_db_password=xxx (etc.)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/netbox-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags netbox      # Only NetBox app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+# =============================================================================
+
+- name: Deploy NetBox DCIM/IPAM
+  hosts: netbox
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Vault read -> generate if missing -> Vault write
+    # -----------------------------------------------------------------
+    - name: Try reading NetBox secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/netbox
+      register: vault_netbox_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: netbox_db_password is not defined
+      tags:
+        - always
+
+    - name: Set secrets from Vault (if secrets exist)
+      ansible.builtin.set_fact:
+        netbox_db_password: "{{ (vault_netbox_read.stdout | from_json).data.data.db_password }}"
+        netbox_secret_key: "{{ (vault_netbox_read.stdout | from_json).data.data.secret_key }}"
+        netbox_superuser_password: "{{ (vault_netbox_read.stdout | from_json).data.data.superuser_password }}"
+        netbox_api_token: "{{ (vault_netbox_read.stdout | from_json).data.data.api_token }}"
+        netbox_api_token_pepper: "{{ (vault_netbox_read.stdout | from_json).data.data.api_token_pepper | default('') }}"
+        netbox_redis_password: "{{ (vault_netbox_read.stdout | from_json).data.data.redis_password }}"
+        netbox_redis_cache_password: "{{ (vault_netbox_read.stdout | from_json).data.data.redis_cache_password }}"
+      when:
+        - netbox_db_password is not defined
+        - vault_netbox_read.rc is defined
+        - vault_netbox_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate API token pepper if not in Vault
+      ansible.builtin.set_fact:
+        netbox_api_token_pepper: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=50') }}"
+      when: netbox_api_token_pepper is not defined or netbox_api_token_pepper | length == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate NetBox secrets (first deploy)
+      ansible.builtin.set_fact:
+        netbox_db_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+        netbox_secret_key: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=64') }}"
+        netbox_superuser_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=24') }}"
+        netbox_api_token: "{{ lookup('ansible.builtin.password', '/dev/null chars=hexdigits length=40') | lower }}"
+        netbox_redis_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+        netbox_redis_cache_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+      when: netbox_db_password is not defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Store NetBox secrets in Vault (first deploy)
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - -mount=secret
+          - services/netbox
+          - "db_password={{ netbox_db_password }}"
+          - "secret_key={{ netbox_secret_key }}"
+          - "superuser_password={{ netbox_superuser_password }}"
+          - "api_token={{ netbox_api_token }}"
+          - "api_token_pepper={{ netbox_api_token_pepper }}"
+          - "redis_password={{ netbox_redis_password }}"
+          - "redis_cache_password={{ netbox_redis_cache_password }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when:
+        - vault_netbox_read is defined
+        - vault_netbox_read.rc is defined
+        - vault_netbox_read.rc != 0
+      tags:
+        - always
+
+    - name: Update Vault with API token pepper (if missing from existing secret)
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - patch
+          - -mount=secret
+          - services/netbox
+          - "api_token_pepper={{ netbox_api_token_pepper }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when:
+        - vault_netbox_read is defined
+        - vault_netbox_read.rc is defined
+        - vault_netbox_read.rc == 0
+        - (vault_netbox_read.stdout | from_json).data.data.api_token_pepper is not defined or (vault_netbox_read.stdout | from_json).data.data.api_token_pepper | default('') | length == 0
+      tags:
+        - always
+
+    - name: Validate NetBox secrets are available
+      ansible.builtin.assert:
+        that:
+          - netbox_db_password is defined
+          - netbox_db_password | length > 0
+          - netbox_secret_key is defined
+          - netbox_secret_key | length > 0
+          - netbox_superuser_password is defined
+          - netbox_superuser_password | length > 0
+          - netbox_api_token is defined
+          - netbox_api_token | length > 0
+          - netbox_api_token_pepper is defined
+          - netbox_api_token_pepper | length > 0
+          - netbox_redis_password is defined
+          - netbox_redis_password | length > 0
+          - netbox_redis_cache_password is defined
+          - netbox_redis_cache_password | length > 0
+        fail_msg: >
+          NetBox secrets not available. Check Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/netbox
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying NetBox on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  vars:
+    # NetBox configuration (defaults in role, override here if needed)
+    netbox_port: 8080
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM, not LXC — has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # NetBox (Docker Compose: NetBox + PostgreSQL + Redis + Worker + Housekeeping)
+    - role: netbox
+      tags:
+        - netbox
+
+  post_tasks:
+    - name: Wait for NetBox to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ netbox_port }}/login/"
+        method: GET
+        status_code: [200]
+      register: netbox_health
+      retries: 60
+      delay: 15
+      until: netbox_health.status is defined and netbox_health.status == 200
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if NetBox never became accessible
+      ansible.builtin.fail:
+        msg: "NetBox failed to respond after 900 seconds. Last status: {{ netbox_health.status | default('connection refused') }}"
+      when: netbox_health.status is not defined or netbox_health.status != 200
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------
+    # Proxmox Importer Plugin Configuration
+    # -----------------------------------------------------------------
+    # The netbox-proxmox-importer plugin is installed in the Docker image
+    # (Dockerfile-Plugins.j2) but the Proxmox cluster connection must be
+    # configured via the plugin's REST API endpoint.
+    #
+    # This block:
+    #   1. Reads Proxmox API credentials from Vault
+    #   2. Checks if the plugin API endpoint is available (may not be
+    #      installed if 4.4.x plugin is incompatible with NetBox 4.5.2)
+    #   3. Gets the existing NetBox cluster ID (created by seed script)
+    #   4. Creates/verifies Proxmox cluster connections for auto-sync
+    #
+    # Skipped entirely if plugin is not available.
+    # -----------------------------------------------------------------
+    - name: Read Proxmox API credentials from Vault
+      ansible.builtin.command:
+        cmd: "vault kv get -mount=secret -format=json infra/proxmox/{{ item }}"
+      register: _vault_proxmox_creds
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      loop:
+        - lab-01
+      tags:
+        - proxmox-importer
+
+    - name: Set Proxmox credentials from Vault
+      ansible.builtin.set_fact:
+        _proxmox_clusters: >-
+          {{ _vault_proxmox_creds.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout')
+             | map('from_json') | map(attribute='data.data') | list }}
+      no_log: true
+      when: _vault_proxmox_creds.results | selectattr('rc', 'equalto', 0) | list | length > 0
+      tags:
+        - proxmox-importer
+
+    - name: Check if Proxmox importer plugin API is available
+      ansible.builtin.uri:
+        url: "http://localhost:{{ netbox_port }}/api/plugins/nbp-sync/proxmox-connections/"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+        status_code: [200, 403, 404]
+      register: _proxmox_plugin_check
+      failed_when: false
+      when: _proxmox_clusters is defined and _proxmox_clusters | length > 0
+      tags:
+        - proxmox-importer
+
+    - name: Proxmox importer plugin not available
+      ansible.builtin.debug:
+        msg: >-
+          Proxmox importer plugin API not available (status={{ _proxmox_plugin_check.status | default('skipped') }}).
+          The plugin may not be compatible with NetBox {{ netbox_version | default('4.5.2') }}.
+          Skipping auto-configuration. Manual setup at:
+          http://{{ ansible_host }}:{{ netbox_port }}/plugins/nbp-sync/proxmox-connections/
+      when: >-
+        _proxmox_plugin_check is skipped
+        or (_proxmox_plugin_check.status is defined and _proxmox_plugin_check.status not in [200, 403])
+      tags:
+        - proxmox-importer
+
+    - name: Get NetBox cluster for Proxmox importer
+      ansible.builtin.uri:
+        url: "http://localhost:{{ netbox_port }}/api/virtualization/clusters/?name=firblab-cluster"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+        status_code: [200]
+        return_content: true
+      register: _netbox_cluster
+      when: >-
+        _proxmox_plugin_check is not skipped
+        and _proxmox_plugin_check.status is defined
+        and _proxmox_plugin_check.status in [200, 403]
+      tags:
+        - proxmox-importer
+
+    - name: Check existing Proxmox connections
+      ansible.builtin.uri:
+        url: "http://localhost:{{ netbox_port }}/api/plugins/nbp-sync/proxmox-connections/"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+        status_code: [200]
+        return_content: true
+      register: _existing_proxmox_conns
+      when: >-
+        _netbox_cluster is not skipped
+        and _netbox_cluster.status is defined
+        and _netbox_cluster.status == 200
+      tags:
+        - proxmox-importer
+
+    - name: Configure Proxmox cluster connections
+      ansible.builtin.uri:
+        url: "http://localhost:{{ netbox_port }}/api/plugins/nbp-sync/proxmox-connections/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          domain: "{{ item.base_url | default('https://' ~ item.host ~ ':8006') }}"
+          user: "{{ item.api_token_id }}"
+          access_token: "{{ item.api_token_secret }}"
+          cluster: "{{ (_netbox_cluster.content | from_json).results[0].id }}"
+        status_code: [200, 201]
+      loop: "{{ _proxmox_clusters }}"
+      loop_control:
+        label: "{{ item.base_url | default(item.host | default('proxmox')) }}"
+      no_log: true
+      when: >-
+        _existing_proxmox_conns is not skipped
+        and (_existing_proxmox_conns.content | from_json).count | default(0) == 0
+        and (_netbox_cluster.content | from_json).count | default(0) > 0
+      tags:
+        - proxmox-importer
+
+    - name: Display Proxmox importer status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Proxmox importer: ' ~ ((_existing_proxmox_conns.content | from_json).count | default(0))
+             ~ ' connection(s) configured. Auto-sync every 300s.'
+             if _existing_proxmox_conns is not skipped
+             else 'Proxmox importer: plugin not available — skipped.' }}
+      tags:
+        - proxmox-importer
+
+    # -----------------------------------------------------------------
+    # Deployment Summary
+    # -----------------------------------------------------------------
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "NetBox Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ netbox_port }}/"
+          - "Admin: {{ netbox_superuser_name }} / (see Vault)"
+          - "Port: {{ netbox_port }}"
+          - "Secrets: vault kv get -mount=secret services/netbox"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ netbox_base_path }}/docker-compose.yml ps"
+          - "  docker compose -f {{ netbox_base_path }}/docker-compose.yml logs -f"
+          - ""
+          - "Seed data:"
+          - "  export NETBOX_URL=http://{{ ansible_host }}:{{ netbox_port }}"
+          - "  export NETBOX_TOKEN=$(vault kv get -mount=secret -field=api_token services/netbox)"
+          - "  python scripts/netbox-seed.py"
+          - ""
+          - "Scanopy sync:"
+          - "  export SCANOPY_URL=http://10.0.4.20:60072"
+          - "  export SCANOPY_EMAIL=$(vault kv get -mount=secret -field=admin_email services/scanopy)"
+          - "  export SCANOPY_PASSWORD=$(vault kv get -mount=secret -field=admin_password services/scanopy)"
+          - "  python scripts/scanopy-netbox-sync.py"
+          - "=========================================="
+      tags:
+        - verify

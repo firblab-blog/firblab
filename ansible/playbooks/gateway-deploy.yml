@@ -1,0 +1,475 @@
+---
+# =============================================================================
+# Hetzner Gateway Deployment Playbook
+# =============================================================================
+# Deploys and manages all services on the Hetzner gateway server:
+#   Traefik, AdGuard Home, Uptime Kuma, Gotify, CrowdSec, Fail2ban,
+#   Watchtower, WireGuard, node_exporter, Grafana Alloy
+#
+# Also configures: Docker log rotation, logrotate, and volume backups.
+#
+# Prerequisites:
+#   - Terraform Layer 06 applied (gateway provisioned, credentials in Vault)
+#   - VAULT_ADDR, VAULT_TOKEN, VAULT_CACERT set in shell environment
+#   - SSH access on port 2222: ssh -p 2222 -i ~/.ssh/id_ed25519_lab-hetzner root@<ip>
+#   - For --tags uptime-kuma: seed Uptime Kuma creds to Vault first:
+#       vault kv put secret/infra/hetzner/uptime-kuma username=admin password=<pass>
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/gateway-deploy.yml
+#
+# Tags:
+#   --tags configure         — Config files + compose only (no deploy)
+#   --tags deploy            — Pull images + start containers only
+#   --tags traefik           — Traefik configs only (hot-reloads routes)
+#   --tags adguard           — AdGuard config only
+#   --tags alloy             — Alloy log shipper only
+#   --tags backup            — Backup role only
+#   --tags verify            — Health checks only
+#   --tags wireguard-routes  — Update WireGuard peer AllowedIPs + kernel routes
+#                              (run after changing gateway_homelab_subnets)
+#   --tags gotify            — Create Gotify apps and store tokens in Vault
+#   --tags uptime-kuma       — Configure Uptime Kuma monitors + Gotify notification
+#                              (requires --tags gotify to have run first)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Read all secrets from Vault
+# ---------------------------------------------------------------------------
+- name: Read gateway secrets from Vault
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Read gateway server IP from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner/server_ips
+      register: vault_server_ips
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set gateway IP fact
+      ansible.builtin.set_fact:
+        gateway_ip: "{{ (vault_server_ips.stdout | from_json).data.data.gateway_ip }}"
+      tags: [always]
+
+    - name: Read gateway service credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner/credentials
+      register: vault_credentials
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set gateway credential facts
+      ansible.builtin.set_fact:
+        gateway_gotify_password: "{{ (vault_credentials.stdout | from_json).data.data.gotify_password }}"
+        gateway_traefik_dashboard_hash: "{{ (vault_credentials.stdout | from_json).data.data.traefik_dashboard_hash }}"
+        gateway_adguard_password_hash: "{{ (vault_credentials.stdout | from_json).data.data.adguard_password_hash }}"
+      no_log: true
+      tags: [always]
+
+    # ---- Backup credentials ----
+    - name: Read S3 backup credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup encryption)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secret facts
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      no_log: true
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    - name: Display target gateway
+      ansible.builtin.debug:
+        msg: "Deploying gateway services to {{ gateway_ip }}"
+      tags: [always]
+
+# ---------------------------------------------------------------------------
+# Play 2: Deploy gateway services
+# ---------------------------------------------------------------------------
+- name: Deploy Hetzner gateway services
+  hosts: lab-hetzner
+  gather_facts: true
+  become: true
+  serial: 1
+
+  vars:
+    # Override ansible_host with live IP from Vault (Play 1)
+    # Ensures correct target even if hosts.yml IP is stale after server rebuild
+    ansible_host: "{{ hostvars['localhost']['gateway_ip'] }}"
+    # Secrets from Vault (via Play 1 hostvars)
+    gateway_gotify_password: "{{ hostvars['localhost']['gateway_gotify_password'] }}"
+    gateway_traefik_dashboard_hash: "{{ hostvars['localhost']['gateway_traefik_dashboard_hash'] }}"
+    gateway_adguard_password_hash: "{{ hostvars['localhost']['gateway_adguard_password_hash'] }}"
+    # Backup creds (may be unset if Vault unavailable — backup role handles gracefully)
+    backup_s3_access_key: "{{ hostvars['localhost']['backup_s3_access_key'] | default('') }}"
+    backup_s3_secret_key: "{{ hostvars['localhost']['backup_s3_secret_key'] | default('') }}"
+    backup_s3_endpoint: "{{ hostvars['localhost']['backup_s3_endpoint'] | default('') }}"
+    backup_age_recipient: "{{ hostvars['localhost']['backup_age_recipient'] | default('') }}"
+    backup_enabled: "{{ hostvars['localhost']['backup_enabled'] | default(true) }}"
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags: [always]
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying gateway services on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }}, ssh_port={{ ansible_port }})
+      tags: [always]
+
+  roles:
+    - role: hetzner-gateway
+      tags: [configure, deploy]
+
+    - role: backup
+      when: backup_enabled | bool
+      tags: [backup]
+
+  post_tasks:
+    # ---- Container health checks ----
+    - name: Check Traefik is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' traefik"
+      register: traefik_status
+      changed_when: false
+      failed_when: "'running' not in traefik_status.stdout"
+      tags: [verify]
+
+    - name: Check AdGuard is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' adguard"
+      register: adguard_status
+      changed_when: false
+      failed_when: "'running' not in adguard_status.stdout"
+      tags: [verify]
+
+    - name: Check Gotify is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' gotify"
+      register: gotify_status
+      changed_when: false
+      failed_when: "'running' not in gotify_status.stdout"
+      tags: [verify]
+
+    - name: Check WireGuard is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' wireguard"
+      register: wireguard_status
+      changed_when: false
+      failed_when: "'running' not in wireguard_status.stdout"
+      tags: [verify]
+
+    - name: Check node_exporter is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' node-exporter"
+      register: nexporter_status
+      changed_when: false
+      failed_when: "'running' not in nexporter_status.stdout"
+      tags: [verify]
+
+    - name: Check Alloy is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{% raw %}{{.State.Status}}{% endraw %}' alloy"
+      register: alloy_status
+      changed_when: false
+      failed_when: "'running' not in alloy_status.stdout"
+      tags: [verify]
+
+    - name: Get all container status
+      ansible.builtin.command:
+        cmd: "docker ps --format 'table {% raw %}{{.Names}}\t{{.Status}}{% endraw %}'"
+      register: all_containers
+      changed_when: false
+      tags: [verify]
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Gateway Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "SSH: port 2222"
+          - ""
+          - "Services:"
+          - "  Traefik:       https://traefik.{{ gateway_domain }}"
+          - "  AdGuard:       https://adguard.{{ gateway_domain }}"
+          - "  Gotify:        https://gotify.{{ gateway_domain }}"
+          - "  Uptime Kuma:   https://status.{{ gateway_domain }}"
+          - "  node_exporter: {{ gateway_wireguard_ip }}:9100 (WireGuard only)"
+          - "  Alloy:         → {{ gateway_loki_url }}/loki/api/v1/push"
+          - ""
+          - "Homelab backends (via WireGuard):"
+          - "  Blog:       https://blog.{{ gateway_domain }} → {{ gateway_ghost_backend }}"
+          - "  Mealie:     https://food.{{ gateway_domain }} → {{ gateway_mealie_backend }}"
+          - "  FoundryVTT: https://foundryvtt.{{ gateway_domain }} → {{ gateway_foundryvtt_backend }}"
+          - ""
+          - "To add a Traefik route:"
+          - "  1. Edit ansible/roles/hetzner-gateway/templates/traefik-services.yml.j2"
+          - "  2. Run: ansible-playbook ansible/playbooks/gateway-deploy.yml --tags traefik"
+          - "  (Traefik hot-reloads dynamic config — no container restart needed)"
+          - ""
+          - "Running containers:"
+          - "{{ all_containers.stdout }}"
+          - "=========================================="
+      tags: [verify]
+
+# ---------------------------------------------------------------------------
+# Play 3: Configure Gotify applications
+# ---------------------------------------------------------------------------
+# Creates Gotify apps (Alertmanager, Uptime Kuma, firblab) and stores tokens
+# in Vault so consumers (ESO, Alertmanager, Uptime Kuma) can read them.
+#
+# Idempotent: checks Vault first — if the token already exists at the target
+# path+key, the Gotify API is never called. Safe to re-run at any time.
+#
+# API calls delegate to the gateway itself (127.0.0.1) — no WireGuard needed.
+# ---------------------------------------------------------------------------
+- name: Configure Gotify applications
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tags: [gotify]
+
+  vars:
+    # 127.0.0.1 — API calls delegate to the gateway (runs from localhost on the gateway)
+    gotify_url: "http://127.0.0.1:8080"
+    gotify_user: "admin"
+    # gateway_gotify_password was set as a fact in Play 1 (hostvars['localhost'])
+    gotify_password: "{{ hostvars['localhost']['gateway_gotify_password'] }}"
+    # Read gotify_apps from the gateway host's group_vars (hetzner.yml)
+    gotify_apps_config: "{{ hostvars['lab-hetzner']['gotify_apps'] }}"
+
+  tasks:
+    - name: Fetch existing Gotify applications
+      ansible.builtin.uri:
+        url: "{{ gotify_url }}/application"
+        method: GET
+        url_username: "{{ gotify_user }}"
+        url_password: "{{ gotify_password }}"
+        force_basic_auth: true
+        status_code: 200
+      register: gotify_existing_apps
+      delegate_to: "lab-hetzner"
+      no_log: true
+
+    - name: Check whether each Gotify app token already exists in Vault
+      ansible.builtin.command:
+        cmd: >
+          vault kv get -mount=secret -field={{ item.vault_key }}
+          {{ item.vault_path | regex_replace('^secret/', '') }}
+      register: vault_token_checks
+      changed_when: false
+      failed_when: false
+      no_log: true
+      loop: "{{ gotify_apps_config }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Build a list of apps that need creation:
+    #   - token not yet in Vault (rc != 0), AND
+    #   - app not already in Gotify (prevents orphaned duplicates on failed mid-run)
+    - name: Determine which apps need to be created in Gotify
+      ansible.builtin.set_fact:
+        apps_to_create: >-
+          {{
+            vault_token_checks.results
+            | selectattr('rc', 'ne', 0)
+            | map(attribute='item')
+            | list
+            | rejectattr('name', 'in',
+                gotify_existing_apps.json | map(attribute='name') | list)
+            | list
+          }}
+
+    - name: Create missing Gotify applications
+      ansible.builtin.uri:
+        url: "{{ gotify_url }}/application"
+        method: POST
+        url_username: "{{ gotify_user }}"
+        url_password: "{{ gotify_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          description: "{{ item.description }}"
+        status_code: 200
+      register: gotify_created_apps
+      loop: "{{ apps_to_create }}"
+      loop_control:
+        label: "{{ item.name }}"
+      delegate_to: "lab-hetzner"
+      no_log: true
+
+    # vault kv patch preserves other keys at the path (e.g. uptime-kuma username+password).
+    # vault kv put creates a new secret with only the specified key.
+    # vault_merge: true in group_vars selects patch; false (default) selects put.
+    - name: Store new Gotify token in Vault
+      ansible.builtin.command:
+        cmd: >
+          vault kv {{ 'patch' if item.item.vault_merge | default(false) else 'put' }}
+          -mount=secret
+          {{ item.item.vault_path | regex_replace('^secret/', '') }}
+          {{ item.item.vault_key }}={{ item.json.token }}
+      loop: "{{ gotify_created_apps.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item.json is defined
+      no_log: true
+      changed_when: true
+
+    - name: Warn about apps skipped due to pre-existing Gotify entry without Vault token
+      ansible.builtin.debug:
+        msg: >
+          WARNING: '{{ item.name }}' already exists in Gotify but token is not in Vault.
+          The existing app token cannot be recovered. To fix: delete the app in Gotify
+          and re-run --tags gotify, or manually store the token in Vault at
+          {{ item.vault_path }} (key: {{ item.vault_key }}).
+      loop: >-
+        {{
+          vault_token_checks.results
+          | selectattr('rc', 'ne', 0)
+          | map(attribute='item')
+          | list
+          | selectattr('name', 'in',
+              gotify_existing_apps.json | map(attribute='name') | list)
+          | list
+        }}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Gotify configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "Gotify apps configured:"
+          - "  Created + stored in Vault: {{ apps_to_create | map(attribute='name') | list }}"
+          - "  Already in Vault (skipped): {{ vault_token_checks.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | map(attribute='name') | list }}"
+
+# ---------------------------------------------------------------------------
+# Play 4: Configure Uptime Kuma monitors
+# ---------------------------------------------------------------------------
+# Creates a Gotify notification channel and all monitors defined in
+# group_vars/hetzner.yml (uptime_kuma_monitors).
+#
+# Idempotent: lucasheld.uptime_kuma modules use state: present — existing
+# monitors and notifications are left unchanged. New ones are created.
+# Adding a monitor = one list entry in group_vars + re-run --tags uptime-kuma.
+#
+# Prerequisites:
+#   - Uptime Kuma creds in Vault: vault kv put secret/infra/hetzner/uptime-kuma
+#       username=admin password=<pass>
+#   - --tags gotify must have run first to store gotify_token in Vault
+#
+# API calls delegate to the gateway itself (127.0.0.1) — no WireGuard needed.
+# uptime-kuma-api Python package is installed on the gateway the first time.
+# ---------------------------------------------------------------------------
+- name: Configure Uptime Kuma monitors
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tags: [uptime-kuma]
+
+  vars:
+    # 127.0.0.1 — API calls delegate to the gateway (runs from localhost on the gateway)
+    uk_url: "http://127.0.0.1:3001"
+    # Read monitors list from the gateway host's group_vars (hetzner.yml)
+    uk_monitors: "{{ hostvars['lab-hetzner']['uptime_kuma_monitors'] }}"
+
+  tasks:
+    # python-socketio is used by the configure-uptime-kuma.py script (see files/).
+    # We avoided lucasheld.uptime_kuma / uptime-kuma-api because that library is
+    # incompatible with Uptime Kuma 1.23.x (login always returns "Incorrect username
+    # or password" regardless of credentials). The raw Socket.IO approach works correctly.
+    - name: Ensure python3-pip is installed on gateway
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+      delegate_to: "lab-hetzner"
+
+    - name: Ensure python-socketio is installed on gateway
+      ansible.builtin.pip:
+        name: "python-socketio[client]"
+        state: present
+        extra_args: "--break-system-packages"
+      delegate_to: "lab-hetzner"
+
+    - name: Read Uptime Kuma credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner/uptime-kuma
+      register: vault_uk_creds
+      changed_when: false
+      no_log: true
+
+    - name: Set Uptime Kuma credential facts
+      ansible.builtin.set_fact:
+        uk_username: "{{ (vault_uk_creds.stdout | from_json).data.data.username }}"
+        uk_password: "{{ (vault_uk_creds.stdout | from_json).data.data.password }}"
+        uk_gotify_token: "{{ (vault_uk_creds.stdout | from_json).data.data.gotify_token | default('') }}"
+      no_log: true
+
+    - name: Verify Gotify token is available for notifications
+      ansible.builtin.assert:
+        that: uk_gotify_token | length > 0
+        fail_msg: >
+          Gotify token for Uptime Kuma not found in Vault
+          (secret/infra/hetzner/uptime-kuma, key: gotify_token).
+          Run with --tags gotify first to create the Gotify app and store the token.
+
+    - name: Configure Uptime Kuma (Gotify notification + all monitors)
+      ansible.builtin.script:
+        cmd: "files/configure-uptime-kuma.py"
+        executable: python3
+      environment:
+        UK_URL: "http://127.0.0.1:3001"
+        UK_USERNAME: "{{ uk_username }}"
+        UK_PASSWORD: "{{ uk_password }}"
+        UK_GOTIFY_TOKEN: "{{ uk_gotify_token }}"
+        GOTIFY_URL: "http://10.8.0.1:8080"
+        UK_MONITORS_JSON: "{{ uk_monitors | to_json }}"
+      delegate_to: "lab-hetzner"
+      register: uk_result
+      changed_when: (uk_result.stdout | from_json).changed | default(false)
+      failed_when: >
+        uk_result.rc != 0 or
+        ((uk_result.stdout | from_json).failed | default(false))
+
+    - name: Uptime Kuma configuration summary
+      ansible.builtin.debug:
+        msg: "{{ uk_result.stdout | from_json }}"

@@ -1,0 +1,49 @@
+#cloud-config
+# =============================================================================
+# Cloud-init user-data for K3s RPi5 NVMe boot
+# =============================================================================
+# Written to the NVMe system-boot partition by k3s-rpi-nvme-setup.yml.
+# Creates the admin user with SSH key access. No admin user — that's
+# SD card only (RPi Imager). After boot, Ansible connects as admin.
+#
+# Template variables:
+#   target_hostname  — K3s node hostname (e.g., k3s-server-1)
+#   ssh_pubkey       — SSH public key for admin user
+# =============================================================================
+
+hostname: {{ target_hostname }}
+manage_etc_hosts: true
+locale: en_US.UTF-8
+timezone: America/Los_Angeles
+
+users:
+  - name: admin
+    gecos: Ansible admin user
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{ ssh_pubkey }}
+
+# Security: disable password SSH from the start
+ssh_pwauth: false
+
+# Install minimal packages needed for Ansible
+package_update: true
+package_upgrade: false
+packages:
+  - python3
+  - python3-apt
+  - openssh-server
+
+# Disable cloud-init network config after first boot — netplan takes over
+# This prevents cloud-init from overwriting the static IP on subsequent boots
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    content: |
+      network: {config: disabled}
+
+# Power state: don't reboot — the NVMe setup playbook handles this
+power_state:
+  mode: poweroff
+  condition: false

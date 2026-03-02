@@ -1,0 +1,22 @@
+---
+# =============================================================================
+# lab-02 Host Variables
+# =============================================================================
+# Host-specific overrides for the pilot node (Intel N100, 16GB RAM).
+# Hosts: GitLab (VM 3001), vault-2 (VM 5002), GitLab Runner (LXC 3002)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Secondary SSD Storage
+# ---------------------------------------------------------------------------
+# /dev/sda is a Samsung 850 EVO 250GB 2.5" SATA SSD — dedicated data disk
+# pool for lab-02 VMs. Named with node suffix to distinguish from pools
+# on other nodes (node-local storage is never shared across the cluster).
+#
+# Intended use: VM data disks for lab-02 workloads (GitLab repos,
+# vault-2 data, runner workspace). Keeps NVMe (local-lvm) exclusively for
+# VM OS disks where boot speed matters.
+proxmox_disk_overrides:
+  /dev/sda:
+    strategy: "lvmthin"
+    pool_name: "ssd-data-02"

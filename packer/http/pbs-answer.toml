@@ -1,0 +1,61 @@
+# =============================================================================
+# Proxmox Backup Server — Automated Installation Answer File
+# =============================================================================
+# Used by proxmox-auto-install-assistant to create a prepared ISO:
+#
+#   proxmox-auto-install-assistant prepare-iso \
+#     proxmox-backup-server_<version>.iso \
+#     --fetch-from iso \
+#     --answer-file pbs-answer.toml
+#
+# This produces an ISO that auto-installs PBS without user interaction.
+# Packer then SSH's in as root for post-install hardening provisioners.
+#
+# After Packer converts this to a template, Terraform clones it and
+# Ansible configures the PBS instance (datastore, users, retention).
+#
+# Network uses the production IP (10.0.10.15) directly. PBS doesn't
+# use cloud-init, so the IP baked here IS the final IP — Terraform's
+# cloud-init initialization block is ignored by PBS.
+# =============================================================================
+
+[global]
+keyboard = "en-us"
+country = "us"
+fqdn = "pbs.example-lab.local"
+mailto = "admin@example-lab.local"
+timezone = "America/New_York"
+
+# Password: "packer-temp" — only used during Packer build.
+# SSH password auth is disabled by the hardening provisioner.
+# Ansible sets the real root password and SSH keys post-deploy.
+# PBS 4.x requires minimum 8 characters.
+root_password = "packer-temp"
+
+# Reboot after installation completes (Packer waits for SSH)
+reboot_on_error = false
+
+[network]
+# Production IP baked directly — PBS ignores cloud-init so this is the
+# final IP. Packer also uses this for SSH (no guest agent pre-install).
+source = "from-answer"
+cidr = "10.0.10.15/24"
+dns = "10.0.10.1"
+gateway = "10.0.10.1"
+
+[network.filter]
+# Match any NIC — Packer creates a single virtio adapter (ens18 typically)
+ID_NET_NAME = "en*"
+
+[disk-setup]
+filesystem = "ext4"
+# Use first available disk (Packer creates a single 32 GB disk)
+disk_list = ["sda"]
+
+[disk-setup.lvm]
+# PBS template — minimal OS disk, data disk added by Terraform
+hdsize = 32
+swapsize = 2
+maxroot = 28
+maxvz = 0
+minfree = 2

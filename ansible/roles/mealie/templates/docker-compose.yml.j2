@@ -1,0 +1,29 @@
+# =============================================================================
+# Mealie Docker Compose
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  mealie:
+    image: {{ mealie_image }}
+    container_name: mealie
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ mealie_port }}:9000"
+    environment:
+      # Database
+      DB_ENGINE: "{{ mealie_db_engine }}"
+      # Application
+      ALLOW_SIGNUP: "{{ mealie_allow_signup }}"
+      LOG_LEVEL: "{{ mealie_log_level }}"
+      AUTO_BACKUP: "{{ mealie_auto_backup }}"
+      TZ: "{{ mealie_timezone }}"
+      # Base URL — used for links in emails, exports, etc.
+      BASE_URL: "http://{{ ansible_host }}:{{ mealie_port }}"
+    volumes:
+      - {{ mealie_install_dir }}/data:/app/data/

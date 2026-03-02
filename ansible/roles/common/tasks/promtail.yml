@@ -1,0 +1,170 @@
+---
+# =============================================================================
+# Promtail Installation — Loki log shipping agent
+# =============================================================================
+# Downloads and installs Promtail as a systemd service on Linux hosts.
+# Collects system logs (syslog, auth, kernel, application) and ships them
+# to the Loki instance running on the RKE2 cluster via NodePort 31100.
+#
+# Log sources collected:
+#   - /var/log/syslog or /var/log/messages (OS family dependent)
+#   - /var/log/auth.log or /var/log/secure
+#   - /var/log/kern.log
+#   - /var/log/*-exporter.log (where applicable)
+#
+# Network requirements:
+#   - Reaching Loki NodePort 31100 at 10.0.20.40 requires:
+#     - Management/Services/LAN hosts: general ALLOW zone policies ✅
+#     - DMZ/Security hosts: port 31100 NOT in existing policies — deferred
+#
+# Controlled by: monitoring_promtail_enabled (default: true in all.yml)
+# =============================================================================
+
+- name: promtail | set architecture
+  ansible.builtin.set_fact:
+    promtail_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else ('arm' if ansible_architecture == 'armv7l' else 'amd64') }}"
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | check current version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/promtail --version
+  register: promtail_current_version
+  changed_when: false
+  failed_when: false
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | set install flag
+  ansible.builtin.set_fact:
+    promtail_needs_install: >-
+      {{ promtail_current_version.rc != 0 or
+         monitoring_promtail_version not in (promtail_current_version.stdout | default('')) }}
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | create system user
+  ansible.builtin.user:
+    name: promtail
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/promtail
+    create_home: true
+    comment: "Grafana Promtail log shipper"
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | create config directory
+  ansible.builtin.file:
+    path: /etc/promtail
+    state: directory
+    owner: promtail
+    group: promtail
+    mode: "0750"
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | install (download)
+  when: promtail_needs_install | bool
+  block:
+    - name: promtail | download binary
+      ansible.builtin.get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ monitoring_promtail_version }}/promtail-linux-{{ promtail_arch }}.zip"
+        dest: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+        mode: "0644"
+        timeout: 120
+      tags:
+        - monitoring
+        - promtail
+
+    - name: promtail | install unzip
+      ansible.builtin.package:
+        name: unzip
+        state: present
+      tags:
+        - monitoring
+        - promtail
+
+    - name: promtail | extract binary
+      ansible.builtin.unarchive:
+        src: "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+        dest: /tmp/
+        remote_src: true
+      tags:
+        - monitoring
+        - promtail
+
+    - name: promtail | install binary
+      ansible.builtin.copy:
+        src: "/tmp/promtail-linux-{{ promtail_arch }}"
+        dest: /usr/local/bin/promtail
+        owner: root
+        group: root
+        mode: "0755"
+        remote_src: true
+      notify: Restart promtail
+      tags:
+        - monitoring
+        - promtail
+
+    - name: promtail | cleanup temp files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/promtail-linux-{{ promtail_arch }}.zip"
+        - "/tmp/promtail-linux-{{ promtail_arch }}"
+      tags:
+        - monitoring
+        - promtail
+
+- name: promtail | add to adm group (log file access)
+  ansible.builtin.user:
+    name: promtail
+    groups: adm
+    append: true
+  when: ansible_os_family == 'Debian'
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | deploy config
+  ansible.builtin.template:
+    src: promtail.yml.j2
+    dest: /etc/promtail/config.yml
+    owner: promtail
+    group: promtail
+    mode: "0640"
+  notify: Restart promtail
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | install systemd unit
+  ansible.builtin.template:
+    src: promtail.service.j2
+    dest: /etc/systemd/system/promtail.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart promtail
+  tags:
+    - monitoring
+    - promtail
+
+- name: promtail | enable and start service
+  ansible.builtin.systemd:
+    name: promtail
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - monitoring
+    - promtail

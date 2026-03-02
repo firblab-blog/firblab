@@ -1,0 +1,45 @@
+---
+# =============================================================================
+# Backup Server Configuration
+# =============================================================================
+# Group variables for the backup LXC on lab-01 (Management VLAN 10).
+# Runs Restic REST server (port 8500) and Backrest monitoring UI (port 9898).
+#
+# On Management VLAN 10 (10.0.10.0/24).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# Port 8500: Restic REST server — backup clients on all VLANs push here.
+# Port 9898: Backrest monitoring UI — admin access from LAN only.
+#   Backrest binds to 127.0.0.1 (systemd unit), so this UFW rule is
+#   defense-in-depth if the bind address is ever changed. SSH tunnel
+#   is the primary access method.
+backup_server_firewall_ports:
+  - { port: "8500", proto: tcp, comment: "Restic REST server (backup clients)" }
+  - { port: "9898", proto: tcp, comment: "Backrest monitoring UI (admin only)" }
+
+backup_server_firewall_sources:
+  - "{{ management_network }}"          # VLAN 10 — Proxmox hosts, admin
+  - "{{ lan_network }}"                 # VLAN 1  — Jordan's workstation
+  - "{{ services_network }}"            # VLAN 20 — backup clients (LXCs/VMs)
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ backup_server_firewall_ports }}"
+firewall_additional_sources: "{{ backup_server_firewall_sources }}"
+
+# No Docker in this LXC — both services are standalone Go binaries
+firewall_docker_forwarding: false
+
+# ---------------------------------------------------------------------------
+# SSH
+# ---------------------------------------------------------------------------
+# Allow TCP forwarding for SSH tunnels to Backrest UI (127.0.0.1:9898).
+# ssh -L 9898:127.0.0.1:9898 root@10.0.10.18
+ssh_allow_tcp_forwarding: "yes"
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "backup-infra"

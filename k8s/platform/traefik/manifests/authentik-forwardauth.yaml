@@ -1,0 +1,35 @@
+# =============================================================================
+# Authentik ForwardAuth — Traefik Middleware (K8s Workloads Only)
+# =============================================================================
+# Protects K8s services that don't support native OIDC (Longhorn UI, etc.)
+# by delegating authentication to the Authentik VM's embedded outpost.
+#
+# This middleware points DIRECTLY at the Authentik VM IP on Management VLAN 10.
+# Traefik (VLAN 20) reaches it via the services_to_mgmt zone policy (ALLOW).
+# Browser traffic to Authentik itself is NOT routed through Traefik — DNS
+# resolves auth.home.example-lab.org directly to 10.0.10.16.
+#
+# Usage: Add this middleware to any IngressRoute:
+#   middlewares:
+#     - name: authentik-forwardauth
+#       namespace: traefik
+#
+# Requires a ForwardAuth provider + application configured in Authentik
+# for each protected service (future: Terraform Layer 07).
+# =============================================================================
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: authentik-forwardauth
+  namespace: traefik
+spec:
+  forwardAuth:
+    address: http://10.0.10.16:9000/outpost.goauthentik.io/auth/traefik
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-authentik-username
+      - X-authentik-groups
+      - X-authentik-email
+      - X-authentik-name
+      - X-authentik-uid

@@ -1,0 +1,37 @@
+# =============================================================================
+# Cloud-init network-config for K3s RPi5 NVMe boot
+# =============================================================================
+# Written to the NVMe system-boot partition by k3s-rpi-nvme-setup.yml.
+# Configures static VLAN 20 IP. After terraform apply moves the switch port
+# to VLAN 20, the node becomes reachable at target_ip.
+#
+# Template variables:
+#   target_ip      — Static IP on VLAN 20 (e.g., 10.0.20.60)
+#   target_cidr    — Subnet prefix length (default: 24)
+#   target_gateway — VLAN 20 gateway (default: 10.0.20.1)
+#   dns_1          — Primary DNS (default: 10.0.20.1)
+#   dns_2          — Secondary DNS (default: 1.1.1.1)
+#
+# Note: RPi5 with Ubuntu 24.04 preinstalled image uses 'eth0' for the
+# onboard Ethernet. If the interface name differs, update the key below.
+# =============================================================================
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - {{ target_ip }}/{{ target_cidr | default('24') }}
+      routes:
+        - to: default
+          via: {{ target_gateway | default('10.0.20.1') }}
+        # WireGuard tunnel subnet — routed via gw-01 to WireGuard LXC (VLAN 30)
+        # Required for Prometheus to scrape Hetzner targets (10.8.0.1:9100, 10.8.0.1:8888)
+        # and Alertmanager to reach Gotify (10.8.0.1:8080).
+        - to: 10.8.0.0/24
+          via: {{ target_gateway | default('10.0.20.1') }}
+      nameservers:
+        addresses:
+          - {{ dns_1 | default('10.0.20.1') }}
+          - {{ dns_2 | default('1.1.1.1') }}

@@ -1,0 +1,15 @@
+# =============================================================================
+# Ad Blocking Per-Network Configuration (Future — Phase 2)
+# =============================================================================
+# Manages CyberSecure ad blocking on a per-VLAN basis.
+# The filipowm/unifi provider's Read function returns empty lists for
+# ad_blocked_networks, plus hits a sensitive value mismatch on plan.
+# This Ansible task bypasses the provider and hits the API directly.
+#
+# TODO: Implement when requirements are defined.
+# =============================================================================
+---
+
+- name: Ad blocking configuration (placeholder)
+  ansible.builtin.debug:
+    msg: "Ad blocking management is planned for Phase 2. No changes made."

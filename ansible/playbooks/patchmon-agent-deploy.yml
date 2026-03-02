@@ -1,0 +1,116 @@
+---
+# =============================================================================
+# PatchMon Agent Fleet Deployment Playbook
+# =============================================================================
+# Deploys the PatchMon agent to all Linux hosts in the fleet. The agent
+# reports package/patch status outbound to the PatchMon server (10.0.20.15).
+#
+# No inbound ports are needed on agent hosts — communication is outbound-only
+# to PatchMon on port 3000.
+#
+# Prerequisites:
+#   - PatchMon server deployed with onboarding complete:
+#       ansible-playbook playbooks/patchmon-deploy.yml
+#   - Enrollment token stored in Vault at secret/services/patchmon
+#     (created automatically by patchmon-deploy.yml onboarding)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/patchmon-agent-deploy.yml
+#
+# Selective deployment:
+#   ansible-playbook ... --limit proxmox_nodes    # Only Proxmox hypervisors
+#   ansible-playbook ... --limit rke2_cluster     # Only RKE2 nodes
+#   ansible-playbook ... --limit gitlab           # Single host
+#
+# Tags:
+#   ansible-playbook ... --tags install    # Only agent installation
+#   ansible-playbook ... --tags verify     # Only verification checks
+# =============================================================================
+
+- name: Deploy PatchMon agent to all Linux hosts
+  hosts: patchmon_agent_targets
+  become: true
+  gather_facts: true
+  serial: 5
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+          - os_family
+
+    # Skip macOS hosts (vault-1 is in vault_cluster but runs Darwin)
+    - name: Skip non-Linux hosts
+      ansible.builtin.meta: end_host
+      when: ansible_os_family == 'Darwin'
+
+    # -----------------------------------------------------------------
+    # Read enrollment token from Vault
+    # -----------------------------------------------------------------
+    - name: Read PatchMon secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/patchmon
+      register: _vault_patchmon
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Set enrollment token from Vault
+      ansible.builtin.set_fact:
+        patchmon_enrollment_token_key: "{{ (_vault_patchmon.stdout | from_json).data.data.enrollment_token_key | default('') }}"
+        patchmon_enrollment_token_secret: "{{ (_vault_patchmon.stdout | from_json).data.data.enrollment_token_secret | default('') }}"
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Validate enrollment token exists
+      ansible.builtin.assert:
+        that:
+          - patchmon_enrollment_token_key | length > 0
+          - patchmon_enrollment_token_secret | length > 0
+        fail_msg: >-
+          PatchMon enrollment token not found in Vault (secret/services/patchmon).
+          Complete PatchMon first-time setup and run onboarding first:
+            1. Open http://10.0.20.15:3000/ in browser — create admin account
+            2. Store creds: vault kv patch -mount=secret services/patchmon admin_email=<user> admin_password=<pass>
+            3. Run: ansible-playbook playbooks/patchmon-deploy.yml --tags onboarding
+          Then re-run this agent deployment playbook.
+      run_once: true
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >-
+          Deploying PatchMon agent on {{ inventory_hostname }}
+          ({{ ansible_os_family }}, {{ ansible_host }})
+
+  roles:
+    - role: patchmon-agent
+      tags:
+        - patchmon-agent
+        - install
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          PatchMon agent deployed on {{ inventory_hostname }} ({{ ansible_host }}).
+          Credentials: {{ patchmon_agent_credentials_path | default('/etc/patchmon/credentials') }}.
+          Agent will report to {{ patchmon_server_url | default('http://10.0.20.15:3000') }}.
+      tags:
+        - verify

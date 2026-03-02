@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# =============================================================================
+# ZIM Content Sync Script — FirbLab Archive Appliance
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+#
+# Auto-discovers the latest ZIM version for each configured package from
+# download.kiwix.org, downloads only if a newer version exists, removes
+# stale versions after successful download, and restarts Kiwix.
+#
+# No hardcoded filenames — the script scrapes the Kiwix directory listing
+# to find the latest date-stamped file matching each package prefix.
+#
+# Usage:
+#   sudo /opt/archive/scripts/zim-sync.sh               # Sync all packages
+#   sudo /opt/archive/scripts/zim-sync.sh --check        # Dry-run (show what would change)
+#   sudo /opt/archive/scripts/zim-sync.sh --status       # Show current vs latest versions
+#
+# Cron (deployed by Ansible):
+#   {{ archive_kiwix_zim_cron_minute }} {{ archive_kiwix_zim_cron_hour }} {{ archive_kiwix_zim_cron_day }} * *  root  /opt/archive/scripts/zim-sync.sh >> /var/log/zim-sync.log 2>&1
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+ZIM_DIR="{{ archive_kiwix_zim_dir }}"
+KIWIX_BASE_URL="https://download.kiwix.org/zim"
+LOG="/var/log/zim-sync.log"
+COMPOSE_DIR="{{ archive_install_dir }}"
+ARIA2_CONNECTIONS={{ archive_kiwix_aria2_connections }}
+DRY_RUN=false
+STATUS_ONLY=false
+
+case "${1:-}" in
+    --check)    DRY_RUN=true ;;
+    --status)   STATUS_ONLY=true ;;
+esac
+
+# ---------------------------------------------------------
+# Functions
+# ---------------------------------------------------------
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
+}
+
+# Discover the latest ZIM filename for a given category + prefix.
+# Scrapes the Apache directory listing on download.kiwix.org.
+# Args: $1 = category (e.g., "wikipedia"), $2 = prefix (e.g., "wikipedia_en_all_maxi")
+# Returns: filename on stdout, or empty string if not found.
+discover_latest() {
+    local category="$1"
+    local prefix="$2"
+    local dir_url="${KIWIX_BASE_URL}/${category}/"
+
+    # Fetch directory listing, extract filenames matching prefix_YYYY-MM.zim,
+    # sort by version (date stamp), take the newest.
+    curl -sfL --max-time 30 "$dir_url" 2>/dev/null \
+        | grep -oP "href=\"${prefix}_\d{4}-\d{2}\.zim\"" \
+        | grep -oP "${prefix}_\d{4}-\d{2}\.zim" \
+        | sort -t_ -k"$(echo "$prefix" | tr -cd '_' | wc -c | awk '{print $1+2}')" -V \
+        | tail -1
+}
+
+# Find the currently installed version of a package prefix in ZIM_DIR.
+# Returns: filename on stdout, or empty string if none found.
+find_local() {
+    local prefix="$1"
+    # Match prefix_YYYY-MM.zim pattern in the ZIM directory
+    find "$ZIM_DIR" -maxdepth 1 -name "${prefix}_????-??.zim" -printf '%f\n' 2>/dev/null \
+        | sort -V \
+        | tail -1
+}
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
+mkdir -p "$ZIM_DIR"
+
+log "=== ZIM sync started ==="
+log "Target directory: $ZIM_DIR"
+log "Mode: $(if $STATUS_ONLY; then echo 'status'; elif $DRY_RUN; then echo 'dry-run'; else echo 'sync'; fi)"
+
+DOWNLOAD_COUNT=0
+SKIP_COUNT=0
+FAIL_COUNT=0
+UPDATED_COUNT=0
+
+{% for pkg in archive_kiwix_zim_packages %}
+# --- {{ pkg.comment }} ---
+CATEGORY="{{ pkg.category }}"
+PREFIX="{{ pkg.prefix }}"
+COMMENT="{{ pkg.comment }}"
+
+log "Checking: ${COMMENT} (${PREFIX})"
+
+LATEST=$(discover_latest "$CATEGORY" "$PREFIX")
+LOCAL=$(find_local "$PREFIX")
+
+if [ -z "$LATEST" ]; then
+    log "  WARNING: Could not discover latest version for ${PREFIX} — skipping"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+elif [ "$LOCAL" = "$LATEST" ]; then
+    log "  UP-TO-DATE: ${LOCAL}"
+    SKIP_COUNT=$((SKIP_COUNT + 1))
+elif $STATUS_ONLY; then
+    if [ -z "$LOCAL" ]; then
+        log "  MISSING: (none) → ${LATEST}"
+    else
+        log "  UPDATE AVAILABLE: ${LOCAL} → ${LATEST}"
+    fi
+    DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
+elif $DRY_RUN; then
+    if [ -z "$LOCAL" ]; then
+        log "  WOULD DOWNLOAD: ${LATEST}"
+    else
+        log "  WOULD UPDATE: ${LOCAL} → ${LATEST}"
+    fi
+    DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
+else
+    DOWNLOAD_URL="${KIWIX_BASE_URL}/${CATEGORY}/${LATEST}"
+    if [ -z "$LOCAL" ]; then
+        log "  DOWNLOADING: ${LATEST}..."
+    else
+        log "  UPDATING: ${LOCAL} → ${LATEST}..."
+    fi
+
+    if aria2c \
+        --dir="${ZIM_DIR}" \
+        --out="${LATEST}" \
+        --continue=true \
+        --max-connection-per-server=${ARIA2_CONNECTIONS} \
+        --split=${ARIA2_CONNECTIONS} \
+        --min-split-size=20M \
+        --file-allocation=falloc \
+        --console-log-level=warn \
+        "$DOWNLOAD_URL" >> "$LOG" 2>&1; then
+
+        log "  SUCCESS: ${LATEST}"
+        DOWNLOAD_COUNT=$((DOWNLOAD_COUNT + 1))
+
+        # Remove old version if it exists and differs from the new one
+        if [ -n "$LOCAL" ] && [ "$LOCAL" != "$LATEST" ]; then
+            log "  CLEANUP: Removing old version ${LOCAL}"
+            rm -f "${ZIM_DIR}/${LOCAL}"
+            UPDATED_COUNT=$((UPDATED_COUNT + 1))
+        fi
+    else
+        log "  FAILED: ${LATEST}"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        # Remove partial download to avoid serving corrupt files
+        rm -f "${ZIM_DIR}/${LATEST}"
+        # Keep old version intact — better to serve stale content than nothing
+    fi
+fi
+
+{% endfor %}
+
+# ---------------------------------------------------------
+# Summary
+# ---------------------------------------------------------
+log "=== ZIM sync complete ==="
+log "Summary: ${DOWNLOAD_COUNT} downloaded, ${UPDATED_COUNT} updated (old removed), ${SKIP_COUNT} up-to-date, ${FAIL_COUNT} failed"
+log "Disk usage: $(du -sh "$ZIM_DIR" 2>/dev/null | cut -f1)"
+
+# ---------------------------------------------------------
+# Restart Kiwix (if anything was downloaded)
+# ---------------------------------------------------------
+if [ "$DOWNLOAD_COUNT" -gt 0 ] && ! $DRY_RUN && ! $STATUS_ONLY; then
+    log "Restarting Kiwix to pick up new/updated ZIM files..."
+    if docker restart kiwix >> "$LOG" 2>&1; then
+        log "Kiwix restarted successfully."
+    else
+        log "WARNING: Kiwix restart failed — may need manual intervention."
+    fi
+fi
+
+if [ "$FAIL_COUNT" -gt 0 ]; then
+    log "WARNING: $FAIL_COUNT packages failed. Re-run to retry."
+    exit 1
+fi

@@ -1,0 +1,445 @@
+---
+# =============================================================================
+# lab-08 Deployment Playbook — Scanopy + NUT
+# =============================================================================
+# Deploys Scanopy (network topology scanner) and NUT (UPS monitoring server)
+# on lab-08 (bare-metal RPi5, VLAN 1).
+#
+# Scanopy: Docker Compose (server + daemon + PostgreSQL)
+#   - Server Web UI + API on port 60072
+#   - Daemon on host network (privileged) for Layer 2/3 scanning
+#
+# NUT: Native packages (nut-server, nut-client)
+#   - CyberPower PR1500LCDRT2U via usbhid-ups driver
+#   - upsd listening on 0.0.0.0:3493 (netserver mode)
+#
+# Prerequisites:
+#   - lab-08 bootstrapped (lab-08-bootstrap.yml --tags full_bootstrap)
+#   - SSH key available: ~/.ssh/id_ed25519_lab-08
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT
+#
+# Secrets are managed automatically:
+#   - First run: generates random passwords, stores in Vault
+#     secret/services/scanopy (db_password, admin_email, admin_password)
+#     secret/services/nut (monitor_password, admin_password)
+#   - Subsequent runs: reads existing secrets from Vault
+#   - Override: pass -e scanopy_db_password=xxx (etc.)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/lab-08-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags scanopy     # Only Scanopy deployment
+#   ansible-playbook ... --tags nut         # Only NUT deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+# =============================================================================
+
+- name: Deploy Scanopy + NUT on lab-08
+  hosts: lab-08
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Scanopy Secret Management: Vault read → generate → Vault write
+    # -----------------------------------------------------------------
+    - name: Try reading Scanopy secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/scanopy
+      register: vault_scanopy_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: scanopy_db_password is not defined
+      tags:
+        - always
+
+    - name: Parse Scanopy Vault response
+      ansible.builtin.set_fact:
+        _scanopy_vault_data: "{{ (vault_scanopy_read.stdout | from_json).data.data }}"
+      when:
+        - scanopy_db_password is not defined
+        - vault_scanopy_read.rc is defined
+        - vault_scanopy_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Set Scanopy secrets from Vault (if secrets exist)
+      ansible.builtin.set_fact:
+        scanopy_db_password: "{{ _scanopy_vault_data.db_password }}"
+        scanopy_admin_email: "{{ _scanopy_vault_data.admin_email | default('admin@example-lab.local') }}"
+        scanopy_admin_password: "{{ _scanopy_vault_data.admin_password | default('') }}"
+        scanopy_daemon_network_id: "{{ _scanopy_vault_data.daemon_network_id | default('') }}"
+        scanopy_daemon_api_key: "{{ _scanopy_vault_data.daemon_api_key | default('') }}"
+      when:
+        - scanopy_db_password is not defined
+        - _scanopy_vault_data is defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate Scanopy admin credentials (if not in Vault yet)
+      ansible.builtin.set_fact:
+        scanopy_admin_email: "admin@example-lab.local"
+        scanopy_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+      when: scanopy_admin_password is not defined or scanopy_admin_password | length == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate Scanopy DB password (first deploy)
+      ansible.builtin.set_fact:
+        scanopy_db_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+      when: scanopy_db_password is not defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Store Scanopy secrets in Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - -mount=secret
+          - services/scanopy
+          - "db_password={{ scanopy_db_password }}"
+          - "admin_email={{ scanopy_admin_email }}"
+          - "admin_password={{ scanopy_admin_password }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: >-
+        (vault_scanopy_read is defined and vault_scanopy_read.rc is defined and vault_scanopy_read.rc != 0)
+        or (_scanopy_vault_data is defined and 'admin_password' not in _scanopy_vault_data)
+      tags:
+        - always
+
+    - name: Validate Scanopy secrets are available
+      ansible.builtin.assert:
+        that:
+          - scanopy_db_password is defined
+          - scanopy_db_password | length > 0
+          - scanopy_admin_email is defined
+          - scanopy_admin_password is defined
+        fail_msg: >
+          Scanopy secrets not available. Check Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/scanopy
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # NUT Secret Management: Vault read → generate → Vault write
+    # -----------------------------------------------------------------
+    - name: Try reading NUT secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/nut
+      register: vault_nut_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: nut_monitor_password is not defined
+      tags:
+        - always
+
+    - name: Set NUT secrets from Vault (if secrets exist)
+      ansible.builtin.set_fact:
+        nut_monitor_password: "{{ (vault_nut_read.stdout | from_json).data.data.monitor_password }}"
+        nut_admin_password: "{{ (vault_nut_read.stdout | from_json).data.data.admin_password }}"
+      when:
+        - nut_monitor_password is not defined
+        - vault_nut_read.rc is defined
+        - vault_nut_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate NUT secrets (first deploy)
+      ansible.builtin.set_fact:
+        nut_monitor_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=24') }}"
+        nut_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=24') }}"
+      when: nut_monitor_password is not defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Store NUT secrets in Vault (first deploy)
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - -mount=secret
+          - services/nut
+          - "monitor_password={{ nut_monitor_password }}"
+          - "admin_password={{ nut_admin_password }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when:
+        - vault_nut_read is defined
+        - vault_nut_read.rc is defined
+        - vault_nut_read.rc != 0
+      tags:
+        - always
+
+    - name: Validate NUT secrets are available
+      ansible.builtin.assert:
+        that:
+          - nut_monitor_password is defined
+          - nut_monitor_password | length > 0
+          - nut_admin_password is defined
+          - nut_admin_password | length > 0
+        fail_msg: >
+          NUT secrets not available. Check Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/nut
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Backup Secret Management
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set backup secrets from Vault
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+        backup_enabled: true
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [always]
+
+    - name: Warn if backup secrets not available
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Backup secrets not available in Vault. Backup automation will be skipped.
+          Seed secrets: vault kv put secret/backup/age-key public_key=age1...
+      when: backup_enabled is not defined or not backup_enabled | bool
+
+    # -----------------------------------------------------------------
+    # NetBox Sync Secret Management (Scanopy → NetBox daily cron)
+    # -----------------------------------------------------------------
+    - name: Read NetBox secrets from Vault (for sync automation)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/netbox
+      register: vault_netbox_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set NetBox sync variables from Vault
+      ansible.builtin.set_fact:
+        scanopy_netbox_sync_enabled: true
+        scanopy_netbox_sync_url: "http://10.0.20.14:8080"
+        scanopy_netbox_sync_token: "{{ (vault_netbox_read.stdout | from_json).data.data.api_token }}"
+      when:
+        - vault_netbox_read.rc is defined and vault_netbox_read.rc == 0
+      no_log: true
+      tags: [always]
+
+    - name: Warn if NetBox secrets not available
+      ansible.builtin.debug:
+        msg: >
+          WARNING: NetBox secrets not available in Vault. Scanopy → NetBox sync will be skipped.
+          Seed secrets: vault kv put secret/services/netbox api_token=...
+      when: vault_netbox_read.rc is not defined or vault_netbox_read.rc != 0
+
+    # -----------------------------------------------------------------
+    # Deployment Info
+    # -----------------------------------------------------------------
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Scanopy + NUT on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (bare-metal RPi5, has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE (for Scanopy containers)
+    - role: docker
+      tags:
+        - docker
+
+    # Scanopy network topology scanner (Docker Compose)
+    - role: scanopy
+      tags:
+        - scanopy
+
+    # NUT UPS monitoring server (native packages)
+    - role: nut
+      tags:
+        - nut
+
+    # Docker volume backup automation (Scanopy DB + data → S3)
+    - role: backup
+      vars:
+        backup_services:
+          - name: scanopy
+            compose_path: /opt/scanopy
+            volumes:
+              - postgres_data
+              - scanopy_data
+        backup_cron_hour: "4"
+        backup_cron_minute: "0"
+      tags:
+        - backup
+
+  post_tasks:
+    # -----------------------------------------------------------------
+    # Scanopy Health Check (/api/health returns 200)
+    # -----------------------------------------------------------------
+    - name: Wait for Scanopy API to be healthy
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port | default(60072) }}/api/health"
+        method: GET
+        status_code: [200]
+      register: scanopy_post_health
+      retries: 30
+      delay: 10
+      until: scanopy_post_health.status is defined and scanopy_post_health.status == 200
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if Scanopy API never became healthy
+      ansible.builtin.fail:
+        msg: "Scanopy API failed to respond after 300 seconds. Last status: {{ scanopy_post_health.status | default('connection refused') }}"
+      when: scanopy_post_health.status is not defined or scanopy_post_health.status != 200
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------
+    # NUT Health Check (non-fatal — UPS may not be USB-connected yet)
+    # -----------------------------------------------------------------
+    - name: Verify NUT UPS is reachable
+      ansible.builtin.command:
+        cmd: upsc {{ nut_ups_name | default('ups') }}@localhost
+      register: nut_verify
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display NUT status
+      ansible.builtin.debug:
+        msg: "{{ nut_verify.stdout_lines | default(['NUT: UPS not reachable (check USB connection)']) }}"
+      when: nut_verify.rc is defined and nut_verify.rc == 0
+      tags:
+        - verify
+
+    - name: Warn if NUT UPS is not reachable
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: NUT UPS not reachable. This is expected if:"
+          - "  - The UPS USB cable is not yet connected"
+          - "  - The udev rules need a device re-plug to take effect"
+          - "  - The nut-driver service failed to claim the USB device"
+          - ""
+          - "Troubleshooting:"
+          - "  lsusb | grep 0764:0601                    # Verify USB device visible"
+          - "  ls -la /dev/bus/usb/                       # Check permissions"
+          - "  systemctl status nut-driver                # Check driver status"
+          - "  systemctl restart nut-driver nut-server    # Restart NUT stack"
+          - "  upsc ups@localhost                         # Re-test"
+      when: nut_verify.rc is not defined or nut_verify.rc != 0
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------
+    # Deployment Summary
+    # -----------------------------------------------------------------
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "lab-08 Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - ""
+          - "--- Scanopy ---"
+          - "Web UI: http://{{ ansible_host }}:{{ scanopy_server_port | default(60072) }}/"
+          - "API:    http://{{ ansible_host }}:{{ scanopy_server_port | default(60072) }}/api"
+          - "Health: http://{{ ansible_host }}:{{ scanopy_server_port | default(60072) }}/api/health"
+          - "Admin:  vault kv get -mount=secret -field=admin_email services/scanopy"
+          - "Secrets: vault kv get -mount=secret services/scanopy"
+          - "Containers:"
+          - "  docker compose -f /opt/scanopy/docker-compose.yml ps"
+          - "  docker compose -f /opt/scanopy/docker-compose.yml logs -f"
+          - ""
+          - "--- NUT ---"
+          - "UPS Status: upsc ups@{{ ansible_host }}"
+          - "Remote Status: upsc ups@{{ ansible_host }} (from any host, port 3493)"
+          - "Secrets: vault kv get -mount=secret services/nut"
+          - "Services:"
+          - "  systemctl status nut-server nut-monitor"
+          - "  upsc ups@localhost"
+          - ""
+          - "--- Firewall ---"
+          - "Port 60072/tcp: Scanopy Web UI + API"
+          - "Port 60073/tcp: Scanopy daemon"
+          - "Port 3493/tcp:  NUT upsd"
+          - "=========================================="
+      tags:
+        - verify

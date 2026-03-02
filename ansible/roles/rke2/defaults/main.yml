@@ -1,0 +1,61 @@
+---
+# =============================================================================
+# RKE2 Role Defaults
+# =============================================================================
+# These are overridden by group_vars/rke2_cluster.yml in production.
+# =============================================================================
+
+# renovate: datasource=github-releases depName=rancher/rke2 versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)\+rke2r(?<build>\d+)$
+rke2_version: "v1.32.11+rke2r3"
+rke2_profile: "cis"
+rke2_cni: "canal"
+
+rke2_cluster_cidr: "10.42.0.0/16"
+rke2_service_cidr: "10.43.0.0/16"
+rke2_cluster_dns: "10.43.0.10"
+
+rke2_init_node: "rke2-server-1"
+rke2_init_node_ip: "10.0.20.40"
+rke2_server_url: "https://10.0.20.40:9345"
+
+rke2_tls_san: []
+rke2_disable: []
+
+rke2_kube_apiserver_args: []
+rke2_kubelet_args: []
+rke2_kube_controller_manager_args: []
+
+rke2_sysctl: {}
+rke2_kernel_modules: []
+rke2_longhorn_packages: []
+
+rke2_create_etcd_user: true
+
+# Longhorn data disk — mounted from /dev/sdb (Terraform-provisioned scsi1)
+rke2_data_disk_device: "/dev/sdb"
+rke2_data_disk_label: "longhorn-data"
+rke2_data_disk_mount: "/var/lib/longhorn"
+
+# Install method: tarball (for airgap) or script (internet-connected)
+rke2_install_method: "script"
+
+# Paths (RKE2 defaults)
+rke2_config_dir: "/etc/rancher/rke2"
+rke2_data_dir: "/var/lib/rancher/rke2"
+rke2_bin_dir: "/var/lib/rancher/rke2/bin"
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zones
+# ---------------------------------------------------------------------------
+# Dedicated CoreDNS server blocks for internal DNS zones. Addresses
+# intermittent NXDOMAIN when gw-01 is slow to respond — pods get a
+# longer cache and explicit upstreams instead of relying on the default
+# 30-second cache against /etc/resolv.conf.
+#
+# Each entry generates a separate CoreDNS server block in the Corefile
+# via a HelmChartConfig deployed to the RKE2 server manifests directory.
+# Override in group_vars/rke2_cluster.yml to enable.
+rke2_coredns_custom_zones: []
+
+# Default zone cache TTL (seconds) — the catch-all "." server block
+rke2_coredns_default_cache_ttl: 30

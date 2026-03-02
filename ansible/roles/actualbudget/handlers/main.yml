@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Actual Budget Role Handlers
+# =============================================================================
+
+- name: Restart actualbudget
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ actualbudget_install_dir }}"

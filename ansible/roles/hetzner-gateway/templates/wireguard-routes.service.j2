@@ -1,0 +1,28 @@
+# =============================================================================
+# wireguard-routes.service — Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: wireguard-routes.service.j2
+#
+# Restores homelab subnet kernel routes through wg0 after reboot.
+# The linuxserver/wireguard Docker image uses the `wg` kernel module directly
+# (not wg-quick), so AllowedIPs alone does not create host-level kernel routes.
+# Routes must be added explicitly and are lost on reboot without this unit.
+#
+# Managed subnets: gateway_homelab_subnets in group_vars/hetzner.yml
+# =============================================================================
+
+[Unit]
+Description=WireGuard homelab subnet routes
+After=docker.service firblab-services.service
+Wants=firblab-services.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+{% for subnet in gateway_homelab_subnets %}
+ExecStart=/sbin/ip route add {{ subnet }} dev wg0
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

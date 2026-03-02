@@ -1,0 +1,56 @@
+---
+# =============================================================================
+# restic-server — Default Variables
+# =============================================================================
+# Deploys a Restic REST server on a Proxmox node for centralized backup
+# storage. Clients push backups over HTTP to this server.
+#
+# The REST server runs in append-only mode by default — clients can create
+# and read backups but cannot delete or modify existing data. This protects
+# against compromised clients wiping backup history.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# REST Server Binary
+# ---------------------------------------------------------------------------
+# rest-server release from https://github.com/restic/rest-server/releases
+# renovate: datasource=github-releases depName=restic/rest-server
+restic_server_version: "0.13.0"
+restic_server_arch: "amd64"
+restic_server_binary: "/usr/local/bin/rest-server"
+
+# ---------------------------------------------------------------------------
+# Data Storage
+# ---------------------------------------------------------------------------
+# Base directory for all Restic repositories. Each client gets a subdirectory
+# named after its hostname (e.g., /mnt/restic/lab-03/).
+# On the backup LXC this is a bind-mount from /hdd-mirror-0/restic on the host.
+# Override in the deploy playbook if running directly on the Proxmox host.
+restic_server_data_dir: "/mnt/restic"
+
+# ---------------------------------------------------------------------------
+# Network Configuration
+# ---------------------------------------------------------------------------
+restic_server_listen: "0.0.0.0:8500"
+restic_server_port: 8500
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+# Path to the htpasswd file for HTTP Basic Auth. Each backup client gets
+# its own username/password. Managed by the deploy playbook.
+restic_server_htpasswd_file: "/etc/restic-server/htpasswd"
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+# Append-only mode prevents clients from deleting or modifying existing data.
+# Pruning/forget operations must be run locally on the server or by an
+# admin with direct filesystem access.
+restic_server_append_only: true
+
+# ---------------------------------------------------------------------------
+# Systemd
+# ---------------------------------------------------------------------------
+restic_server_user: "restic"
+restic_server_group: "restic"

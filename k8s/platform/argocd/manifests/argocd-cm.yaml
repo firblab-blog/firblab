@@ -1,0 +1,33 @@
+# =============================================================================
+# ArgoCD ConfigMap — OIDC Authentication via Authentik
+# =============================================================================
+# Configures ArgoCD to authenticate users via Authentik OIDC.
+#
+# Client secret uses $oidc.clientSecret which reads from argocd-secret directly.
+# This is a workaround for an ArgoCD v3.3.0 bug where the $<secret>:<key>
+# substitution for separately-labeled external secrets is broken.
+# See: k8s/platform/external-secrets/argocd-secret-oidc.yaml for the ESO
+# ExternalSecret that merges oidc.clientSecret into argocd-secret from Vault.
+#
+# OIDC provider created by Terraform Layer 07-authentik-config.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  url: https://argocd.home.example-lab.org
+  oidc.config: |
+    name: Authentik
+    issuer: https://auth.home.example-lab.org/application/o/argocd/
+    clientID: argocd
+    clientSecret: $oidc.clientSecret
+    requestedScopes:
+      - openid
+      - profile
+      - email

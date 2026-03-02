@@ -1,0 +1,244 @@
+---
+# =============================================================================
+# Archive Appliance Role - Default Variables
+# =============================================================================
+# Prepper-grade offline knowledge base running on dedicated ZimaBlade 7700.
+# Docker Compose stack: Kiwix, ArchiveBox, BookStack, Stirling PDF,
+# Wallabag, and FileBrowser with TrueNAS NFS for bulk overflow storage.
+#
+# Storage:
+#   2TB USB SSD (/mnt/data)  — hot storage: ZIM files, databases, Docker
+#   PS4 HDD (/mnt/cold)      — cold storage: overflow, media, backups
+#   NFS (/mnt/archive)       — TrueNAS off-device backup mirror (optional)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Storage Paths
+# ---------------------------------------------------------------------------
+archive_install_dir: /opt/archive
+archive_data_dir: /mnt/data
+archive_cold_dir: /mnt/cold
+
+# Docker data root — redirect from eMMC to USB SSD
+archive_docker_data_root: /mnt/data/docker
+
+# ---------------------------------------------------------------------------
+# Disk Configuration (format + fstab)
+# ---------------------------------------------------------------------------
+# These define the physical disks to be formatted and mounted.
+# The role will:
+#   1. Wipe existing partition tables
+#   2. Create a single GPT partition spanning the full disk
+#   3. Format as ext4 with a descriptive label
+#   4. Mount and add to fstab by UUID
+#
+# IMPORTANT: USB SSD uses 'nofail' so the system boots if disconnected.
+# SATA HDD uses 'nofail' as well for resilience.
+#
+# Set archive_disk_setup_enabled=false to skip disk formatting (e.g., if
+# disks are already formatted and mounted from a previous run).
+archive_disk_setup_enabled: true
+
+archive_disks:
+  - device: /dev/sdb
+    mount: /mnt/data
+    label: archive-data
+    fstype: ext4
+    opts: "defaults,noatime,nofail"
+    owner: admin
+    group: admin
+  - device: /dev/sda
+    mount: /mnt/cold
+    label: archive-cold
+    fstype: ext4
+    opts: "defaults,noatime,nofail"
+    owner: admin
+    group: admin
+
+# ---------------------------------------------------------------------------
+# NFS Mount Configuration (TrueNAS — optional, disabled by default)
+# ---------------------------------------------------------------------------
+archive_nfs_enabled: false
+archive_nfs_server: "10.0.40.2"
+archive_nfs_path: "/mnt/tank/archive"
+archive_mount_point: "/mnt/archive"
+
+# ---------------------------------------------------------------------------
+# Service Toggles (disable individual services if needed)
+# ---------------------------------------------------------------------------
+archive_kiwix_enabled: true
+archive_archivebox_enabled: true
+archive_bookstack_enabled: true
+archive_stirlingpdf_enabled: true
+archive_wallabag_enabled: true
+archive_filebrowser_enabled: true
+archive_tileservergl_enabled: true
+archive_calibreweb_enabled: true
+
+# ---------------------------------------------------------------------------
+# Port Allocation
+# ---------------------------------------------------------------------------
+archive_filebrowser_port: 8080
+archive_kiwix_port: 8081
+archive_archivebox_port: 8082
+archive_bookstack_port: 8083
+archive_stirlingpdf_port: 8084
+archive_wallabag_port: 8085
+archive_tileservergl_port: 8086
+archive_calibreweb_port: 8087
+
+# ---------------------------------------------------------------------------
+# Container Image Versions (pinned for reproducibility)
+# ---------------------------------------------------------------------------
+archive_filebrowser_image: "filebrowser/filebrowser:v2.32.0"
+archive_kiwix_image: "ghcr.io/kiwix/kiwix-serve:3.8.1"
+archive_archivebox_image: "archivebox/archivebox:0.7.3"
+archive_bookstack_image: "lscr.io/linuxserver/bookstack:v25.12.4-ls246"
+archive_bookstack_mariadb_image: "mariadb:11.4.10"
+archive_stirlingpdf_image: "stirlingtools/stirling-pdf:0.45.1"
+archive_wallabag_image: "wallabag/wallabag:2.6.14"
+archive_wallabag_mariadb_image: "mariadb:11.4.10"
+# https://github.com/maptiler/tileserver-gl/releases
+archive_tileservergl_image: "maptiler/tileserver-gl:v5.5.0"
+# https://github.com/linuxserver/docker-calibre-web/releases
+archive_calibreweb_image: "lscr.io/linuxserver/calibre-web:0.6.26-ls371"
+
+# ---------------------------------------------------------------------------
+# BookStack Configuration
+# ---------------------------------------------------------------------------
+archive_bookstack_app_url: "https://bookstack.home.example-lab.org"
+archive_bookstack_db_name: "bookstack"
+archive_bookstack_db_user: "bookstack"
+# Secrets injected from Vault via playbook pre_tasks:
+#   archive_bookstack_app_key           (Laravel APP_KEY — "base64:<32-bytes>")
+#   archive_bookstack_db_password
+#   archive_bookstack_db_root_password
+
+# ---------------------------------------------------------------------------
+# Wallabag Configuration
+# ---------------------------------------------------------------------------
+archive_wallabag_domain: "https://wallabag.home.example-lab.org"
+archive_wallabag_db_name: "wallabag"
+archive_wallabag_db_user: "wallabag"
+# Passwords injected from Vault via playbook pre_tasks:
+#   archive_wallabag_db_password
+#   archive_wallabag_db_root_password
+
+# ---------------------------------------------------------------------------
+# Kiwix ZIM Content Library
+# ---------------------------------------------------------------------------
+# Managed by /opt/archive/scripts/zim-sync.sh (Ansible-templated).
+# The script auto-discovers the latest ZIM version for each package from
+# download.kiwix.org, downloads only if a newer version exists, removes
+# the old version after successful download, and restarts Kiwix.
+#
+# No hardcoded filenames or URLs — only package definitions.
+# Run manually or via monthly cron (1st of each month at 2 AM).
+#
+# Full catalog: https://download.kiwix.org/zim/
+archive_kiwix_zim_dir: "{{ archive_data_dir }}/kiwix/zim"
+
+# Monthly cron for ZIM auto-update (1st of month, 2 AM)
+archive_kiwix_zim_cron_enabled: true
+archive_kiwix_zim_cron_hour: "2"
+archive_kiwix_zim_cron_minute: "0"
+archive_kiwix_zim_cron_day: "1"
+
+# Max concurrent downloads (aria2c connections per file)
+archive_kiwix_aria2_connections: 4
+
+# ZIM content packages — the script discovers the latest date-stamped
+# filename for each package prefix from the Kiwix download directory.
+#
+# Fields:
+#   category  — subdirectory on download.kiwix.org/zim/<category>/
+#   prefix    — filename prefix before the date stamp (e.g., "wikipedia_en_all_maxi")
+#               the script matches: <prefix>_YYYY-MM.zim
+#   comment   — human-readable description (logged during sync)
+#
+# Storage budget (~1.8TB SSD):
+#   Wikipedia maxi:    ~111 GB
+#   StackOverflow:      ~75 GB
+#   ServerFault:        ~1.5 GB
+#   SuperUser:          ~3.7 GB
+#   iFixit:             ~3.3 GB
+#   Wikibooks maxi:     ~5.1 GB
+#   Wikiversity maxi:   ~2.2 GB
+#   Wikivoyage maxi:    ~1.1 GB
+#   Wiktionary nopic:   ~8.2 GB
+#   FreeCodeCamp:       ~1 GB
+#   PhET:               ~100 MB
+#   Gutenberg:         ~206 GB
+#   Total:             ~417 GB (leaves ~1.3 TB for services + cold overflow)
+#
+# Excluded (nonexistent):
+#   ted_en_all:         does not exist (only ted_mul_all at 79 GB)
+#   devdocs_en_all:     does not exist (split into per-language packages)
+archive_kiwix_zim_packages:
+  # Wikipedia — full English with images (~111 GB)
+  - category: wikipedia
+    prefix: wikipedia_en_all_maxi
+    comment: "Wikipedia English (full, with images)"
+
+  # StackExchange sites
+  - category: stack_exchange
+    prefix: stackoverflow.com_en_all
+    comment: "StackOverflow"
+  - category: stack_exchange
+    prefix: serverfault.com_en_all
+    comment: "ServerFault"
+  - category: stack_exchange
+    prefix: superuser.com_en_all
+    comment: "SuperUser"
+
+  # Repair & practical
+  - category: ifixit
+    prefix: ifixit_en_all
+    comment: "iFixit repair guides"
+
+  # Books & literature
+  - category: gutenberg
+    prefix: gutenberg_en_all
+    comment: "Project Gutenberg (~70k free eBooks)"
+
+  # Reference
+  - category: wikibooks
+    prefix: wikibooks_en_all_maxi
+    comment: "Wikibooks English"
+  - category: wikiversity
+    prefix: wikiversity_en_all_maxi
+    comment: "Wikiversity English"
+  - category: wikivoyage
+    prefix: wikivoyage_en_all_maxi
+    comment: "Wikivoyage English"
+  - category: wiktionary
+    prefix: wiktionary_en_all_nopic
+    comment: "Wiktionary English (no images)"
+
+  # Education
+  - category: freecodecamp
+    prefix: freecodecamp_en_all
+    comment: "FreeCodeCamp tutorials"
+  - category: phet
+    prefix: phet_en_all
+    comment: "PhET science simulations"
+
+# ---------------------------------------------------------------------------
+# TileServer GL — Offline Map Tiles (OpenMapTiles schema)
+# ---------------------------------------------------------------------------
+# MBTiles files are stored on cold storage (/mnt/cold/maps).
+# Each entry here registers a dataset in tileserver-gl's config.json.
+# Re-run Ansible after downloading new tiles to register them.
+#
+# Download free planet tiles with:
+#   sudo /opt/archive/scripts/map-download.sh
+#
+# Source: OpenFreeMap (free weekly planet, OpenMapTiles schema)
+#   https://btrfs.openfreemap.com/files.txt
+#   ~90 GB download, OpenMapTiles vector tile schema
+#
+# Example after download:
+#   archive_tileservergl_datasets:
+#     - name: planet
+#       mbtiles: tiles.mbtiles
+archive_tileservergl_datasets: []

@@ -1,0 +1,39 @@
+---
+# =============================================================================
+# Wazuh Agent Installation — RedHat/Rocky
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Repository Setup
+# ---------------------------------------------------------------------------
+- name: Import Wazuh GPG key (RedHat)
+  ansible.builtin.rpm_key:
+    key: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+    state: present
+  tags:
+    - install
+
+- name: Add Wazuh yum repository
+  ansible.builtin.yum_repository:
+    name: wazuh
+    description: Wazuh repository
+    baseurl: https://packages.wazuh.com/4.x/yum/
+    gpgcheck: true
+    gpgkey: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+    enabled: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install Wazuh Agent
+# ---------------------------------------------------------------------------
+- name: Install wazuh-agent package (RedHat)
+  ansible.builtin.dnf:
+    name: wazuh-agent
+    state: present
+  environment:
+    WAZUH_MANAGER: "{{ wazuh_manager_address }}"
+    WAZUH_AGENT_NAME: "{{ inventory_hostname }}"
+    WAZUH_REGISTRATION_PASSWORD: "{{ wazuh_registration_password | default('') }}"
+  tags:
+    - install

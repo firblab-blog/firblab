@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Service Backup Script — {{ inventory_hostname }}
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+#
+# Backs up service data (Docker volumes, bind mounts, database dumps):
+#   1. Stop service (Docker Compose or systemd)
+#   2. Run pre-backup commands (database dumps)
+#   3. Tar data directories + dump files
+#   4. Restart service immediately (minimize downtime)
+#   5. Encrypt with age
+#   6. Upload to Hetzner S3
+#   7. Run post-backup commands (cleanup)
+#   8. Clean up old local backups
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+HOSTNAME="{{ inventory_hostname }}"
+S3_BUCKET="{{ backup_s3_bucket }}"
+S3_ENDPOINT="https://{{ backup_s3_endpoint }}"
+AGE_RECIPIENT="{{ backup_age_recipient }}"
+LOCAL_BACKUP_DIR="{{ backup_local_dir }}"
+LOCAL_RETENTION_DAYS="{{ backup_local_retention_days }}"
+
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+
+# ---------------------------------------------------------
+# Functions
+# ---------------------------------------------------------
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# ---------------------------------------------------------
+# Service Backups
+# ---------------------------------------------------------
+{% for service in backup_services %}
+# ===================== {{ service.name }} =====================
+log "=== Starting backup: {{ service.name }} ==="
+
+BACKUP_FILE="${LOCAL_BACKUP_DIR}/{{ service.name }}-${TIMESTAMP}.tar"
+ENCRYPTED_FILE="${BACKUP_FILE}.age"
+
+# Step 1: Stop service for consistent backup
+{% if service.systemd_service is defined %}
+log "Stopping {{ service.name }} (systemd: {{ service.systemd_service }})..."
+systemctl stop {{ service.systemd_service }} 2>&1 || true
+{% elif service.compose_path is defined %}
+COMPOSE_FILE="{{ service.compose_path }}/docker-compose.yml"
+log "Stopping {{ service.name }} containers..."
+docker compose -f "${COMPOSE_FILE}" stop 2>&1 || true
+{% endif %}
+
+{% if service.pre_commands is defined and service.pre_commands %}
+# Step 2: Pre-backup commands (database dumps, etc.)
+{% for cmd in service.pre_commands %}
+log "Running pre-backup command: {{ cmd | truncate(60) }}..."
+{{ cmd }} || log "WARNING: Pre-backup command failed"
+{% endfor %}
+{% endif %}
+
+# Step 3: Tar data
+log "Creating archive of {{ service.name }} data..."
+{% if service.volumes is defined and service.volumes %}
+# Named Docker volumes (from /var/lib/docker/volumes/)
+{% for volume in service.volumes %}
+{% if loop.first %}
+tar cf "${BACKUP_FILE}" \
+  -C /var/lib/docker/volumes \
+  {{ service.name | regex_replace('-', '_') }}_{{ volume }}{% if not loop.last %} \{% endif %}
+
+{% else %}
+tar rf "${BACKUP_FILE}" \
+  -C /var/lib/docker/volumes \
+  {{ service.name | regex_replace('-', '_') }}_{{ volume }} 2>/dev/null || \
+  log "WARNING: Volume {{ volume }} not found, skipping"
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if service.paths is defined and service.paths %}
+# Bind-mount paths (host directories)
+{% for path in service.paths %}
+{% if (service.volumes is not defined or not service.volumes) and loop.first %}
+tar cf "${BACKUP_FILE}" \
+  "{{ path }}" 2>/dev/null || \
+  log "WARNING: Path {{ path }} not found, skipping"
+{% else %}
+tar rf "${BACKUP_FILE}" \
+  "{{ path }}" 2>/dev/null || \
+  log "WARNING: Path {{ path }} not found, skipping"
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if service.extra_paths is defined and service.extra_paths %}
+# Extra paths (database dumps, generated files)
+{% for path in service.extra_paths %}
+tar rf "${BACKUP_FILE}" \
+  "{{ path }}" 2>/dev/null || \
+  log "WARNING: Extra path {{ path }} not found, skipping"
+{% endfor %}
+{% endif %}
+
+# Step 4: Restart service immediately (minimize downtime)
+{% if service.systemd_service is defined %}
+log "Restarting {{ service.name }} (systemd: {{ service.systemd_service }})..."
+systemctl start {{ service.systemd_service }} 2>&1 || true
+{% elif service.compose_path is defined %}
+log "Restarting {{ service.name }} containers..."
+docker compose -f "${COMPOSE_FILE}" start 2>&1 || \
+  docker compose -f "${COMPOSE_FILE}" up -d 2>&1
+{% endif %}
+
+BACKUP_SIZE=$(du -h "${BACKUP_FILE}" 2>/dev/null | cut -f1 || echo "unknown")
+log "Archive created: {{ service.name }}-${TIMESTAMP}.tar (${BACKUP_SIZE})"
+
+# Step 5: Encrypt with age
+log "Encrypting {{ service.name }} backup..."
+age -r "${AGE_RECIPIENT}" -o "${ENCRYPTED_FILE}" "${BACKUP_FILE}"
+rm -f "${BACKUP_FILE}"
+
+# Step 6: Upload to S3
+log "Uploading {{ service.name }} backup to S3..."
+if aws s3 cp \
+  --endpoint-url "${S3_ENDPOINT}" \
+  "${ENCRYPTED_FILE}" \
+  "s3://${S3_BUCKET}/${HOSTNAME}/{{ service.name }}-${TIMESTAMP}.tar.age" \
+  --quiet; then
+  log "{{ service.name }} S3 upload complete."
+else
+  log "WARNING: {{ service.name }} S3 upload failed."
+fi
+
+{% if service.post_commands is defined and service.post_commands %}
+# Step 7: Post-backup cleanup
+{% for cmd in service.post_commands %}
+log "Running post-backup command: {{ cmd | truncate(60) }}..."
+{{ cmd }} || true
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+# ---------------------------------------------------------
+# Cleanup: Old local backups
+# ---------------------------------------------------------
+log "Cleaning up old local backups (>${LOCAL_RETENTION_DAYS} days)..."
+find "${LOCAL_BACKUP_DIR}" -name "*.tar.age" -mtime "+${LOCAL_RETENTION_DAYS}" -delete 2>/dev/null || true
+
+# S3 retention is handled by a server-side lifecycle policy (30-day expiration)
+# configured in Terraform Layer 06-hetzner. No script-based cleanup needed.
+
+log "=== All backups complete ==="

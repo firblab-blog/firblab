@@ -1,0 +1,36 @@
+# =============================================================================
+# Layer 01: Proxmox Base - Example Variables
+# =============================================================================
+# Normal usage (Vault is running — no tfvars needed for secrets):
+#   terraform apply -var proxmox_node=lab-02
+#
+# Bootstrap (Vault not yet deployed):
+#   terraform apply -var use_vault=false \
+#     -var-file=../../environments/lab-02.tfvars
+# =============================================================================
+
+# Which Proxmox node to target (used for Vault secret lookup)
+proxmox_node = "lab-02"
+
+# --- Bootstrap-only variables (use_vault=false) ---
+# proxmox_api_url   = "https://10.0.10.2:8006"
+# proxmox_api_token = "terraform@pam!terraform-token=00000000-0000-0000-0000-000000000000"
+
+# Proxmox nodes in the cluster
+proxmox_nodes = {
+  "lab-02" = {
+    name = "lab-02"
+    ip   = "10.0.10.2"
+  }
+}
+
+# SSH public key for cloud-init provisioning
+ssh_public_key = "ssh-ed25519 AAAA... user@host"
+
+# Storage pools (must exist on Proxmox hosts)
+vm_storage_pool      = "local-lvm"
+iso_storage_pool     = "local"
+snippet_storage_pool = "local"
+
+# Network
+network_bridge = "vmbr0"

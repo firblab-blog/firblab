@@ -1,0 +1,207 @@
+---
+# =============================================================================
+# Proxmox GPU Passthrough — Host Preparation
+# =============================================================================
+# Configures the Proxmox hypervisor for PCI GPU passthrough:
+#   1. IOMMU kernel parameters (GRUB)
+#   2. VFIO kernel modules
+#   3. VFIO PCI device binding (with softdep ordering + D3cold prevention)
+#   4. GPU driver blacklisting
+#   5. Framebuffer blacklisting (prevent host from posting the GPU)
+#   6. D3cold udev rule (prevent unrecoverable deep sleep)
+#   7. initramfs rebuild
+#
+# IMPORTANT: A host REBOOT is required after the first run. This playbook
+# does NOT reboot automatically — it prints a reminder. Rebooting a Proxmox
+# node affects all running VMs, so it must be coordinated manually.
+#
+# AMD RDNA 3 (Navi 32/33) GPUs require ALL of these workarounds:
+#   - softdep ensures vfio-pci loads BEFORE amdgpu (blacklist alone races)
+#   - disable_idle_d3=1 prevents GPU from entering D3cold
+#   - d3cold_allowed=0 udev rule prevents kernel from powering down device
+#   - initcall_blacklist prevents host framebuffer from posting the GPU
+#   - pcie_aspm=off prevents PCIe power management transitions
+# Without these, the GPU enters D3cold after first VM lifecycle and becomes
+# permanently inaccessible until a full host power cycle (not just reboot).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. IOMMU Kernel Parameters
+# ---------------------------------------------------------------------------
+- name: Build GRUB cmdline parameters
+  ansible.builtin.set_fact:
+    gpu_grub_params: >-
+      quiet
+      {{ gpu_iommu_type }}_iommu=on
+      iommu=pt
+      {% if gpu_prevent_host_framebuffer | default(false) %}
+      initcall_blacklist=sysfb_init
+      video=efifb:off
+      {% endif %}
+      {% if gpu_disable_pcie_powermgmt | default(false) %}
+      pcie_aspm=off
+      pci=noaer
+      {% endif %}
+  tags:
+    - iommu
+
+- name: Check current GRUB cmdline
+  ansible.builtin.command:
+    cmd: grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub
+  register: grub_current
+  changed_when: false
+  failed_when: false
+  tags:
+    - iommu
+
+- name: Configure GRUB cmdline for GPU passthrough
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="{{ gpu_grub_params | regex_replace("\s+", " ") | trim }}"'
+    backup: true
+  notify:
+    - "update grub"
+    - "update initramfs"
+  tags:
+    - iommu
+
+# ---------------------------------------------------------------------------
+# 2. VFIO Kernel Modules
+# ---------------------------------------------------------------------------
+- name: Ensure VFIO modules are loaded at boot
+  ansible.builtin.lineinfile:
+    path: /etc/modules
+    line: "{{ item }}"
+    create: true
+    mode: "0644"
+  loop:
+    - vfio
+    - vfio_iommu_type1
+    - vfio_pci
+    - vfio_virqfd
+  notify: "update initramfs"
+  tags:
+    - vfio
+
+# ---------------------------------------------------------------------------
+# 3. Bind GPU to vfio-pci Driver
+# ---------------------------------------------------------------------------
+# The vfio.conf file serves THREE purposes:
+#   a) Bind specific PCI device IDs to vfio-pci at boot
+#   b) softdep ensures vfio-pci loads BEFORE amdgpu/radeon (blacklist alone
+#      doesn't guarantee load order — dmesg showed amdgpu fully initializing
+#      the GPU before vfio-pci took over, leaving the device in a dirty state)
+#   c) disable_idle_d3=1 prevents the GPU from entering D3cold power state
+#      (AMD RDNA 3 GPUs cannot exit D3cold — device becomes permanently
+#      inaccessible until full host power cycle)
+- name: Configure VFIO PCI device binding with softdep and D3cold prevention
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/vfio.conf
+    content: |
+      # Managed by Ansible — do not edit manually.
+      # Bind these PCI devices to the vfio-pci driver for VM passthrough.
+      options vfio-pci ids={{ gpu_vfio_device_ids | join(',') }}{% if gpu_disable_d3cold | default(false) %} disable_idle_d3=1{% endif %}
+
+      # Ensure vfio-pci loads BEFORE GPU drivers. Without softdep, the kernel
+      # may load amdgpu first (which fully initializes the GPU), then unload it
+      # when vfio-pci claims the device — leaving the GPU in a dirty state.
+      {% for driver in gpu_blacklist_drivers %}
+      softdep {{ driver }} pre: vfio-pci
+      {% endfor %}
+      softdep snd_hda_intel pre: vfio-pci
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: "update initramfs"
+  tags:
+    - vfio
+
+# ---------------------------------------------------------------------------
+# 4. Blacklist GPU Drivers
+# ---------------------------------------------------------------------------
+- name: Blacklist GPU drivers on host
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/blacklist-gpu.conf
+    content: |
+      # Managed by Ansible — do not edit manually.
+      # Prevent host from claiming GPU — reserved for VM passthrough.
+      {% for driver in gpu_blacklist_drivers %}
+      blacklist {{ driver }}
+      {% endfor %}
+      # Also blacklist the HD audio driver for the GPU's audio function.
+      # snd_hda_intel would claim 03:00.1 before vfio-pci can bind it.
+      blacklist snd_hda_intel
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: "update initramfs"
+  tags:
+    - blacklist
+
+# ---------------------------------------------------------------------------
+# 5. D3cold Prevention — udev Rule
+# ---------------------------------------------------------------------------
+# Belt-and-suspenders with disable_idle_d3. The udev rule prevents the kernel
+# from allowing D3cold at the sysfs level for each GPU function, regardless
+# of what the vfio-pci module options do. This catches edge cases where the
+# kernel's PCI power management overrides the driver's preference.
+- name: Create udev rule to prevent GPU D3cold
+  ansible.builtin.copy:
+    dest: /etc/udev/rules.d/99-vfio-gpu-d3cold.rules
+    content: |
+      # Managed by Ansible — do not edit manually.
+      # Prevent AMD GPU from entering D3cold (unrecoverable on RDNA 3).
+      # Targets all PCI functions matching the GPU vendor:device IDs.
+      {% for device_id in gpu_vfio_device_ids %}
+      {% set parts = device_id.split(':') %}
+      ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x{{ parts[0] }}", ATTR{device}=="0x{{ parts[1] }}", ATTR{d3cold_allowed}="0"
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+  when: gpu_disable_d3cold | default(false)
+  tags:
+    - d3cold
+
+# ---------------------------------------------------------------------------
+# 6. Flush handlers (update-grub + update-initramfs)
+# ---------------------------------------------------------------------------
+- name: Flush handlers to apply GRUB and initramfs changes
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# 7. Reboot Reminder
+# ---------------------------------------------------------------------------
+- name: Display reboot reminder
+  ansible.builtin.debug:
+    msg:
+      - "============================================="
+      - "  REBOOT REQUIRED — FULL POWER CYCLE"
+      - "============================================="
+      - ""
+      - "IOMMU and VFIO configuration has been applied."
+      - "A FULL POWER CYCLE is required (not just reboot):"
+      - "  - AMD RDNA 3 GPUs need a cold power cycle to reset hardware state"
+      - "  - 'sudo reboot' may not be sufficient if the GPU is in D3cold"
+      - ""
+      - "Before rebooting/power-cycling {{ inventory_hostname }}:"
+      - "  1. Drain all Kubernetes nodes hosted on this machine"
+      - "  2. Gracefully shut down all VMs: qm shutdown <vmid>"
+      - "  3. Power off: sudo poweroff"
+      - "  4. Wait 10 seconds, then power on"
+      - ""
+      - "After power cycle, verify with:"
+      - "  cat /proc/cmdline  # Verify IOMMU + framebuffer params"
+      - "  dmesg | grep -i vfio  # Verify vfio-pci bound the GPU"
+      - "  dmesg | grep -i amdgpu  # Should show NOTHING (blacklisted)"
+      - "  lspci -nnk -s 03:00  # Driver should be vfio-pci"
+      - "  cat /sys/bus/pci/devices/0000:03:00.0/power_state  # Should be D0"
+      - "  cat /sys/bus/pci/devices/0000:03:00.0/d3cold_allowed  # Should be 0"
+      - ""
+      - "The GPU driver should show 'vfio-pci' and amdgpu should NOT appear."
+      - "============================================="
+  tags:
+    - always

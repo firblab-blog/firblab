@@ -1,0 +1,259 @@
+---
+# =============================================================================
+# Roundcube Deployment Playbook
+# =============================================================================
+# Deploys Roundcube webmail client with PostgreSQL via Docker Compose on an
+# LXC container. Connects to Migadu for IMAP/SMTP — no WireGuard sidecar
+# needed (Migadu is a hosted service, not self-hosted).
+#
+# Prerequisites:
+#   - Roundcube LXC provisioned by Terraform Layer 05
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - Vault secrets seeded by Terraform Layer 02 (secret/services/roundcube)
+#   - Vault reachable from the Ansible control node
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/roundcube-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common     # Only baseline system config
+#   ansible-playbook ... --tags docker     # Only Docker installation
+#   ansible-playbook ... --tags roundcube  # Only Roundcube app deployment
+#   ansible-playbook ... --tags verify     # Only health checks
+#   ansible-playbook ... --tags backup     # Only backup automation
+# =============================================================================
+
+- name: Deploy Roundcube webmail
+  hosts: roundcube
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    - name: Read Roundcube secrets from Vault
+      ansible.builtin.shell: |
+        VAULT_ADDR="{{ vault_addr }}" \
+        VAULT_CACERT="{{ vault_cacert }}" \
+        vault kv get -mount=secret -format=json services/roundcube
+      register: vault_roundcube_raw
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Parse Vault secrets
+      ansible.builtin.set_fact:
+        roundcube_des_key: "{{ (vault_roundcube_raw.stdout | from_json).data.data.des_key }}"
+        roundcube_db_username: "{{ (vault_roundcube_raw.stdout | from_json).data.data.db_username }}"
+        roundcube_db_password: "{{ (vault_roundcube_raw.stdout | from_json).data.data.db_password }}"
+      no_log: true
+      tags: [always]
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Roundcube on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_cacert }}"
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_cacert }}"
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_cacert }}"
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    vault_addr: "https://10.0.10.10:8200"
+    vault_cacert: "{{ lookup('env', 'HOME') }}/.lab/tls/ca/ca.pem"
+
+    # Backup configuration (S3 off-site for webmail data)
+    # Roundcube DES key is critical — without it, encrypted DB data is unrecoverable
+    backup_enabled: true
+    backup_cron_hour: "5"
+    backup_cron_minute: "15"
+    backup_services:
+      - name: roundcube
+        compose_path: /opt/roundcube
+        pre_commands:
+          - "docker exec roundcube-db pg_dump -U roundcube roundcube > /opt/roundcube/roundcube-dump.sql"
+        paths:
+          - /opt/roundcube/config
+        extra_paths:
+          - /opt/roundcube/roundcube-dump.sql
+        post_commands:
+          - "rm -f /opt/roundcube/roundcube-dump.sql"
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: roundcube
+        stop_compose: /opt/roundcube
+        pre_commands:
+          - "docker exec roundcube-db pg_dump -U roundcube roundcube > /opt/roundcube/roundcube-dump.sql"
+        paths:
+          - /opt/roundcube/config
+        extra_paths:
+          - /opt/roundcube/roundcube-dump.sql
+        post_commands:
+          - "rm -f /opt/roundcube/roundcube-dump.sql"
+        tags: ["roundcube", "webmail"]
+        cron_hour: "1"
+        cron_minute: "50"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Roundcube (Docker Compose with PostgreSQL)
+    - role: roundcube
+      tags:
+        - roundcube
+
+    # Automated S3 backup (daily, age-encrypted, includes pg_dump)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for Roundcube to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ roundcube_port | default(8080) }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: roundcube_health
+      retries: 15
+      delay: 5
+      until: roundcube_health.status is defined and roundcube_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if Roundcube never became accessible
+      ansible.builtin.fail:
+        msg: "Roundcube failed to respond after 75 seconds. Last status: {{ roundcube_health.status | default('connection refused') }}"
+      when: roundcube_health.status is not defined or roundcube_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Roundcube Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ roundcube_port | default(8080) }}/"
+          - "IMAP: {{ roundcube_imap_host | default('ssl://imap.migadu.com') }}:{{ roundcube_imap_port | default(993) }}"
+          - "SMTP: {{ roundcube_smtp_host | default('tls://smtp.migadu.com') }}:{{ roundcube_smtp_port | default(587) }}"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/roundcube/docker-compose.yml ps"
+          - "  docker compose -f /opt/roundcube/docker-compose.yml logs -f"
+          - "  docker exec roundcube-db pg_isready"
+          - "=========================================="
+      tags:
+        - verify

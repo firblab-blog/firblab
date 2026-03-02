@@ -1,0 +1,62 @@
+---
+# =============================================================================
+# Vault Role — Main Task Dispatcher
+# =============================================================================
+# Installs HashiCorp Vault binary, creates configuration, and sets up the
+# appropriate service manager (systemd on Linux, LaunchDaemon on macOS).
+# Dispatches to platform-specific task files based on ansible_os_family.
+#
+# Supports:
+#   - Linux (Debian/Ubuntu, RedHat/Rocky) — systemd + optional SELinux
+#   - macOS (Darwin) — LaunchDaemon + dscl service account
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Platform-specific user/group creation
+# ---------------------------------------------------------------------------
+- name: Include platform-specific install tasks
+  ansible.builtin.include_tasks:
+    file: "install_{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}.yml"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# 2. Shared tasks: directories, download, verify, configure
+# ---------------------------------------------------------------------------
+- name: Include common install tasks
+  ansible.builtin.include_tasks:
+    file: install_common.yml
+  tags:
+    - install
+    - configure
+
+# ---------------------------------------------------------------------------
+# 3. TLS certificate deployment (from controller to node)
+# ---------------------------------------------------------------------------
+- name: Include TLS certificate deployment tasks
+  ansible.builtin.include_tasks:
+    file: tls.yml
+  tags:
+    - tls
+    - security
+    - configure
+
+# ---------------------------------------------------------------------------
+# 4. Platform-specific service setup (systemd vs LaunchDaemon)
+# ---------------------------------------------------------------------------
+- name: Include platform-specific service tasks
+  ansible.builtin.include_tasks:
+    file: "service_{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}.yml"
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# 5. SELinux policy (RedHat/Rocky only — no-op on Debian/Darwin)
+# ---------------------------------------------------------------------------
+- name: Include SELinux tasks
+  ansible.builtin.include_tasks:
+    file: selinux.yml
+  when: ansible_os_family == "RedHat"
+  tags:
+    - selinux
+    - security

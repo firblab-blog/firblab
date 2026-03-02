@@ -1,0 +1,176 @@
+# =============================================================================
+# GitLab CE Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }} ({{ ansible_host }})
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+# For all options see:
+# https://gitlab.com/gitlab-org/omnibus-gitlab/blob/master/files/gitlab-config-template/gitlab.rb.template
+# =============================================================================
+
+################################################################################
+## External URL
+################################################################################
+external_url '{{ gitlab_external_url }}'
+
+################################################################################
+## Nginx Settings
+################################################################################
+{% if gitlab_ssl_enabled | default(false) | bool %}
+nginx['redirect_http_to_https'] = true
+nginx['ssl_certificate'] = "{{ gitlab_ssl_cert_path | default('/etc/gitlab/ssl/gitlab.crt') }}"
+nginx['ssl_certificate_key'] = "{{ gitlab_ssl_key_path | default('/etc/gitlab/ssl/gitlab.key') }}"
+nginx['ssl_protocols'] = "TLSv1.2 TLSv1.3"
+{% elif gitlab_external_url.startswith('https://') %}
+## Reverse proxy mode: external_url is HTTPS but TLS is terminated by Traefik.
+## GitLab listens on HTTP; Traefik forwards X-Forwarded-Proto headers.
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+nginx['proxy_set_headers'] = {
+  "X-Forwarded-Proto" => "https",
+  "X-Forwarded-Ssl" => "on"
+}
+## Disable built-in Let's Encrypt — TLS is handled by Traefik reverse proxy.
+## Omnibus auto-enables LE when external_url is https:// and ssl_enabled is false.
+letsencrypt['enable'] = false
+{% endif %}
+
+################################################################################
+## Backup Settings
+################################################################################
+gitlab_rails['backup_keep_time'] = {{ gitlab_backup_keep_time | default('604800') }}
+gitlab_rails['backup_path'] = '{{ gitlab_backup_path | default('/var/opt/gitlab/backups') }}'
+
+################################################################################
+## Email Settings
+################################################################################
+gitlab_rails['gitlab_email_enabled'] = {{ gitlab_email_enabled | default(true) | lower }}
+gitlab_rails['gitlab_email_from'] = '{{ gitlab_email_from | default('gitlab@' + ansible_fqdn) }}'
+
+{% if gitlab_smtp_enabled | default(false) | bool %}
+################################################################################
+## SMTP Settings
+################################################################################
+gitlab_rails['smtp_enable'] = true
+gitlab_rails['smtp_address'] = '{{ gitlab_smtp_address }}'
+gitlab_rails['smtp_port'] = {{ gitlab_smtp_port | default('587') }}
+gitlab_rails['smtp_user_name'] = '{{ gitlab_smtp_user | default('') }}'
+gitlab_rails['smtp_password'] = '{{ gitlab_smtp_password | default('') }}'
+gitlab_rails['smtp_domain'] = '{{ gitlab_smtp_domain | default(ansible_fqdn) }}'
+gitlab_rails['smtp_authentication'] = '{{ gitlab_smtp_authentication | default('login') }}'
+gitlab_rails['smtp_enable_starttls_auto'] = {{ gitlab_smtp_starttls | default(true) | lower }}
+{% endif %}
+
+################################################################################
+## Timezone
+################################################################################
+gitlab_rails['time_zone'] = '{{ gitlab_timezone | default(timezone | default('UTC')) }}'
+
+################################################################################
+## Gitaly Storage Configuration (replaces git_data_dirs, removed in 18.0)
+################################################################################
+gitaly['configuration'] = {
+  storage: [
+    {
+      name: 'default',
+      path: '{{ gitlab_git_data_dir | default("/var/opt/gitlab/git-data") }}/repositories',
+    },
+  ],
+}
+
+################################################################################
+## SSH Port
+################################################################################
+gitlab_rails['gitlab_shell_ssh_port'] = {{ gitlab_ssh_port | default('22') }}
+
+################################################################################
+## Monitoring
+################################################################################
+prometheus_monitoring['enable'] = {{ gitlab_prometheus_enabled | default(false) | lower }}
+
+# GitLab's bundled node_exporter defaults to 127.0.0.1:9100 (loopback only).
+# Bind to all interfaces so Prometheus (Services VLAN 20) can scrape it.
+# Our standalone node_exporter is disabled on this host (host_vars/gitlab.yml).
+node_exporter['listen_address'] = '{{ gitlab_node_exporter_listen_address | default("0.0.0.0:9100") }}'
+
+################################################################################
+## Puma (Application Server)
+################################################################################
+puma['worker_processes'] = {{ gitlab_puma_workers | default('2') }}
+
+################################################################################
+## Initial Root Password
+################################################################################
+{% if gitlab_initial_root_password is defined %}
+gitlab_rails['initial_root_password'] = '{{ gitlab_initial_root_password }}'
+gitlab_rails['store_initial_root_password'] = true
+{% endif %}
+
+{% if gitlab_kas_enabled | default(false) | bool %}
+################################################################################
+## Kubernetes Agent Server (KAS)
+################################################################################
+## Enables the built-in KAS so GitLab Agents for Kubernetes can connect.
+## Agents maintain an outbound WebSocket tunnel to KAS for CI/CD access,
+## GitOps sync, and vulnerability scanning of running workloads.
+##
+## KAS external URL uses WebSocket Secure (wss://) through the standalone
+## Traefik reverse proxy which terminates TLS. GitLab's bundled NGINX
+## proxies /-/kubernetes-agent/ to the internal KAS service automatically.
+################################################################################
+gitlab_kas['enable'] = true
+gitlab_kas_external_url '{{ gitlab_kas_external_url }}'
+# TLS is terminated by the standalone Traefik reverse proxy (10.0.10.17).
+# GitLab's bundled nginx must NOT enable SSL for KAS — it serves HTTP only.
+# Without these lines, omnibus sees wss:// and auto-generates an nginx SSL
+# vhost expecting certs at /etc/gitlab/ssl/<hostname>.crt which don't exist.
+gitlab_kas_nginx['listen_port'] = {{ gitlab_http_port | default('80') }}
+gitlab_kas_nginx['listen_https'] = false
+{% if gitlab_kas_internal_url is defined %}
+gitlab_kas['internal_url'] = '{{ gitlab_kas_internal_url }}'
+{% endif %}
+{% endif %}
+
+{% if gitlab_oidc_enabled | default(false) | bool %}
+################################################################################
+## OmniAuth — Authentik OIDC SSO
+################################################################################
+## OIDC provider created by Terraform Layer 07-authentik-config.
+## Client credentials read from Vault by the deploy playbook.
+## Instance-level sign-in settings managed by Terraform Layer 03-gitlab-config
+## (gitlab_application_settings resource).
+################################################################################
+gitlab_rails['omniauth_enabled'] = true
+gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+gitlab_rails['omniauth_block_auto_created_users'] = false
+gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
+gitlab_rails['omniauth_sync_email_from_provider'] = 'openid_connect'
+gitlab_rails['omniauth_sync_profile_from_provider'] = ['openid_connect']
+gitlab_rails['omniauth_sync_profile_attributes'] = ['email']
+gitlab_rails['omniauth_providers'] = [
+  {
+    name: "openid_connect",
+    label: "Authentik",
+    args: {
+      name: "openid_connect",
+      scope: ["openid", "profile", "email"],
+      response_type: "code",
+      issuer: "{{ gitlab_oidc_issuer_url }}",
+      discovery: true,
+      client_auth_method: "query",
+      uid_field: "preferred_username",
+      pkce: true,
+      client_options: {
+        identifier: "{{ gitlab_oidc_client_id }}",
+        secret: "{{ gitlab_oidc_client_secret }}",
+        redirect_uri: "{{ gitlab_external_url }}/users/auth/openid_connect/callback"
+      },
+      gitlab: {
+        groups_attribute: "groups",
+        admin_groups: ["authentik-admins"]
+      }
+    }
+  }
+]
+{% endif %}

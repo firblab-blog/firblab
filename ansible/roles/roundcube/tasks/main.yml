@@ -1,0 +1,103 @@
+---
+# =============================================================================
+# Roundcube Role - Webmail via Docker Compose
+# =============================================================================
+# Deploys Roundcube webmail client with PostgreSQL backend via Docker Compose.
+# Connects to Migadu for IMAP/SMTP. Expects the docker role to be applied first.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Roundcube directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ roundcube_data_dir }}"
+    - "{{ roundcube_data_dir }}/config"
+    - "{{ roundcube_data_dir }}/temp"
+    - "{{ roundcube_data_dir }}/pgdata"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Roundcube Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ roundcube_data_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart roundcube
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER Roundcube
+# containers are running, killing them.
+- name: Flush handlers before starting Roundcube containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Roundcube container images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ roundcube_data_dir }}"
+  register: roundcube_pull_result
+  changed_when: "'Pull complete' in roundcube_pull_result.stdout or 'Downloaded' in roundcube_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Roundcube containers
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ roundcube_data_dir }}"
+  register: roundcube_up_result
+  changed_when: "'Started' in roundcube_up_result.stderr or 'Creating' in roundcube_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Checks
+# ---------------------------------------------------------------------------
+- name: Wait for PostgreSQL to be ready
+  ansible.builtin.command:
+    cmd: docker exec roundcube-db pg_isready -U {{ roundcube_db_username }} -d roundcube
+  register: pg_ready
+  retries: 15
+  delay: 3
+  until: pg_ready.rc == 0
+  changed_when: false
+  tags:
+    - verify
+
+- name: Wait for Roundcube to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ roundcube_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: roundcube_health
+  retries: 15
+  delay: 5
+  until: roundcube_health.status is defined and roundcube_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Roundcube never became accessible
+  ansible.builtin.fail:
+    msg: "Roundcube failed to respond after 75 seconds. Last status: {{ roundcube_health.status | default('connection refused') }}"
+  when: roundcube_health.status is not defined or roundcube_health.status not in [200, 301, 302]
+  tags:
+    - verify

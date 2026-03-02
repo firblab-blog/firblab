@@ -1,0 +1,7 @@
+# RKE2 CIS Benchmark Required Kernel Parameters
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# These must be applied BEFORE RKE2 starts when profile: "cis" is active.
+# Reference: /usr/share/rke2/rke2-cis-sysctl.conf
+{% for key, value in rke2_sysctl.items() %}
+{{ key }} = {{ value }}
+{% endfor %}

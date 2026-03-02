@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# lab-08 Host Variables — RPi4 (Default LAN, VLAN 1)
+# =============================================================================
+# Bare-metal Raspberry Pi 4 on Default LAN (VLAN 1) at 10.0.4.20.
+# Boots from NVMe via USB enclosure (RPi4 EEPROM configured for USB boot).
+# Runs Scanopy network scanner and NUT UPS monitoring server.
+#
+# Connected to: Closet switch (switch-01) Port 4
+# UPS: CyberPower PR1500LCDRT2U (USB 0764:0601)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+firewall_additional_ports:
+  - { port: "60072", proto: tcp, comment: "Scanopy server UI/API" }
+  - { port: "60073", proto: tcp, comment: "Scanopy daemon" }
+  - { port: "3493", proto: tcp, comment: "NUT upsd (UPS monitoring)" }
+
+firewall_additional_sources:
+  - "{{ management_network }}"
+  - "{{ lan_network }}"
+
+# ---------------------------------------------------------------------------
+# VLAN Sub-Interfaces (consumed by scanopy role)
+# ---------------------------------------------------------------------------
+# 802.1Q sub-interfaces for multi-VLAN L2 scanning. The switch port runs
+# Scanner Trunk (native VLAN 1, tagged 10/20/30/40/50). These interfaces
+# give the Scanopy daemon ARP/MAC discovery on every VLAN.
+# IPs use .90 on each subnet — below DHCP range (.100+), no conflicts.
+scanopy_vlan_interfaces:
+  - { vlan_id: 10, ip: "10.0.10.90", cidr: 24, name: "Management" }
+  - { vlan_id: 20, ip: "10.0.20.90", cidr: 24, name: "Services" }
+  - { vlan_id: 30, ip: "10.0.30.90", cidr: 24, name: "DMZ" }
+  - { vlan_id: 40, ip: "10.0.40.90", cidr: 24, name: "Storage" }
+  - { vlan_id: 50, ip: "10.0.50.90", cidr: 24, name: "Security" }
+
+# ---------------------------------------------------------------------------
+# Docker (consumed by docker role)
+# ---------------------------------------------------------------------------
+docker_users:
+  - admin

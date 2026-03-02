@@ -1,0 +1,49 @@
+# =============================================================================
+# Environment: vault-config (Layer 02-vault-config)
+# =============================================================================
+# Copy to vault-config.tfvars and fill in real values.
+# NEVER commit the real .tfvars file to version control.
+#
+# Usage:
+#   cd terraform/layers/02-vault-config
+#   terraform apply -var-file=../../environments/vault-config.tfvars
+#
+# Requires a running, initialized Vault cluster.
+# Token must have root or admin-level privileges.
+# =============================================================================
+
+# Vault connection
+vault_addr    = "https://10.0.10.10:8200"
+vault_token   = "hvs.your-vault-token"
+vault_ca_cert = "~/.lab/tls/ca/ca.pem"
+
+# Proxmox API credentials to seed into Vault KV at secret/infra/proxmox/<node>
+# Get these from the proxmox-api-setup.yml playbook output
+proxmox_nodes = {
+  "lab-02" = {
+    api_url      = "https://10.0.10.2:8006"
+    token_id     = "terraform@pam!terraform-token"
+    token_secret = "00000000-0000-0000-0000-000000000000"
+  }
+}
+
+# Hetzner Cloud credentials + deploy config to seed into Vault at secret/infra/hetzner
+# Consumed by Layer 06-hetzner — all vars read from Vault at apply time.
+# hetzner_credentials = {
+#   hcloud_token   = "your-hetzner-api-token"
+#   ssh_public_key = "ssh-ed25519 AAAA... user@host"
+#   mgmt_cidr      = "10.8.0.0/24"
+#   domain_name    = "example-lab.org"
+# }
+
+# Cloudflare credentials to seed into Vault at secret/infra/cloudflare
+# cloudflare_credentials = {
+#   api_token = "your-cloudflare-api-token"
+# }
+
+# GitLab admin credentials to seed into Vault KV at secret/services/gitlab/admin
+# Generate the PAT first: bash scripts/generate-gitlab-token.sh
+# gitlab_credentials = {
+#   personal_access_token = "glpat-xxxxxxxxxxxxxxxxxxxx"
+#   root_password         = "your-gitlab-root-password"
+# }

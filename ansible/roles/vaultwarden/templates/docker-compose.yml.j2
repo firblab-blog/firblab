@@ -1,0 +1,38 @@
+# =============================================================================
+# Vaultwarden Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  vaultwarden:
+    image: {{ vaultwarden_image }}
+    container_name: vaultwarden
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ vaultwarden_port }}:80"
+    volumes:
+      - {{ vaultwarden_install_dir }}/data:/data
+    environment:
+      DOMAIN: "{{ vaultwarden_domain }}"
+      ADMIN_TOKEN: "{{ vaultwarden_admin_token | replace('$', '$$') }}"
+      SIGNUPS_ALLOWED: "{{ vaultwarden_signups_allowed }}"
+      INVITATIONS_ALLOWED: "{{ vaultwarden_invitations_allowed }}"
+      SHOW_PASSWORD_HINT: "{{ vaultwarden_show_password_hint }}"
+      LOG_LEVEL: "info"
+{% if vaultwarden_sso_enabled %}
+      SSO_ENABLED: "true"
+      SSO_AUTHORITY: "{{ vaultwarden_sso_authority }}"
+      SSO_CLIENT_ID: "{{ vaultwarden_sso_client_id }}"
+      SSO_CLIENT_SECRET: "{{ vaultwarden_sso_client_secret }}"
+      SSO_SCOPES: "openid email profile offline_access"
+      SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "false"
+      SSO_CLIENT_CACHE_EXPIRATION: "0"
+      SSO_ONLY: "false"
+      SSO_SIGNUPS_MATCH_EMAIL: "true"
+      SSO_PKCE: "true"
+{% endif %}

@@ -1,0 +1,116 @@
+---
+# =============================================================================
+# Authentik Role - SSO/IDP via Docker Compose
+# =============================================================================
+# Deploys Authentik with PostgreSQL, server, and worker services using Docker
+# Compose. Expects the docker role to be applied first.
+#
+# Post-2025.10: No Redis needed. Stack is PostgreSQL + server + worker.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flush pending handlers from earlier roles (common, hardening, docker)
+# ---------------------------------------------------------------------------
+# Critical: the docker role's daemon.json template triggers a "Restart docker"
+# handler. If this fires AFTER we start containers, it kills them all.
+- name: Flush handlers from earlier roles before starting containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Authentik directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ authentik_install_dir }}"
+    - path: "{{ authentik_install_dir }}/config"
+      mode: "0750"
+    - path: "{{ authentik_install_dir }}/postgres"
+    - path: "{{ authentik_install_dir }}/media"
+    - path: "{{ authentik_install_dir }}/custom-templates"
+    - path: "{{ authentik_install_dir }}/certs"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Configuration Files
+# ---------------------------------------------------------------------------
+- name: Template Authentik environment file
+  ansible.builtin.template:
+    src: authentik.env.j2
+    dest: "{{ authentik_install_dir }}/config/authentik.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: env_changed
+  notify: Restart authentik
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Authentik Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ authentik_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_changed
+  notify: Restart authentik
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+- name: Pull Authentik images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ authentik_install_dir }}"
+  register: authentik_pull_result
+  changed_when: "'Pull complete' in authentik_pull_result.stdout or 'Downloaded' in authentik_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Authentik containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose up -d
+      {{ '--force-recreate' if (env_changed.changed | default(false) or compose_changed.changed | default(false)) else '' }}
+    chdir: "{{ authentik_install_dir }}"
+  register: authentik_up_result
+  changed_when: "'Started' in authentik_up_result.stderr or 'Creating' in authentik_up_result.stderr or 'Recreat' in authentik_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Authentik to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_port }}/-/health/ready/"
+    method: GET
+    status_code: [200, 204]
+  register: authentik_health
+  retries: 30
+  delay: 10
+  until: authentik_health.status is defined and authentik_health.status in [200, 204]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Authentik never became accessible
+  ansible.builtin.fail:
+    msg: "Authentik failed to respond after 300 seconds. Last status: {{ authentik_health.status | default('connection refused') }}"
+  when: authentik_health.status is not defined or authentik_health.status not in [200, 204]
+  tags:
+    - verify

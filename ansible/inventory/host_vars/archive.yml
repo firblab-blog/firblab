@@ -1,0 +1,42 @@
+---
+# =============================================================================
+# Archive Appliance Host Variables — ZimaBlade 7700 (Services VLAN 20)
+# =============================================================================
+# Dedicated bare-metal archive appliance (NOT a Proxmox VM).
+# ZimaBlade 7700: Intel E3950, 16GB DDR3L, 32GB eMMC + 2TB USB SSD + PS4 HDD.
+#
+# Connected to: switch port TBD (physical placement undecided)
+# Services: Kiwix, ArchiveBox, BookStack, Stirling PDF, Wallabag, FileBrowser
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+firewall_additional_ports:
+  - { port: "8080", proto: tcp, comment: "FileBrowser file manager" }
+  - { port: "8081", proto: tcp, comment: "Kiwix Serve (offline wiki)" }
+  - { port: "8082", proto: tcp, comment: "ArchiveBox web archiver" }
+  - { port: "8083", proto: tcp, comment: "BookStack personal wiki" }
+  - { port: "8084", proto: tcp, comment: "Stirling PDF tools" }
+  - { port: "8085", proto: tcp, comment: "Wallabag read-it-later" }
+
+firewall_additional_sources:
+  - "{{ management_network }}"     # 10.0.10.0/24 — admin access + Traefik proxy
+  - "{{ lan_network }}"            # 10.0.4.0/24 — workstation access
+  - "{{ services_network }}"       # 10.0.20.0/24 — intra-VLAN
+  - "{{ dmz_network }}"            # 10.0.30.0/24 — WireGuard tunnel traffic
+
+# Docker uses FORWARD chain for published ports — needs route allow rules
+firewall_docker_forwarding: true
+
+# ---------------------------------------------------------------------------
+# Hardening overrides
+# ---------------------------------------------------------------------------
+# USB SSD is the primary data disk — do NOT blacklist the usb-storage module
+usb_storage_enabled: true
+
+# ---------------------------------------------------------------------------
+# Docker (consumed by docker role)
+# ---------------------------------------------------------------------------
+docker_users:
+  - admin

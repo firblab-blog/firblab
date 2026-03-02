@@ -1,0 +1,22 @@
+---
+# =============================================================================
+# Mandatory Access Control — RedHat/Rocky (SELinux)
+# =============================================================================
+
+- name: Ensure SELinux is enforcing
+  ansible.posix.selinux:
+    policy: targeted
+    state: enforcing
+  tags:
+    - selinux
+    - security
+
+- name: Install SELinux utilities
+  ansible.builtin.dnf:
+    name:
+      - policycoreutils-python-utils
+      - selinux-policy-targeted
+    state: present
+  tags:
+    - selinux
+    - security

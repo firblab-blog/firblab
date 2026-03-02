@@ -1,0 +1,494 @@
+---
+# Restic Backup Monitoring Dashboard
+# Loaded automatically by the Grafana sidecar (grafana_dashboard: "1").
+#
+# Data sources:
+#   - node_exporter on backup LXC (10.0.10.18:9100): disk, CPU, RAM, network
+#   - restic REST server (10.0.10.18:8500/metrics): bytes in/out, request counts
+#
+# Requires:
+#   - Ansible: restic-server role redeployed (picks up --prometheus-no-auth)
+#   - Prometheus: backup LXC node_exporter + REST server scrape jobs in values.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: restic-backup-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    grafana_folder: "Backups"
+data:
+  restic-backup.json: |
+    {
+      "title": "Restic Backup Monitoring",
+      "uid": "restic-backup",
+      "description": "Backup storage health, REST server activity, and backup LXC system metrics",
+      "tags": ["firblab", "backup", "restic"],
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "5m",
+      "graphTooltip": 1,
+      "editable": true,
+      "time": { "from": "now-24h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "links": [],
+      "annotations": { "list": [] },
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "label": "Prometheus",
+            "query": "prometheus",
+            "refresh": 1,
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "current": {}
+          }
+        ]
+      },
+      "panels": [
+
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Backup Storage",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+        },
+
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Storage Used",
+          "description": "Used space on /mnt/restic (ZFS mirror bind-mount)",
+          "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 2199023255552 },
+                  { "color": "red", "value": 3298534883328 }
+                ]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_filesystem_size_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"} - node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Used",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Storage Available",
+          "description": "Free space on /mnt/restic",
+          "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 536870912000 },
+                  { "color": "green", "value": 1099511627776 }
+                ]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Available",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Storage Total",
+          "description": "Total capacity of hdd-mirror-0 ZFS pool (usable after mirroring)",
+          "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "blue", "value": null }]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_filesystem_size_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Total",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 5,
+          "type": "gauge",
+          "title": "Storage Used %",
+          "description": "Percentage of backup storage consumed",
+          "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.7 },
+                  { "color": "red", "value": 0.85 }
+                ]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "1 - (node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"} / node_filesystem_size_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"})",
+              "legendFormat": "Used %",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Backup Storage Usage Over Time",
+          "description": "How much of /mnt/restic is consumed over the last 24h",
+          "gridPos": { "x": 0, "y": 5, "w": 24, "h": 8 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_filesystem_size_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"} - node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Used",
+              "refId": "A"
+            },
+            {
+              "expr": "node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/mnt/restic\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Available",
+              "refId": "B"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 10,
+          "type": "row",
+          "title": "REST Server Activity",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 }
+        },
+
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Backup Data Received (Network Ingress)",
+          "description": "Network bytes received by the backup LXC — proxy for backup data volume when backups run",
+          "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(node_network_receive_bytes_total{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", device!=\"lo\"}[5m])",
+              "legendFormat": "Received ({{device}})",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(node_network_transmit_bytes_total{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", device!=\"lo\"}[5m])",
+              "legendFormat": "Transmitted ({{device}})",
+              "refId": "B"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "REST Server Request Rate",
+          "description": "Requests/sec to the Restic REST server by HTTP method. Spikes indicate active backup jobs.",
+          "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "multi", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "rate(rest_requests_total{job=\"restic-rest-server\"}[5m])",
+              "legendFormat": "{{method}} {{code}}",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 20,
+          "type": "row",
+          "title": "Backup LXC System Health",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 22, "w": 24, "h": 1 }
+        },
+
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "CPU Usage",
+          "description": "Backup LXC CPU utilisation",
+          "gridPos": { "x": 0, "y": 23, "w": 8, "h": 7 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "1 - avg(rate(node_cpu_seconds_total{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mode=\"idle\"}[5m]))",
+              "legendFormat": "CPU Used",
+              "refId": "A"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Memory Usage",
+          "description": "Backup LXC RAM utilisation",
+          "gridPos": { "x": 8, "y": 23, "w": 8, "h": 7 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_memory_MemTotal_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\"}",
+              "legendFormat": "Used",
+              "refId": "A"
+            },
+            {
+              "expr": "node_memory_MemAvailable_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\"}",
+              "legendFormat": "Available",
+              "refId": "B"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Root Disk Usage",
+          "description": "Backup LXC root filesystem (8GB local-lvm) — logs, Backrest data, binaries",
+          "gridPos": { "x": 16, "y": 23, "w": 8, "h": 7 },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+            "tooltip": { "mode": "single", "sort": "none" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "gradientMode": "none",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "node_filesystem_size_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/\", fstype!=\"tmpfs\"} - node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Used",
+              "refId": "A"
+            },
+            {
+              "expr": "node_filesystem_avail_bytes{job=\"node-exporter-core-infra\", instance=\"10.0.10.18:9100\", mountpoint=\"/\", fstype!=\"tmpfs\"}",
+              "legendFormat": "Available",
+              "refId": "B"
+            }
+          ],
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+
+      ],
+
+      "__inputs": [
+        {
+          "name": "datasource",
+          "label": "Prometheus",
+          "description": "",
+          "type": "datasource",
+          "pluginId": "prometheus",
+          "pluginName": "Prometheus"
+        }
+      ],
+      "__elements": {},
+      "__requires": [
+        { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+        { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+        { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+        { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" },
+        { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" }
+      ]
+    }

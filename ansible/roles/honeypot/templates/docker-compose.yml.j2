@@ -1,0 +1,107 @@
+# =============================================================================
+# Honeypot Docker Compose
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+# Dedicated honeypot server. Runs OpenCanary (multi-protocol), Cowrie
+# (SSH/Telnet), Dionaea (malware capture), Endlessh (SSH tarpit), and
+# Grafana Alloy (log shipper to Loki via WireGuard tunnel).
+# =============================================================================
+
+volumes:
+  alloy-data:
+
+services:
+  # --- OpenCanary: Multi-protocol honeypot ---
+  # Emulates FTP (21), MySQL (3306), RDP (3389), VNC (5900), Redis (6379)
+  # SSH/Telnet disabled — handled by Cowrie for deeper emulation
+  opencanary:
+    build: {{ honeypot_install_dir }}/opencanary
+    container_name: opencanary
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - {{ honeypot_install_dir }}/opencanary/opencanary.conf:/root/.opencanary.conf:ro
+      - {{ honeypot_install_dir }}/opencanary/logs:/var/log/opencanary
+    security_opt:
+      - no-new-privileges:true
+
+  # --- Cowrie: Interactive SSH/Telnet honeypot ---
+  # Session recording, command capture, malware download collection
+  # Host port 22 → container 2222 (SSH), host 23 → container 2223 (Telnet)
+  cowrie:
+    image: {{ honeypot_cowrie_image }}
+    container_name: cowrie
+    restart: unless-stopped
+    ports:
+      - "{{ honeypot_cowrie_ssh_host_port }}:2222"
+      - "{{ honeypot_cowrie_telnet_host_port }}:2223"
+    volumes:
+      - {{ honeypot_install_dir }}/cowrie/etc/cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+      - {{ honeypot_install_dir }}/cowrie/log:/cowrie/cowrie-git/var/log/cowrie
+      - {{ honeypot_install_dir }}/cowrie/dl:/cowrie/cowrie-git/dl
+    environment:
+      - COWRIE_TELNET_ENABLED=yes
+    security_opt:
+      - no-new-privileges:true
+
+{% if honeypot_dionaea_enabled | default(true) %}
+  # --- Dionaea: Malware capture honeypot ---
+  # Emulates SMB (445), SIP (5060), HTTP (8080), HTTPS (8443)
+  # Captures malware binaries for analysis in dionaea/binaries/
+  dionaea:
+    image: {{ honeypot_dionaea_image }}
+    container_name: dionaea
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      # No custom config mount — use image defaults (correct INI structure).
+      # Persistent data mounts only:
+      - {{ honeypot_install_dir }}/dionaea/bistreams:/opt/dionaea/var/lib/dionaea/bistreams
+      - {{ honeypot_install_dir }}/dionaea/binaries:/opt/dionaea/var/lib/dionaea/binaries
+      - {{ honeypot_install_dir }}/dionaea/log:/opt/dionaea/var/log/dionaea
+    security_opt:
+      - no-new-privileges:true
+{% endif %}
+
+{% if honeypot_endlessh_enabled | default(true) %}
+  # --- Endlessh-go: SSH tarpit ---
+  # Holds SSH connections open with endless banner, wasting bot resources.
+  # Exposed on port {{ honeypot_endlessh_host_port }} (not 22 — that's Cowrie).
+  endlessh:
+    image: {{ honeypot_endlessh_image }}
+    container_name: endlessh
+    restart: unless-stopped
+    ports:
+      - "{{ honeypot_endlessh_host_port }}:2222"
+    environment:
+      - ENDLESSH_MSDELAY={{ honeypot_endlessh_delay_ms }}
+      - ENDLESSH_MAXLINESIZE={{ honeypot_endlessh_max_line_length }}
+      - ENDLESSH_MAXCLIENTS={{ honeypot_endlessh_max_clients }}
+      - ENDLESSH_ENABLE_PROMETHEUS=true
+      - ENDLESSH_PROMETHEUS_PORT=2112
+    security_opt:
+      - no-new-privileges:true
+{% endif %}
+
+  # --- Grafana Alloy: Log shipper (replaces Promtail — EOL March 2026) ---
+  # Ships OpenCanary + Cowrie + Dionaea JSON logs to Loki on the RKE2 cluster
+  # via WireGuard tunnel. Buffers locally if Loki is unreachable.
+  alloy:
+    image: {{ honeypot_alloy_image }}
+    container_name: alloy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - {{ honeypot_install_dir }}/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/log/opencanary:/var/log/opencanary:ro
+      - /var/log/cowrie:/var/log/cowrie:ro
+{% if honeypot_dionaea_enabled | default(true) %}
+      - /var/log/dionaea:/var/log/dionaea:ro
+{% endif %}
+      - alloy-data:/var/lib/alloy
+    command: run /etc/alloy/config.alloy
+    security_opt:
+      - no-new-privileges:true

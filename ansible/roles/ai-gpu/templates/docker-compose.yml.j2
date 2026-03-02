@@ -1,0 +1,86 @@
+# =============================================================================
+# AI GPU Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+#
+# AMD ROCm GPU passthrough — requires /dev/kfd and /dev/dri devices.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Ollama — LLM inference engine (ROCm for AMD GPU)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: {{ ai_gpu_ollama_image }}
+    container_name: ollama
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ ai_gpu_ollama_port }}:11434"
+    volumes:
+      - {{ ai_gpu_ollama_data }}:/root/.ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    environment:
+      HSA_OVERRIDE_GFX_VERSION: "11.0.1"
+      OLLAMA_HOST: "0.0.0.0"
+    # Use numeric GIDs — group names don't exist inside the container
+    group_add:
+      - "{{ ai_gpu_video_gid }}"
+      - "{{ ai_gpu_render_gid }}"
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI — Chat interface for Ollama
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: {{ ai_gpu_openwebui_image }}
+    container_name: open-webui
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ ai_gpu_openwebui_port }}:8080"
+    volumes:
+      - {{ ai_gpu_install_dir }}/open-webui:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+{% if ai_gpu_openwebui_oidc_enabled | bool %}
+      # OIDC SSO via Authentik
+      ENABLE_OAUTH_SIGNUP: "true"
+      OAUTH_PROVIDER_NAME: "Authentik"
+      OPENID_PROVIDER_URL: "{{ ai_gpu_openwebui_oidc_provider_url }}"
+      OAUTH_CLIENT_ID: "{{ ai_gpu_openwebui_oidc_client_id }}"
+      OAUTH_CLIENT_SECRET: "{{ ai_gpu_openwebui_oidc_client_secret }}"
+      OAUTH_SCOPES: "openid email profile"
+      WEBUI_URL: "{{ ai_gpu_openwebui_url }}"
+{% endif %}
+{% if ai_gpu_openwebui_secret_key %}
+      WEBUI_SECRET_KEY: "{{ ai_gpu_openwebui_secret_key }}"
+{% endif %}
+    depends_on:
+      - ollama
+
+  # ---------------------------------------------------------------------------
+  # n8n — Workflow automation (for agentic AI workflows)
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: {{ ai_gpu_n8n_image }}
+    container_name: n8n
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ ai_gpu_n8n_port }}:5678"
+    volumes:
+      - {{ ai_gpu_install_dir }}/n8n:/home/node/.n8n
+    environment:
+      N8N_HOST: "0.0.0.0"
+      N8N_PORT: "5678"
+      WEBHOOK_URL: "https://n8n.home.example-lab.org/"
+{% if ai_gpu_n8n_encryption_key %}
+      N8N_ENCRYPTION_KEY: "{{ ai_gpu_n8n_encryption_key }}"
+{% endif %}

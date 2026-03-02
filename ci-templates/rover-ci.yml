@@ -1,0 +1,50 @@
+# =============================================================================
+# GitLab CI/CD Template for Rover (Terraform Plan Visualization)
+# =============================================================================
+# Reusable CI/CD job for generating interactive Terraform plan visualizations
+# using Rover (https://github.com/im2nguyen/rover).
+#
+# Jobs provided:
+#   .rover-visualize  - Generate SVG resource graph from tfplan.json artifact
+#
+# Prerequisites:
+#   - A preceding .terraform-plan job must have produced ${TF_ROOT}/tfplan.json
+#     as a CI artifact.
+#   - Rover operates on plan JSON only (no state file or Vault access needed).
+#
+# Usage in .gitlab-ci.yml:
+#   include:
+#     - local: ci-templates/rover-ci.yml
+#
+#   rover:00-network:visualize:
+#     extends: .rover-visualize
+#     variables:
+#       TF_ROOT: terraform/layers/00-network
+#     dependencies:
+#       - terraform:00-network:plan
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Rover Visualization Job
+# -----------------------------------------------------------------------------
+# Takes tfplan.json from the plan stage and generates an SVG resource graph.
+# The SVG is stored as a CI artifact for 1 week, viewable directly in GitLab.
+# -----------------------------------------------------------------------------
+
+.rover-visualize:
+  stage: visualize
+  image:
+    name: im2nguyen/rover:latest
+    entrypoint: [""]
+  tags: [docker]
+  script:
+    - cd ${TF_ROOT}
+    - echo "--- Generating Rover SVG from tfplan.json ---"
+    - rover -planJSONPath=tfplan.json -genImage true
+    - echo "--- Rover visualization complete ---"
+    - ls -la *.svg 2>/dev/null || echo "No SVG generated"
+  artifacts:
+    paths:
+      - ${TF_ROOT}/*.svg
+    expire_in: 1 week
+  allow_failure: true

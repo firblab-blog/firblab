@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Ghost Role Handlers
+# =============================================================================
+
+- name: Restart ghost
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: /opt/ghost

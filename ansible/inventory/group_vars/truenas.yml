@@ -1,0 +1,28 @@
+---
+# =============================================================================
+# TrueNAS Configuration
+# =============================================================================
+# Group variables for the TrueNAS SCALE appliance (bare-metal, Dell OptiPlex
+# 3070, i5-9500, 16 GB RAM). Managed via the arensb.truenas Ansible
+# collection — NOT a standard Linux host. common/hardening roles do NOT apply.
+#
+# IP: 10.0.40.2 (Storage VLAN 40, static).
+# SSH: truenas_admin@10.0.40.2:2222 (~/.ssh/truenas_admin)
+#
+# Apps (TrueNAS-managed, not Ansible): Plex, Immich, Linkwarden,
+# Paperless-NGX, Portracker, PostgreSQL.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# TrueNAS is not a standard Linux host
+# ---------------------------------------------------------------------------
+# Skip common role features that don't apply to TrueNAS SCALE.
+# TrueNAS manages its own firewall, packages, NTP, and SSH.
+skip_common_role: true
+skip_hardening_role: true
+
+# Disable monitoring agents — TrueNAS has its own metrics endpoints
+# and we don't install node_exporter/promtail on appliance OS.
+monitoring_node_exporter_enabled: false
+monitoring_promtail_enabled: false
+monitoring_host_group: "truenas"

@@ -1,0 +1,110 @@
+# =============================================================================
+# PatchMon Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Stack: PostgreSQL 17 + Redis 7 + backend (Node.js) + frontend (nginx)
+# =============================================================================
+
+name: patchmon
+
+services:
+  database:
+    image: {{ patchmon_pg_image }}
+    container_name: patchmon-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: patchmon_db
+      POSTGRES_USER: patchmon_user
+      POSTGRES_PASSWORD: {{ patchmon_db_password }}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - patchmon-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patchmon_user -d patchmon_db"]
+      interval: 3s
+      timeout: 5s
+      retries: 7
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: {{ patchmon_redis_image }}
+    container_name: patchmon-redis
+    restart: unless-stopped
+    command: redis-server --requirepass {{ patchmon_redis_password }}
+    volumes:
+      - redis_data:/data
+    networks:
+      - patchmon-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "{{ patchmon_redis_password }}", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 7
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    image: {{ patchmon_backend_image }}
+    container_name: patchmon-backend
+    restart: unless-stopped
+    env_file: {{ patchmon_install_dir }}/config/patchmon.env
+    environment:
+      # Internal Docker wiring — do not change
+      DATABASE_URL: postgresql://patchmon_user:{{ patchmon_db_password }}@database:5432/patchmon_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: {{ patchmon_redis_password }}
+      REDIS_DB: 0
+      ASSETS_DIR: /app/assets
+    volumes:
+      - agent_files:/app/agents
+      - branding_assets:/app/assets
+    networks:
+      - patchmon-internal
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    image: {{ patchmon_frontend_image }}
+    container_name: patchmon-frontend
+    restart: unless-stopped
+    ports:
+      - "{{ patchmon_port }}:3000"
+    volumes:
+      - branding_assets:/usr/share/nginx/html/assets
+    networks:
+      - patchmon-internal
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  redis_data:
+  agent_files:
+  branding_assets:
+
+networks:
+  patchmon-internal:
+    driver: bridge

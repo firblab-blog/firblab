@@ -1,0 +1,78 @@
+# =============================================================================
+# Traefik v3 Static Configuration — FirbLab Standalone Proxy
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+#
+# This is the static (boot-time) configuration. Dynamic routing rules are
+# loaded from the file provider watching /etc/traefik/dynamic/.
+# =============================================================================
+
+# --- Global ---
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# --- API / Dashboard ---
+# With network_mode: host, we must explicitly bind the dashboard to localhost.
+# The 'dashboard' entrypoint below restricts it to 127.0.0.1 only.
+api:
+  dashboard: true
+  insecure: true
+
+# --- Logging ---
+log:
+  level: {{ traefik_log_level }}
+
+{% if traefik_access_log %}
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100
+{% endif %}
+
+# --- Entrypoints ---
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+
+  # The 'traefik' entrypoint is the magic name that api.insecure uses
+  # to serve the dashboard. Binding to 127.0.0.1 ensures it's
+  # localhost-only even with network_mode: host.
+  traefik:
+    address: "127.0.0.1:{{ traefik_dashboard_port }}"
+
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+        domains:
+          - main: "{{ traefik_domain }}"
+            sans:
+              - "*.{{ traefik_domain }}"
+
+# --- Certificate Resolvers ---
+certificatesResolvers:
+  letsencrypt:
+    acme:
+{% if traefik_acme_email != "" %}
+      email: {{ traefik_acme_email }}
+{% endif %}
+      storage: /etc/traefik/acme/acme.json
+      caServer: {{ traefik_acme_ca_server }}
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+
+# --- Providers ---
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true

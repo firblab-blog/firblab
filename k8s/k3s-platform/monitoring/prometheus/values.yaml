@@ -1,0 +1,663 @@
+# =============================================================================
+# kube-prometheus-stack Helm values — K3s RPi5 cluster
+# =============================================================================
+# Deploys Prometheus, Grafana, and Alertmanager on the K3s RPi5 cluster.
+# Sized for 3 bare-metal RPi5 nodes (8GB+8GB+4GB). Heavy workloads pinned
+# to standard (8GB) nodes via nodeSelector.
+#
+# Compared to RKE2 (k8s/platform/monitoring/prometheus/values.yaml):
+#   - local-path instead of Longhorn StorageClass
+#   - 14d retention (from 30d), 20Gi (from 50Gi) — NVMe death recoverable
+#   - nodeExporter DaemonSet DISABLED (bare-metal port 9100 conflict)
+#   - Reduced memory limits for RPi5 constraints
+#   - No ArgoCD/Longhorn/Trivy dashboards (not deployed on K3s)
+#   - K3s RPi5 node_exporter targets added to scrape configs
+#
+# External node_exporter scraping:
+#   All off-cluster Linux hosts run node_exporter (port 9100) installed via
+#   Ansible (common role). Prometheus scrapes them via additionalScrapeConfigs.
+#   Network path: Services VLAN 20 → Prometheus → targets:
+#     - Management VLAN 10: unrestricted (services_to_mgmt ALLOW)
+#     - Services VLAN 20:   same VLAN, no zone policy needed
+#     - Default LAN VLAN 1: unrestricted (services_to_lan ALLOW)
+#     - Security VLAN 50:   port 9100 specifically (services_to_security_monitoring policy)
+#     - Hetzner gateway:    via WireGuard tunnel (10.8.0.0/24 — requires Phase 3 route setup)
+#
+# Alerting:
+#   Alertmanager routes all alerts to Gotify on Hetzner via WireGuard tunnel.
+#   Set the real Gotify app token in Vault at secret/k8s/alertmanager-gotify
+#   and wire via ESO ExternalSecret → K8s Secret → Alertmanager config.
+
+# =============================================================================
+# Prometheus
+# =============================================================================
+
+prometheus:
+  prometheusSpec:
+    # 14-day retention on 20Gi local-path PVC (NVMe).
+    # Shorter than RKE2 (30d/50Gi) — NVMe death loses data but
+    # re-scraping recovers within retention window. Dashboard JSON in Git.
+    retention: 14d
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1536Mi
+
+    # Pin to 8GB nodes — Prometheus is the heaviest workload
+    nodeSelector:
+      example-lab.org/ram-tier: standard
+
+    # Scrape ALL ServiceMonitors and PodMonitors across all namespaces.
+    # Without these, only monitors in the same namespace are discovered.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # ---------------------------------------------------------------------------
+    # External scrape targets — all off-cluster Linux hosts running node_exporter
+    # ---------------------------------------------------------------------------
+    # node_exporter is installed on every Linux host via ansible/roles/common
+    # (tasks/node-exporter.yml). Port 9100, no auth, plain HTTP.
+    #
+    # Zone policy requirements (all met by existing Layer 00 policies):
+    #   - Services → Management: unrestricted ALLOW (services_to_mgmt)
+    #   - Services → Services:   same VLAN, no policy needed
+    #   - Services → LAN:        unrestricted ALLOW (services_to_lan)
+    #   - Services → Security:   port 9100 ALLOW (services_to_security_monitoring)
+    additionalScrapeConfigs:
+      # ---- K3s RPi5 bare-metal nodes (Services VLAN 20) ---------------------
+      # These nodes run node_exporter via Ansible (systemd, port 9100).
+      # The in-cluster nodeExporter DaemonSet is DISABLED to avoid port conflict.
+      - job_name: 'node-exporter-k3s'
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['10.0.20.60:9100']
+            labels:
+              instance: lab-05
+              group: k3s
+              role: k3s-server
+              vlan: "20"
+          - targets: ['10.0.20.61:9100']
+            labels:
+              instance: lab-06
+              group: k3s
+              role: k3s-server
+              vlan: "20"
+          - targets: ['10.0.20.62:9100']
+            labels:
+              instance: lab-07
+              group: k3s
+              role: k3s-server
+              vlan: "20"
+
+      # ---- K3s Traefik metrics (in-cluster) --------------------------------
+      # Traefik metrics service exposed on port 9100 (metrics entryPoint).
+      # ServiceMonitor is disabled (Traefik installs before Prometheus CRDs).
+      - job_name: 'traefik-k3s'
+        scrape_interval: 30s
+        static_configs:
+          - targets: ['traefik-metrics.traefik.svc.cluster.local:9100']
+            labels:
+              instance: traefik-k3s
+              group: k3s-platform
+              role: ingress-controller
+
+      # ---- Proxmox hypervisor nodes (Management VLAN 10) --------------------
+      - job_name: 'node-exporter-proxmox'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.10.42:9100']
+            labels:
+              instance: lab-01
+              group: proxmox
+              role: hypervisor
+              vlan: "10"
+          - targets: ['10.0.10.2:9100']
+            labels:
+              instance: lab-02
+              group: proxmox
+              role: hypervisor
+              vlan: "10"
+          - targets: ['10.0.10.3:9100']
+            labels:
+              instance: lab-03
+              group: proxmox
+              role: hypervisor
+              vlan: "10"
+          - targets: ['10.0.10.4:9100']
+            labels:
+              instance: lab-04
+              group: proxmox
+              role: hypervisor
+              vlan: "10"
+
+      # ---- Vault cluster nodes ----------------------------------------------
+      # vault-1 (macOS) may not have node_exporter (binary install, no systemd).
+      # vault-2 (Security VLAN 50) requires services_to_security_monitoring policy.
+      - job_name: 'node-exporter-vault'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.10.13:9100']
+            labels:
+              instance: vault-3
+              group: vault
+              role: vault-standby
+              vlan: "10"
+          - targets: ['10.0.50.2:9100']
+            labels:
+              instance: vault-2
+              group: vault
+              role: vault-standby
+              vlan: "50"
+
+      # ---- Core infrastructure (Management VLAN 10) -------------------------
+      - job_name: 'node-exporter-core-infra'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.10.50:9100']
+            labels:
+              instance: gitlab
+              group: core-infra
+              role: gitlab
+              vlan: "10"
+          - targets: ['10.0.10.51:9100']
+            labels:
+              instance: gitlab-runner
+              group: core-infra
+              role: gitlab-runner
+              vlan: "10"
+          - targets: ['10.0.10.16:9100']
+            labels:
+              instance: authentik
+              group: core-infra
+              role: sso
+              vlan: "10"
+          - targets: ['10.0.10.15:9100']
+            labels:
+              instance: pbs
+              group: core-infra
+              role: backup-server
+              vlan: "10"
+          - targets: ['10.0.10.18:9100']
+            labels:
+              instance: backup
+              group: core-infra
+              role: backup-lxc
+              vlan: "10"
+
+      # ---- Restic REST server (backup LXC — Management VLAN 10) ----------------
+      # --prometheus-no-auth exposes /metrics without htpasswd credentials.
+      # Metrics: bytes in/out per repo, request counts by type.
+      # Network path: Services VLAN 20 → Management VLAN 10 (unrestricted ALLOW).
+      - job_name: 'restic-rest-server'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.10.18:8500']
+            labels:
+              instance: backup
+              group: core-infra
+              role: restic-rest-server
+              vlan: "10"
+
+      # ---- Standalone services (Services VLAN 20) ---------------------------
+      - job_name: 'node-exporter-services'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.20.10:9100']
+            labels:
+              instance: ghost
+              group: standalone-services
+              role: blog
+              vlan: "20"
+          - targets: ['10.0.20.11:9100']
+            labels:
+              instance: roundcube
+              group: standalone-services
+              role: email
+              vlan: "20"
+          - targets: ['10.0.20.12:9100']
+            labels:
+              instance: foundryvtt
+              group: standalone-services
+              role: gaming
+              vlan: "20"
+          - targets: ['10.0.20.13:9100']
+            labels:
+              instance: mealie
+              group: standalone-services
+              role: recipes
+              vlan: "20"
+          - targets: ['10.0.20.14:9100']
+            labels:
+              instance: netbox
+              group: standalone-services
+              role: dcim-ipam
+              vlan: "20"
+          - targets: ['10.0.20.15:9100']
+            labels:
+              instance: patchmon
+              group: standalone-services
+              role: patch-management
+              vlan: "20"
+          - targets: ['10.0.20.16:9100']
+            labels:
+              instance: actualbudget
+              group: standalone-services
+              role: finance
+              vlan: "20"
+          - targets: ['10.0.20.18:9100']
+            labels:
+              instance: ai-gpu
+              group: standalone-services
+              role: ai-inference
+              vlan: "20"
+          - targets: ['10.0.20.19:9100']
+            labels:
+              instance: vaultwarden
+              group: standalone-services
+              role: password-manager
+              vlan: "20"
+          - targets: ['10.0.20.20:9100']
+            labels:
+              instance: archive
+              group: standalone-services
+              role: archive-appliance
+              vlan: "20"
+
+      # ---- Bare-metal / special purpose (Default LAN VLAN 1) ---------------
+      - job_name: 'node-exporter-bare-metal'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.0.4.20:9100']
+            labels:
+              instance: lab-08
+              group: bare-metal
+              role: scanner-nut
+              vlan: "1"
+
+      # ---- Hetzner gateway (WireGuard tunnel — 10.8.0.0/24) ----------------
+      # node_exporter binds to WireGuard interface only (10.8.0.1:9100).
+      # Requires 10.8.0.0/24 route on K3s nodes (Phase 3 — WireGuard setup).
+      # Until Phase 3, these targets will show as DOWN in Prometheus.
+      - job_name: 'node-exporter-hetzner'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.8.0.1:9100']
+            labels:
+              instance: lab-gateway
+              group: hetzner
+              role: gateway
+              location: hetzner
+
+      # Traefik metrics — exposed on :8888 (metrics entrypoint, network_mode: host)
+      # Same WireGuard path as node_exporter above.
+      - job_name: 'traefik-gateway'
+        scrape_interval: 60s
+        static_configs:
+          - targets: ['10.8.0.1:8888']
+            labels:
+              instance: traefik-gateway
+              group: hetzner
+              role: reverse-proxy
+              location: hetzner
+
+# =============================================================================
+# Grafana
+# =============================================================================
+
+grafana:
+  enabled: true
+
+  # RWO PVC (local-path) requires Recreate strategy — RollingUpdate deadlocks
+  # because the new pod can't attach the volume while the old pod holds it.
+  deploymentStrategy:
+    type: Recreate
+
+  # ---------------------------------------------------------------------------
+  # Credentials (from Vault via External Secrets)
+  # ---------------------------------------------------------------------------
+  admin:
+    existingSecret: grafana-admin-credentials
+    userKey: username
+    passwordKey: password
+
+  # ---------------------------------------------------------------------------
+  # Ingress (Traefik + Let's Encrypt)
+  # ---------------------------------------------------------------------------
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - grafana.home.example-lab.org
+    tls:
+      - secretName: grafana-tls
+        hosts:
+          - grafana.home.example-lab.org
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-dns
+
+  # ---------------------------------------------------------------------------
+  # Grafana configuration
+  # ---------------------------------------------------------------------------
+  # OIDC credentials synced from Vault (secret/k8s/grafana-oidc) by
+  # ESO → K8s Secret → file mount. Grafana reads via $__file{} at runtime.
+  grafana.ini:
+    server:
+      root_url: https://grafana.home.example-lab.org
+    users:
+      default_theme: dark
+      auto_assign_org_role: Viewer
+    analytics:
+      check_for_updates: false
+      reporting_enabled: false
+    explore:
+      enabled: true
+    unified_alerting:
+      enabled: true
+    # Explicit annotations backend for alert state history.
+    # Grafana 12 default changed — without this, AlertStatesDataLayer throws
+    # "Unexpected alert rules response" on every dashboard load.
+    "unified_alerting.state_history":
+      backend: annotations
+    auth.generic_oauth:
+      enabled: true
+      name: Authentik
+      allow_sign_up: true
+      client_id: $__file{/etc/secrets/oidc/client_id}
+      client_secret: $__file{/etc/secrets/oidc/client_secret}
+      scopes: openid profile email
+      auth_url: https://auth.home.example-lab.org/application/o/authorize/
+      token_url: https://auth.home.example-lab.org/application/o/token/
+      api_url: https://auth.home.example-lab.org/application/o/userinfo/
+      role_attribute_path: contains(groups[*], 'authentik-admins') && 'Admin' || 'Viewer'
+      auto_login: false
+    auth:
+      signout_redirect_url: https://auth.home.example-lab.org/application/o/grafana/end-session/
+    # Grafana Live (WebSocket push) disabled. The /api/live/ws connections
+    # are terminated every 30-80s despite Traefik readTimeout/writeTimeout=0s,
+    # causing "NetworkError when attempting to fetch resource" during SPA
+    # navigation. Disabling Live eliminates the WebSocket churn entirely.
+    live:
+      allowed_origins: https://grafana.home.example-lab.org
+      max_connections: 0
+    # Disable Grafana 12 kubernetesClientDashboardsFolders (enabled by default
+    # in 12.0.0). Falls back to stable legacy SQL-based dashboard API.
+    feature_toggles:
+      kubernetesClientDashboardsFolders: "false"
+
+  # OIDC secret mounted from K8s Secret (synced from Vault by ESO)
+  extraSecretMounts:
+    - name: oidc-secret
+      secretName: grafana-oidc
+      defaultMode: 0440
+      mountPath: /etc/secrets/oidc
+      readOnly: true
+
+  # ---------------------------------------------------------------------------
+  # Plugins
+  # ---------------------------------------------------------------------------
+  plugins:
+    - grafana-clock-panel
+
+  # ---------------------------------------------------------------------------
+  # Resources — reduced for RPi5
+  # ---------------------------------------------------------------------------
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+  # Persistent storage for Grafana state (annotations, playlists, etc.)
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 2Gi
+
+  # Pin to 8GB nodes
+  nodeSelector:
+    example-lab.org/ram-tier: standard
+
+  # ---------------------------------------------------------------------------
+  # Data sources
+  # ---------------------------------------------------------------------------
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      url: http://loki:3100
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxLines: 1000
+
+  # ---------------------------------------------------------------------------
+  # Dashboard providers — one folder per category
+  # ---------------------------------------------------------------------------
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: infrastructure
+          orgId: 1
+          folder: "Infrastructure"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/infrastructure
+        - name: kubernetes
+          orgId: 1
+          folder: "Kubernetes"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/kubernetes
+        - name: platform
+          orgId: 1
+          folder: "Platform Services"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/platform
+        - name: logs
+          orgId: 1
+          folder: "Logs"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/logs
+        - name: operations
+          orgId: 1
+          folder: "Operations"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/operations
+        - name: backups
+          orgId: 1
+          folder: "Backups"
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/backups
+        - name: custom
+          orgId: 1
+          folder: "Custom"
+          type: file
+          disableDeletion: false
+          editable: true
+          allowUiUpdates: true
+          options:
+            path: /var/lib/grafana/dashboards/custom
+
+  # ---------------------------------------------------------------------------
+  # Dashboard imports from grafana.com
+  # ---------------------------------------------------------------------------
+  # Dashboards are grouped by folder (must match dashboardProviders above).
+  # Removed: ArgoCD (not on K3s), Longhorn (using local-path), Trivy (not deployed).
+  dashboards:
+    # --- Infrastructure -------------------------------------------------------
+    infrastructure:
+      node-exporter-full:
+        gnetId: 1860
+        revision: 37
+        datasource: Prometheus
+      node-exporter-quickstart:
+        gnetId: 13978
+        revision: 2
+        datasource: Prometheus
+
+    # --- Kubernetes -----------------------------------------------------------
+    kubernetes:
+      kubernetes-views-global:
+        gnetId: 15757
+        revision: 37
+        datasource: Prometheus
+      kubernetes-views-nodes:
+        gnetId: 15758
+        revision: 35
+        datasource: Prometheus
+      kubernetes-views-pods:
+        gnetId: 15760
+        revision: 28
+        datasource: Prometheus
+      kubernetes-views-namespaces:
+        gnetId: 15759
+        revision: 29
+        datasource: Prometheus
+      kubernetes-resources-pods:
+        gnetId: 13770
+        revision: 1
+        datasource: Prometheus
+      kubernetes-pvc:
+        gnetId: 13646
+        revision: 2
+        datasource: Prometheus
+      kubernetes-api-server:
+        gnetId: 15761
+        revision: 17
+        datasource: Prometheus
+
+    # --- Platform Services ---------------------------------------------------
+    # No ArgoCD (not deployed on K3s), Longhorn (using local-path), or Trivy.
+    platform:
+      vault:
+        gnetId: 12904
+        revision: 2
+        datasource: Prometheus
+      traefik:
+        gnetId: 17347
+        revision: 9
+        datasource: Prometheus
+      cert-manager:
+        gnetId: 20340
+        revision: 1
+        datasource: Prometheus
+      external-secrets:
+        gnetId: 21323
+        revision: 1
+        datasource: Prometheus
+
+    # --- Logs ----------------------------------------------------------------
+    logs:
+      loki-logs:
+        gnetId: 13639
+        revision: 2
+        datasource: Loki
+      loki-operational:
+        gnetId: 12611
+        revision: 1
+        datasource: Prometheus
+
+    # --- Operations ----------------------------------------------------------
+    operations:
+      alertmanager:
+        gnetId: 9578
+        revision: 4
+        datasource: Prometheus
+      prometheus-stats:
+        gnetId: 3662
+        revision: 2
+        datasource: Prometheus
+
+  # ---------------------------------------------------------------------------
+  # ConfigMap sidecar — auto-loads dashboards from ConfigMaps in monitoring ns
+  # ---------------------------------------------------------------------------
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: monitoring
+      label: grafana_dashboard
+      labelValue: "1"
+      folderAnnotation: grafana_folder
+      provider:
+        allowUiUpdates: true
+        foldersFromFilesStructure: false
+
+# =============================================================================
+# Alertmanager
+# =============================================================================
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 48Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+
+    # Alert config managed via ExternalSecret — token sourced from Vault.
+    # ESO syncs secret/k8s/alertmanager → alertmanager-config Secret.
+    # Gotify webhook at 10.8.0.1:8080 requires WireGuard route (Phase 3).
+    configSecret: alertmanager-config
+
+# =============================================================================
+# Node Exporter — DISABLED on K3s
+# =============================================================================
+# K3s RPi5 nodes are bare-metal and already run node_exporter as a systemd
+# service (installed by ansible/roles/common). The DaemonSet would conflict
+# on port 9100. Instead, Prometheus scrapes these nodes via
+# additionalScrapeConfigs (job: node-exporter-k3s) above.
+
+nodeExporter:
+  enabled: false
+
+# =============================================================================
+# Kube State Metrics
+# =============================================================================
+
+kubeStateMetrics:
+  enabled: true

@@ -1,0 +1,25 @@
+---
+# =============================================================================
+# TrueNAS — Scrub Task Configuration
+# =============================================================================
+# Ensures scrub tasks exist with correct schedules. Both pools already had
+# scrub tasks per probe report — this codifies them for IaC completeness.
+#
+# Uses arensb.truenas.pool_scrub_task module.
+# Module params: pool (required), threshold, enabled, minute, hour,
+#   day (alias: dom), month, weekday (alias: dow), description, state.
+# =============================================================================
+
+- name: "Configure scrub task for pool {{ item.pool }}"
+  arensb.truenas.pool_scrub_task:
+    pool: "{{ item.pool }}"
+    threshold: "{{ item.threshold | default(35) }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    hour: "{{ item.hour | default('0') }}"
+    day: "{{ item.day | default('*') }}"
+    month: "{{ item.month | default('*') }}"
+    weekday: "{{ item.weekday | default('7') }}"
+    state: present
+  loop: "{{ truenas_scrub_tasks }}"
+  loop_control:
+    label: "{{ item.pool }}"

@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Traefik Standalone Reverse Proxy - Handlers
+# =============================================================================
+
+- name: Restart traefik
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_install_dir }}"
+    state: restarted

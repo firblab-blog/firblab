@@ -1,0 +1,30 @@
+# =============================================================================
+# Wazuh Dashboard — Ingress (Traefik + cert-manager)
+# =============================================================================
+# External access at wazuh.home.example-lab.org via Let's Encrypt TLS.
+# Same pattern as Headlamp ingress.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+spec:
+  ingressClassName: traefik
+  tls:
+    - secretName: wazuh-dashboard-tls
+      hosts:
+        - wazuh.home.example-lab.org
+  rules:
+    - host: wazuh.home.example-lab.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wazuh-dashboard
+                port:
+                  number: 5601

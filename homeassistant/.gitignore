@@ -1,0 +1,52 @@
+# =============================================================================
+# Home Assistant .gitignore
+# =============================================================================
+# This file is synced to the GitLab HA config repo by ha-config-sync.sh.
+# It protects HA runtime state from being wiped by the Git Pull add-on.
+#
+# CRITICAL: Without this, git clean/reset operations destroy .storage/
+# (auth, integrations, entity registry, device registry — everything).
+# =============================================================================
+
+# --- HA internal state (NEVER version-control these) ---
+.storage/
+.cloud/
+
+# --- Secrets (managed manually on HAOS, not in Git) ---
+secrets.yaml
+
+# --- Database and logs ---
+home-assistant_v2.db
+home-assistant_v2.db-shm
+home-assistant_v2.db-wal
+home-assistant.log
+home-assistant.log.fault
+OZW_Log.txt
+
+# --- TLS certs (managed by HAOS/add-ons) ---
+*.pem
+*.key
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+
+# --- Add-on configs (managed via UI, not Git) ---
+.HA_VERSION
+
+# --- Backups ---
+backups/
+
+# --- Custom components managed by HACS ---
+custom_components/
+
+# --- Themes and www assets managed by HACS ---
+themes/
+www/
+
+# --- HACS state ---
+.hacs/
+
+# --- Zigbee/Z-Wave databases ---
+zigbee.db
+zwave/

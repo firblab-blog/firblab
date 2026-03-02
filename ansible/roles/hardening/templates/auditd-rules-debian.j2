@@ -1,0 +1,128 @@
+# =============================================================================
+# CIS Level 1 Audit Rules
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# Architecture: {{ ansible_architecture | default('unknown') }}
+#
+# ARM64 (aarch64) differences:
+#   - No legacy syscalls: unlink, rename, stime (use *at variants)
+#   - No b32 rules (no 32-bit compat layer on pure 64-bit ARM)
+# =============================================================================
+
+# Delete all existing rules before applying
+-D
+
+# Set buffer size (increase for busy systems)
+-b 8192
+
+# Set failure mode (1 = printk, 2 = panic)
+-f 1
+
+# ---------------------------------------------------------------------------
+# File Access Monitoring
+# ---------------------------------------------------------------------------
+# Monitor changes to user/group files
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+# Monitor changes to login configuration
+-w /etc/login.defs -p wa -k login_defs
+-w /etc/securetty -p wa -k login_defs
+-w /etc/pam.d/ -p wa -k pam
+
+# Monitor changes to SSH configuration
+-w /etc/ssh/sshd_config -p wa -k sshd_config
+
+# Monitor changes to sudoers
+-w /etc/sudoers -p wa -k sudoers
+-w /etc/sudoers.d/ -p wa -k sudoers
+
+# ---------------------------------------------------------------------------
+# User and Group Changes
+# ---------------------------------------------------------------------------
+-w /usr/sbin/useradd -p x -k user_modification
+-w /usr/sbin/userdel -p x -k user_modification
+-w /usr/sbin/usermod -p x -k user_modification
+-w /usr/sbin/groupadd -p x -k group_modification
+-w /usr/sbin/groupdel -p x -k group_modification
+-w /usr/sbin/groupmod -p x -k group_modification
+-w /usr/sbin/adduser -p x -k user_modification
+-w /usr/sbin/addgroup -p x -k group_modification
+
+# ---------------------------------------------------------------------------
+# Sudo Usage
+# ---------------------------------------------------------------------------
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k sudo_commands
+{% if ansible_architecture != 'aarch64' %}
+-a always,exit -F arch=b32 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k sudo_commands
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# Mount Operations
+# ---------------------------------------------------------------------------
+-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
+{% if ansible_architecture != 'aarch64' %}
+-a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# File Deletion by Users
+# ---------------------------------------------------------------------------
+# ARM64 has no legacy unlink/rename syscalls — only unlinkat/renameat
+{% if ansible_architecture == 'aarch64' %}
+-a always,exit -F arch=b64 -S unlinkat -S renameat -F auid>=1000 -F auid!=4294967295 -k file_deletion
+{% else %}
+-a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k file_deletion
+-a always,exit -F arch=b32 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k file_deletion
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# System Administration Actions
+# ---------------------------------------------------------------------------
+-w /var/log/auth.log -p wa -k auth_log
+-w /var/log/syslog -p wa -k syslog
+-w /etc/crontab -p wa -k cron
+-w /etc/cron.d/ -p wa -k cron
+-w /etc/cron.daily/ -p wa -k cron
+-w /etc/cron.weekly/ -p wa -k cron
+-w /etc/cron.monthly/ -p wa -k cron
+
+# ---------------------------------------------------------------------------
+# Kernel Module Loading
+# ---------------------------------------------------------------------------
+-w /sbin/insmod -p x -k kernel_modules
+-w /sbin/rmmod -p x -k kernel_modules
+-w /sbin/modprobe -p x -k kernel_modules
+-a always,exit -F arch=b64 -S init_module -S delete_module -k kernel_modules
+
+# ---------------------------------------------------------------------------
+# Network Configuration Changes
+# ---------------------------------------------------------------------------
+-w /etc/hosts -p wa -k network_config
+-w /etc/network/ -p wa -k network_config
+-w /etc/netplan/ -p wa -k network_config
+-a always,exit -F arch=b64 -S sethostname -S setdomainname -k network_config
+{% if ansible_architecture != 'aarch64' %}
+-a always,exit -F arch=b32 -S sethostname -S setdomainname -k network_config
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# Time Changes
+# ---------------------------------------------------------------------------
+-a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time_change
+{% if ansible_architecture != 'aarch64' %}
+# stime is x86-only (not present on ARM64)
+-a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time_change
+{% endif %}
+-a always,exit -F arch=b64 -S clock_settime -k time_change
+{% if ansible_architecture != 'aarch64' %}
+-a always,exit -F arch=b32 -S clock_settime -k time_change
+{% endif %}
+-w /etc/localtime -p wa -k time_change
+
+# Make the audit configuration immutable (requires reboot to change)
+-e 2

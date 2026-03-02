@@ -1,0 +1,219 @@
+# =============================================================================
+# GitLab CE Helm Values — FirbLab RKE2 Cluster (Testing Instance)
+# =============================================================================
+# Minimal Community Edition deployment for learning GitLab-on-K8s.
+# Internal only at gitlab-test.home.example-lab.org.
+#
+# Chart: https://charts.gitlab.io/ (chart: gitlab, version 9.9.x = GitLab 18.9.x)
+# Docs:  https://docs.gitlab.com/charts/
+#
+# Resource budget: ~4Gi memory requests, ~5.5Gi limits
+# Production GitLab remains on the Omnibus VM (10.0.10.50).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global Configuration
+# ---------------------------------------------------------------------------
+global:
+  edition: ce
+
+  hosts:
+    domain: home.example-lab.org
+    gitlab:
+      name: gitlab-test.home.example-lab.org
+      https: true
+
+  # Traefik ingress with cert-manager TLS
+  ingress:
+    enabled: true
+    class: traefik
+    provider: traefik
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-dns
+    configureCertmanager: false
+    tls:
+      enabled: true
+
+  # Disable features not needed for testing
+  pages:
+    enabled: false
+  registry:
+    enabled: false
+  smtp:
+    enabled: false
+  appConfig:
+    incomingEmail:
+      enabled: false
+    serviceDeskEmail:
+      enabled: false
+
+  # Keep MinIO enabled for artifacts/uploads/LFS (simplest object storage)
+  minio:
+    enabled: true
+
+  # Git over SSH — disabled for testing instance (HTTPS clone only)
+  shell:
+    port: 22
+
+  # Initial root password from Vault via ESO
+  initialRootPassword:
+    secret: gitlab-initial-root-password
+    key: password
+
+  # Schedule all GitLab pods on agent nodes (server nodes only have 4GB)
+  nodeSelector:
+    node-role.kubernetes.io/agent: "true"
+
+# ---------------------------------------------------------------------------
+# Disabled Subcharts
+# ---------------------------------------------------------------------------
+# We use Traefik, cert-manager, and Prometheus from the platform stack
+nginx-ingress:
+  enabled: false
+certmanager:
+  install: false
+prometheus:
+  install: false
+gitlab-runner:
+  install: false
+
+# ---------------------------------------------------------------------------
+# GitLab Components
+# ---------------------------------------------------------------------------
+gitlab:
+  # KAS (Kubernetes Agent Server) — disabled, we run gitlab-agent separately
+  kas:
+    enabled: false
+
+  # Webservice (Puma) — main GitLab web UI and API
+  webservice:
+    minReplicas: 1
+    maxReplicas: 1
+    workerProcesses: 2  # Minimum required for GitLab to function
+    resources:
+      requests:
+        cpu: 100m
+        memory: 1536Mi   # 2 Puma workers * ~750MB each
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    ingress:
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-dns
+
+  # Sidekiq — background job processor
+  sidekiq:
+    minReplicas: 1
+    maxReplicas: 1
+    concurrency: 10       # Default 20, halved for homelab
+    resources:
+      requests:
+        cpu: 100m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 1536Mi
+
+  # Gitaly — Git repository storage (StatefulSet)
+  gitaly:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: longhorn
+
+  # GitLab Shell — SSH access (disabled for testing, HTTPS clone only)
+  gitlab-shell:
+    enabled: false
+
+  # Toolbox — maintenance pod (rake tasks, backups)
+  toolbox:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+  # Migrations — database migration job
+  migrations:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+
+  # GitLab Exporter — disabled (monitoring on K3s cluster)
+  gitlab-exporter:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Bundled PostgreSQL (Bitnami subchart)
+# ---------------------------------------------------------------------------
+postgresql:
+  install: true
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: longhorn
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Bundled Redis (Bitnami subchart)
+# ---------------------------------------------------------------------------
+redis:
+  install: true
+  architecture: standalone
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClass: longhorn
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Bundled MinIO (object storage for artifacts/uploads/LFS)
+# ---------------------------------------------------------------------------
+minio:
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: longhorn
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  ingress:
+    enabled: false  # Internal only — no external MinIO access
+
+# ---------------------------------------------------------------------------
+# Node Affinity — schedule on agent nodes only
+# ---------------------------------------------------------------------------
+# Server nodes have 4GB RAM and run etcd + kube-apiserver.
+# Agent nodes have 10GB RAM with headroom for workloads.
+# NOTE: nodeSelector is set per-component above, and globally via
+# global.nodeSelector which is already defined in the global block.

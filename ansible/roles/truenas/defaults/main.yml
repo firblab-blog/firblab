@@ -1,0 +1,185 @@
+---
+# =============================================================================
+# TrueNAS Role — Default Variables
+# =============================================================================
+# Declarative configuration for TrueNAS SCALE via arensb.truenas collection.
+# Manages services, NFS/SMB shares, snapshot tasks, SMART tests, and scrubs.
+#
+# This role does NOT manage:
+#   - Pools/datasets (destructive — created manually or via TrueNAS UI)
+#   - Apps (Plex, Immich, etc. — managed via TrueNAS app catalog)
+#   - Users/groups (truenas_admin + admin already exist)
+#   - Network config (DHCP/static IP — managed via TrueNAS UI or VLAN migration)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+# Desired state for TrueNAS services. Matches probe report findings.
+# Only services we care about are listed — others left at TrueNAS defaults.
+truenas_services:
+  - { name: ssh, state: started, enabled: true }
+  - { name: nfs, state: started, enabled: true }
+  - { name: cifs, state: started, enabled: true }
+  - { name: smartd, state: started, enabled: true }
+
+# ---------------------------------------------------------------------------
+# NFS Shares
+# ---------------------------------------------------------------------------
+# SECURITY FIX: Probe found both NFS shares with empty networks[] (world-
+# accessible). Restrict to known subnets that actually need NFS access.
+#
+# Module params: path, name (= comment/description), networks, hosts,
+#   maproot_user, maproot_group, mapall_user, mapall_group, enabled,
+#   readonly, state.
+truenas_nfs_shares:
+  - path: /mnt/backups/firb-lab-01
+    comment: "Proxmox backup target — lab-01"
+    networks:
+      - "10.0.10.0/24"     # Management VLAN 10 — Proxmox nodes
+      - "10.0.4.0/24"      # Default LAN — workstation
+      - "10.10.10.0/30"       # Point-to-point 10G DAC — lab-01 vmbr1
+    maproot_user: root
+    maproot_group: wheel
+    enabled: true
+    readonly: false
+
+  - path: /mnt/backups/firb-lab-02
+    comment: "Proxmox backup target — lab-02"
+    networks:
+      - "10.0.10.0/24"     # Management VLAN 10 — Proxmox nodes
+      - "10.0.4.0/24"      # Default LAN — workstation
+    maproot_user: root
+    maproot_group: wheel
+    enabled: true
+    readonly: false
+
+# ---------------------------------------------------------------------------
+# SMB Shares
+# ---------------------------------------------------------------------------
+# SECURITY FIX: firb-lab-01 share had guestok=true. All shares now enforce
+# authentication. hostsallow restricts by subnet for defense in depth.
+truenas_smb_shares:
+  - name: firb-lab-01
+    path: /mnt/backups/firb-lab-01
+    comment: "Proxmox backup share — lab-01"
+    purpose: DEFAULT_SHARE
+    guestok: false            # SECURITY FIX: was true
+    browsable: true
+    ro: false
+    hostsallow:
+      - "10.0.10.0/24"
+      - "10.0.4.0/24"
+
+  - name: firb-lab-02
+    path: /mnt/backups/firb-lab-02
+    comment: "Proxmox backup share — lab-02"
+    purpose: DEFAULT_SHARE
+    guestok: false
+    browsable: true
+    ro: false
+    hostsallow:
+      - "10.0.10.0/24"
+      - "10.0.4.0/24"
+
+  - name: lab-macbook
+    path: /mnt/backups/lab-macbook
+    comment: "Time Machine backup — MacBook"
+    purpose: ENHANCED_TIMEMACHINE
+    guestok: false
+    browsable: true
+    ro: false
+    hostsallow:
+      - "10.0.4.0/24"     # Default LAN — MacBook only
+
+# ---------------------------------------------------------------------------
+# Snapshot Tasks
+# ---------------------------------------------------------------------------
+# PROTECTION FIX: Probe found zero snapshot tasks. Add daily snapshots for
+# both pools to protect against accidental deletion and ransomware.
+#
+# Module params: dataset, recursive, lifetime_value, lifetime_unit (lowercase:
+#   hour/day/week/month/year), name_format, minute, hour, day, month, weekday,
+#   allow_empty, enabled, state.
+truenas_snapshot_tasks:
+  - dataset: backups
+    recursive: true
+    lifetime_value: 2
+    lifetime_unit: week
+    name_format: "auto-%Y-%m-%d_%H-%M"
+    minute: "0"
+    hour: "0"
+    day: "*"
+    month: "*"
+    weekday: "*"
+    enabled: true
+    allow_empty: false
+
+  - dataset: media
+    recursive: true
+    lifetime_value: 1
+    lifetime_unit: week
+    name_format: "auto-%Y-%m-%d_%H-%M"
+    minute: "30"
+    hour: "0"
+    day: "*"
+    month: "*"
+    weekday: "*"
+    enabled: true
+    allow_empty: false
+
+# ---------------------------------------------------------------------------
+# SMART Tests
+# ---------------------------------------------------------------------------
+# PROTECTION FIX: Probe found zero SMART tests despite smartd running.
+# Short test weekly (fast, detects imminent failures).
+# Long test monthly (thorough surface scan).
+#
+# Module params: name (required), test (long/short/conveyance/offline),
+#   disks (required, list of disk device names), hour, day, month, weekday,
+#   state.
+# IMPORTANT: You MUST populate truenas_disk_names with actual disk device
+# names from the TrueNAS host. Query with:
+#   midclt call disk.query | jq -r '.[].name'
+# The deploy playbook auto-discovers disks if this list is empty.
+truenas_disk_names: []
+
+truenas_smart_tests:
+  - name: "Weekly SHORT test"
+    test: short
+    hour: "6"
+    day: "*"
+    month: "*"
+    weekday: "6"              # Saturdays
+
+  - name: "Monthly LONG test"
+    test: long
+    hour: "2"
+    day: "1"                  # 1st of each month
+    month: "*"
+    weekday: "*"
+
+# ---------------------------------------------------------------------------
+# Scrub Tasks
+# ---------------------------------------------------------------------------
+# Already exist per probe report — codified here for IaC completeness.
+# Sundays at midnight, 35-day threshold.
+#
+# Module params: pool (required), threshold, enabled, hour, day, month,
+#   weekday, description, state.
+truenas_scrub_tasks:
+  - pool: media
+    threshold: 35
+    hour: "0"
+    day: "*"
+    month: "*"
+    weekday: "7"
+    enabled: true
+
+  - pool: backups
+    threshold: 35
+    hour: "0"
+    day: "*"
+    month: "*"
+    weekday: "7"
+    enabled: true

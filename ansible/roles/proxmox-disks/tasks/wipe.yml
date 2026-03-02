@@ -1,0 +1,332 @@
+---
+# =============================================================================
+# proxmox-disks — Disk Wipe & Teardown
+# =============================================================================
+# Completely wipes a disk so it can be reinitialized from scratch. Removes:
+#   1. Proxmox storage pool registration (pvesm) — LVM-thin, dir, and ZFS pools
+#   2. ZFS pool export (if disk is part of a zpool)
+#   3. LVM logical volumes, volume groups, and physical volumes
+#   4. Filesystem mounts and fstab entries
+#   5. Partition tables and filesystem signatures (wipefs)
+#
+# Expected variable: wipe_disk (string, e.g., "/dev/sda")
+#
+# SAFETY: The OS disk is blocked from wiping at the dispatcher level.
+#         This file should never be called for the OS disk.
+#
+# NOTE: All shell tasks export PATH to include /usr/sbin where Proxmox/LVM
+# admin tools live. Ansible's become + shell may not inherit the login PATH.
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Step 1: Identify what's on this disk (LVM, filesystem, partitions)
+# -------------------------------------------------------------------------
+- name: "Wipe | Gather LVM volume groups on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      DISK="{{ wipe_disk }}"
+      pvs --noheadings -o pv_name,vg_name 2>/dev/null \
+        | grep -E "^\s*${DISK}[p]?[0-9]*\s" \
+        | awk '{print $2}' | sort -u || true
+    executable: /bin/bash
+  register: wipe_vg_list
+  changed_when: false
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Gather mount points on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      DISK="{{ wipe_disk }}"
+      lsblk -npo NAME,MOUNTPOINT "$DISK" 2>/dev/null \
+        | awk '$2 != "" {print $1 ":" $2}' || true
+    executable: /bin/bash
+  register: wipe_mount_list
+  changed_when: false
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | List partitions on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      lsblk -npo NAME "{{ wipe_disk }}" 2>/dev/null | tail -n +2 || true
+    executable: /bin/bash
+  register: wipe_partitions
+  changed_when: false
+  tags: [proxmox-disks, wipe]
+
+# Check if this disk is part of a ZFS pool
+- name: "Wipe | Check if {{ wipe_disk }} is part of a ZFS pool"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      if command -v zpool &>/dev/null; then
+        # Extract the basename for matching in zpool status output
+        DISK_BASE=$(basename "{{ wipe_disk }}")
+        # Find any pool containing this disk (whole disk or partition)
+        zpool status 2>/dev/null \
+          | awk -v disk="$DISK_BASE" '/pool:/{pool=$2} $0 ~ disk{print pool}' \
+          | head -1 || true
+      fi
+    executable: /bin/bash
+  register: wipe_zfs_pool
+  changed_when: false
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 2: Remove Proxmox storage pool registrations
+# -------------------------------------------------------------------------
+# Check if any VGs on this disk are registered as Proxmox lvmthin pools
+- name: "Wipe | Check Proxmox storage for VG"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      VG="{{ wipe_vg }}"
+      pvesm status 2>/dev/null | grep -qP "^\s*${VG}\s" && echo "$VG" || true
+    executable: /bin/bash
+  loop: "{{ wipe_vg_list.stdout_lines | default([]) | select() | list }}"
+  loop_control:
+    loop_var: wipe_vg
+    label: "check pvesm for {{ wipe_vg }}"
+  register: wipe_pvesm_vg_checks
+  changed_when: false
+  when: wipe_vg_list.stdout | trim != ""
+  tags: [proxmox-disks, wipe]
+
+# Check if any mount points on this disk back a Proxmox directory pool
+- name: "Wipe | Check Proxmox storage for mount-backed pools on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      MOUNT_PATH="{{ wipe_mount.split(':')[1] }}"
+      # Get all directory-type pool names and check their configured path
+      for pool_name in $(pvesm status 2>/dev/null | awk 'NR>1 && $2 == "dir" {print $1}'); do
+        pool_path=$(pvesm config "$pool_name" 2>/dev/null | awk '/^\s*path\s/ {print $2}' || true)
+        if [ "$pool_path" = "$MOUNT_PATH" ]; then
+          echo "$pool_name"
+        fi
+      done
+    executable: /bin/bash
+  loop: "{{ wipe_mount_list.stdout_lines | default([]) | select() | list }}"
+  loop_control:
+    loop_var: wipe_mount
+    label: "check pvesm for {{ wipe_mount.split(':')[1] | default('none') }}"
+  register: wipe_pvesm_dir_checks
+  changed_when: false
+  when: wipe_mount_list.stdout | trim != ""
+  tags: [proxmox-disks, wipe]
+
+# Check if the ZFS pool name (if any) is registered in Proxmox
+- name: "Wipe | Check Proxmox storage for ZFS pool on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      POOL="{{ wipe_zfs_pool.stdout | trim }}"
+      pvesm status 2>/dev/null | grep -qP "^\s*${POOL}\s" && echo "$POOL" || true
+    executable: /bin/bash
+  register: wipe_pvesm_zfs_check
+  changed_when: false
+  when: wipe_zfs_pool.stdout | default('') | trim != ""
+  tags: [proxmox-disks, wipe]
+
+# Build a flat list of all Proxmox pool names to remove (LVM, dir, AND ZFS)
+- name: "Wipe | Build list of Proxmox pools to remove for {{ wipe_disk }}"
+  ansible.builtin.set_fact:
+    _wipe_pools_to_remove: >-
+      {{
+        (wipe_pvesm_vg_checks.results | default([])
+          | selectattr('stdout', 'defined')
+          | map(attribute='stdout')
+          | map('trim')
+          | select()
+          | list)
+        +
+        (wipe_pvesm_dir_checks.results | default([])
+          | selectattr('stdout', 'defined')
+          | map(attribute='stdout')
+          | map('trim')
+          | select()
+          | list)
+        +
+        ([wipe_pvesm_zfs_check.stdout | default('') | trim]
+          | select()
+          | list)
+      }}
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Remove Proxmox storage pool registrations for {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      pvesm remove {{ wipe_pool }}
+    executable: /bin/bash
+  loop: "{{ _wipe_pools_to_remove | default([]) }}"
+  loop_control:
+    loop_var: wipe_pool
+    label: "pvesm remove {{ wipe_pool }}"
+  when: _wipe_pools_to_remove | default([]) | length > 0
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 3: Unmount filesystems and remove fstab entries
+# -------------------------------------------------------------------------
+# Two-phase unmount:
+#   a) Remove fstab entry via ansible.posix.mount (state=absent removes
+#      fstab entry AND unmounts if possible)
+#   b) Force unmount with umount -l (lazy) as fallback if still mounted
+#      (handles "device busy" from open file handles)
+- name: "Wipe | Remove fstab entries and unmount filesystems on {{ wipe_disk }}"
+  ansible.posix.mount:
+    path: "{{ wipe_mountpoint.split(':')[1] }}"
+    state: absent
+  loop: "{{ wipe_mount_list.stdout_lines | default([]) | select() | list }}"
+  loop_control:
+    loop_var: wipe_mountpoint
+    label: "unmount {{ wipe_mountpoint.split(':')[1] | default('none') }}"
+  when: wipe_mount_list.stdout | trim != ""
+  failed_when: false
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Force lazy unmount if still mounted (handles busy devices)"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      MOUNT_PATH="{{ wipe_mountpoint_force.split(':')[1] }}"
+      if mountpoint -q "$MOUNT_PATH" 2>/dev/null; then
+        # Kill any processes using the mount point
+        fuser -km "$MOUNT_PATH" 2>/dev/null || true
+        sleep 1
+        # Lazy unmount as last resort
+        umount -l "$MOUNT_PATH" 2>/dev/null || true
+      fi
+    executable: /bin/bash
+  loop: "{{ wipe_mount_list.stdout_lines | default([]) | select() | list }}"
+  loop_control:
+    loop_var: wipe_mountpoint_force
+    label: "force unmount {{ wipe_mountpoint_force.split(':')[1] | default('none') }}"
+  when: wipe_mount_list.stdout | trim != ""
+  changed_when: true
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 4: Tear down LVM structures
+# -------------------------------------------------------------------------
+- name: "Wipe | Deactivate and remove LVM volume groups"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      VG="{{ wipe_vg_name }}"
+      vgchange -an "$VG" 2>/dev/null || true
+      vgremove -f "$VG" 2>/dev/null || true
+    executable: /bin/bash
+  loop: "{{ wipe_vg_list.stdout_lines | default([]) | select() | list }}"
+  loop_control:
+    loop_var: wipe_vg_name
+    label: "vgremove {{ wipe_vg_name }}"
+  when: wipe_vg_list.stdout | trim != ""
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Remove LVM physical volumes on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      DISK="{{ wipe_disk }}"
+      for dev in "$DISK" $(lsblk -npo NAME "$DISK" 2>/dev/null | tail -n +2); do
+        pvremove -f "$dev" 2>/dev/null || true
+      done
+    executable: /bin/bash
+  when: wipe_vg_list.stdout | trim != ""
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 4b: Export ZFS pool (if disk was part of one)
+# -------------------------------------------------------------------------
+# ZFS pool export must happen BEFORE wipefs, otherwise ZFS metadata gets
+# corrupted but not fully removed, potentially causing import issues later.
+- name: "Wipe | Export ZFS pool '{{ wipe_zfs_pool.stdout | trim }}' containing {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      POOL="{{ wipe_zfs_pool.stdout | trim }}"
+      # Force export — destroys the pool permanently (disk will be wiped next)
+      zpool destroy -f "$POOL" 2>/dev/null || zpool export -f "$POOL" 2>/dev/null || true
+    executable: /bin/bash
+  when: wipe_zfs_pool.stdout | default('') | trim != ""
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 5: Wipe all signatures (filesystem, partition table, LVM, ZFS, etc.)
+# -------------------------------------------------------------------------
+- name: "Wipe | Erase all signatures on {{ wipe_disk }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      DISK="{{ wipe_disk }}"
+      # Wipe signatures from all partitions first, then the disk itself
+      for part in $(lsblk -npo NAME "$DISK" 2>/dev/null | tail -n +2); do
+        wipefs -a "$part" 2>/dev/null || true
+      done
+      # Wipe the disk itself (partition table, any remaining signatures)
+      wipefs -a "$DISK"
+      # Zero out the first and last 1MB to ensure no residual metadata
+      dd if=/dev/zero of="$DISK" bs=1M count=1 2>/dev/null || true
+      DISK_SIZE=$(blockdev --getsize64 "$DISK")
+      LAST_MB=$(( DISK_SIZE / 1048576 - 1 ))
+      if [ "$LAST_MB" -gt 0 ]; then
+        dd if=/dev/zero of="$DISK" bs=1M seek="$LAST_MB" count=1 2>/dev/null || true
+      fi
+    executable: /bin/bash
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Inform kernel of partition table changes and settle"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      partprobe "{{ wipe_disk }}" || true
+      udevadm settle
+    executable: /bin/bash
+  changed_when: true
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Step 6: Confirm wipe
+# -------------------------------------------------------------------------
+- name: "Wipe | Verify {{ wipe_disk }} is clean"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      DISK="{{ wipe_disk }}"
+      SIGS=$(wipefs -n "$DISK" 2>/dev/null | grep -c . || true)
+      PARTS=$(lsblk -npo NAME "$DISK" 2>/dev/null | wc -l)
+      echo "signatures=$SIGS partitions=$PARTS"
+      if [ "$SIGS" -eq 0 ] && [ "$PARTS" -le 1 ]; then
+        echo "CLEAN"
+      else
+        echo "WARNING: disk may not be fully clean"
+      fi
+    executable: /bin/bash
+  register: wipe_verify
+  changed_when: false
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Disk {{ wipe_disk }} wiped successfully"
+  ansible.builtin.debug:
+    msg: >-
+      Disk {{ wipe_disk }} has been wiped clean. {{ wipe_verify.stdout }}
+      It will be discovered as uninitialized and configured in the next phase.
+  tags: [proxmox-disks, wipe]

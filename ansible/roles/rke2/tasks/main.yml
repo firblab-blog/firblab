@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# RKE2 Role - Main Entry Point
+# =============================================================================
+# Orchestrates RKE2 installation in stages:
+#   1. Prerequisites (all nodes)    — sysctl, kernel modules, packages, users
+#   2. Hardening configs (all)      — audit policy, encryption config, CIS sysctl
+#   3. Install server (servers)     — RKE2 server binary + config + start
+#   4. Install agent (agents)       — RKE2 agent binary + config + start
+#   5. Verify (all)                 — Health checks
+#
+# The deploy playbook controls execution order (serial plays).
+# This role is invoked with tags to run the appropriate stage.
+# =============================================================================
+
+- name: Run prerequisites
+  ansible.builtin.include_tasks: prerequisites.yml
+  tags:
+    - prerequisites
+    - rke2
+
+- name: Run STIG hardening configuration
+  ansible.builtin.include_tasks: hardening.yml
+  tags:
+    - hardening
+    - rke2
+
+- name: Install RKE2 server
+  ansible.builtin.include_tasks: install-server.yml
+  when: rke2_role == "server"
+  tags:
+    - install
+    - configure
+    - coredns
+    - rke2
+
+- name: Install RKE2 agent
+  ansible.builtin.include_tasks: install-agent.yml
+  when: rke2_role == "agent"
+  tags:
+    - install
+    - rke2
+
+- name: Run verification checks
+  ansible.builtin.include_tasks: verify.yml
+  tags:
+    - verify
+    - coredns
+    - rke2

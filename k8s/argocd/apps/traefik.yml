@@ -1,0 +1,39 @@
+# Traefik — Ingress controller (replaces ingress-nginx)
+# Wave 0: Helm chart install via multi-source (chart + Git values)
+# Config (default-headers Middleware) applied by traefik-config (wave 1)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  sources:
+    - repoURL: https://traefik.github.io/charts
+      chart: traefik
+      targetRevision: "35.*"
+      helm:
+        releaseName: traefik
+        valueFiles:
+          - $values/k8s/platform/traefik/helm/values.yaml
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # Traefik needs NET_BIND_SERVICE capability (violates restricted)
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

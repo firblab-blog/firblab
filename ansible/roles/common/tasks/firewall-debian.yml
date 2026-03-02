@@ -1,0 +1,178 @@
+---
+# =============================================================================
+# UFW Firewall — Debian/Ubuntu
+# =============================================================================
+# IMPORTANT: This role does NOT use `ufw reset`. Resetting UFW wipes all rules
+# including the SSH allow rule that keeps the Ansible connection alive. If any
+# task fails between reset and re-adding SSH rules, the host is bricked (SSH
+# locked out, must recover via Proxmox console). Instead, rules are managed
+# idempotently — UFW's `community.general.ufw` module is safe to re-run.
+# =============================================================================
+
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Safety: SSH must be allowed BEFORE setting default deny or enabling UFW.
+# This ensures we never lose our Ansible connection.
+# ---------------------------------------------------------------------------
+- name: Allow SSH from admin networks (safety-first)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+    from_ip: "{{ item }}"
+    comment: "Allow SSH from {{ item }}"
+  loop: "{{ [management_network, lan_network] + firewall_extra_ssh_sources }}"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Loopback Interface
+# ---------------------------------------------------------------------------
+# Allow all traffic on loopback (required for local services, health checks,
+# and inter-process communication). CIS Benchmark 3.5.1.4.
+- name: Allow all incoming traffic on loopback interface
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: lo
+    comment: "Allow loopback incoming"
+  tags:
+    - firewall
+
+- name: Allow all outgoing traffic on loopback interface
+  community.general.ufw:
+    rule: allow
+    direction: out
+    interface: lo
+    comment: "Allow loopback outgoing"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Default Policies (set AFTER safety rules are in place)
+# ---------------------------------------------------------------------------
+- name: Set UFW default deny incoming
+  community.general.ufw:
+    direction: incoming
+    default: deny
+  tags:
+    - firewall
+
+- name: Set UFW default outgoing policy
+  community.general.ufw:
+    direction: outgoing
+    default: "{{ 'deny' if ufw_restrict_egress | default(false) | bool else 'allow' }}"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# UFW Egress Rules (when ufw_restrict_egress=true)
+# ---------------------------------------------------------------------------
+# On sensitive hosts (Security VLAN, Storage VLAN), restrict outbound traffic
+# to only necessary destinations. Set ufw_restrict_egress=true in group_vars
+# for these hosts.
+- name: Allow outbound DNS (egress-restricted hosts)
+  community.general.ufw:
+    rule: allow
+    direction: out
+    port: "53"
+    comment: "Allow DNS resolution"
+  when: ufw_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound NTP (egress-restricted hosts)
+  community.general.ufw:
+    rule: allow
+    direction: out
+    port: "123"
+    proto: udp
+    comment: "Allow NTP time sync"
+  when: ufw_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound HTTP/HTTPS for apt (egress-restricted hosts)
+  community.general.ufw:
+    rule: allow
+    direction: out
+    port: "{{ item }}"
+    proto: tcp
+    comment: "Allow apt and Docker registry updates"
+  loop:
+    - "80"
+    - "443"
+  when: ufw_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound to management network (egress-restricted hosts)
+  community.general.ufw:
+    rule: allow
+    direction: out
+    to_ip: "{{ management_network }}"
+    comment: "Allow traffic to management VLAN"
+  when: ufw_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+# ---------------------------------------------------------------------------
+# Application-Specific Port Rules
+# ---------------------------------------------------------------------------
+# Override firewall_additional_ports and firewall_additional_sources in
+# group_vars to open application ports (e.g., Vault 8200/8201).
+- name: Allow application-specific ports from allowed sources
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.0.port | string }}"
+    proto: "{{ item.0.proto }}"
+    from_ip: "{{ item.1 }}"
+    comment: "{{ item.0.comment | default('Application port') }}"
+  loop: "{{ firewall_additional_ports | product(firewall_additional_sources) | list }}"
+  loop_control:
+    label: "{{ item.0.comment | default(item.0.port) }} from {{ item.1 }}"
+  when: firewall_additional_ports | length > 0
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Docker FORWARD Chain Rules (Docker-in-LXC hosts only)
+# ---------------------------------------------------------------------------
+# Docker publishes ports via iptables NAT (PREROUTING DNAT → FORWARD chain).
+# UFW's DEFAULT_FORWARD_POLICY="DROP" blocks forwarded traffic, making
+# Docker-published ports unreachable from outside. `ufw route allow` rules
+# add FORWARD chain entries that permit traffic through to Docker containers.
+# Only enabled on Docker-in-LXC hosts (firewall_docker_forwarding=true).
+- name: Allow Docker-forwarded ports from allowed sources (FORWARD chain)
+  community.general.ufw:
+    rule: allow
+    route: true
+    port: "{{ item.0.port | string }}"
+    proto: "{{ item.0.proto }}"
+    from_ip: "{{ item.1 }}"
+    comment: "Docker FORWARD: {{ item.0.comment | default('Application port') }}"
+  loop: "{{ firewall_additional_ports | product(firewall_additional_sources) | list }}"
+  loop_control:
+    label: "Docker FORWARD: {{ item.0.comment | default(item.0.port) }} from {{ item.1 }}"
+  when:
+    - firewall_docker_forwarding | default(false) | bool
+    - firewall_additional_ports | length > 0
+  tags:
+    - firewall
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+    logging: "on"
+  tags:
+    - firewall

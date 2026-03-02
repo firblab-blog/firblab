@@ -1,0 +1,60 @@
+# =============================================================================
+# Traefik Static Configuration — Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: traefik-static.yml.j2
+#
+# Dynamic routing (service backends, middleware, TLS) lives in:
+#   templates/traefik-services.yml.j2 → /opt/firblab/traefik/dynamic/services.yml
+# Traefik watches that directory — route changes hot-reload without restart.
+# =============================================================================
+
+api:
+  dashboard: true
+  insecure: false
+
+log:
+  level: "INFO"
+  format: "json"
+
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  format: "json"
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+  traefik:
+    address: ":8888"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "{{ gateway_letsencrypt_email }}"
+      storage: "/letsencrypt/acme.json"
+      httpChallenge:
+        entryPoint: web
+
+providers:
+  file:
+    directory: "/etc/traefik/dynamic"
+    watch: true
+
+ping:
+  entryPoint: traefik
+
+metrics:
+  prometheus:
+    addEntryPointsLabels: true
+    addServicesLabels: true
+    entryPoint: traefik

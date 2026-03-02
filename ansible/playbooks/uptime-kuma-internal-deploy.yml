@@ -1,0 +1,194 @@
+---
+# =============================================================================
+# Uptime Kuma Internal Deployment Playbook
+# =============================================================================
+# Deploys the internal Uptime Kuma instance via Docker Compose on an LXC
+# container (lab-03, Management VLAN 10, 10.0.10.19). Monitors all
+# homelab services: Vault cluster, Proxmox nodes, and *.home.example-lab.org.
+#
+# Architecture:
+#   - This instance monitors INTERNAL services (Vault, Proxmox, homelab apps)
+#   - The Hetzner gateway Uptime Kuma monitors PUBLIC services (*.example-lab.org)
+#   - Traefik standalone proxies this at https://status.home.example-lab.org
+#   - Gotify notifications go to the Hetzner Gotify instance
+#
+# Prerequisites:
+#   - LXC provisioned by Terraform Layer 05 (uptime_kuma_internal module)
+#   - Vault secret seeded (username + password):
+#       vault kv put secret/services/uptime-kuma-internal \
+#         username=admin password=<strong-password>
+#   - Gotify token written by gateway-deploy.yml --tags gotify:
+#       (creates "Uptime Kuma (Internal)" app, patches secret with gotify_token)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/uptime-kuma-internal-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common        # Only baseline system config
+#   ansible-playbook ... --tags docker        # Only Docker installation
+#   ansible-playbook ... --tags uptime-kuma   # Only Uptime Kuma app deployment
+#   ansible-playbook ... --tags verify        # Only health checks
+#   ansible-playbook ... --tags configure-uk  # Configure monitors + Gotify notification
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Deploy Uptime Kuma container
+# ---------------------------------------------------------------------------
+- name: Deploy Uptime Kuma internal monitoring
+  hosts: uptime_kuma_internal
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Uptime Kuma Internal on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Uptime Kuma (Docker Compose: single container, SQLite)
+    - role: uptime-kuma
+      tags:
+        - uptime-kuma
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Uptime Kuma Internal Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ uptime_kuma_port | default(3001) }}"
+          - "DNS: https://status.home.example-lab.org"
+          - "Port: {{ uptime_kuma_port | default(3001) }}"
+          - "Image: {{ uptime_kuma_image }}"
+          - ""
+          - "Next steps:"
+          - "  1. Run Play 2 (configure-uk tag) to create admin account + monitors"
+          - "  docker compose -f /opt/uptime-kuma/docker-compose.yml ps"
+          - "  docker compose -f /opt/uptime-kuma/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify
+
+# ---------------------------------------------------------------------------
+# Play 2: Configure Uptime Kuma (admin account + monitors + Gotify)
+# ---------------------------------------------------------------------------
+# Reads credentials from Vault, creates the admin account on first run,
+# then calls configure-uptime-kuma.py to reconcile monitors + Gotify channel.
+#
+# Idempotent: configure-uptime-kuma.py uses upsert logic — re-running is safe.
+# To add a monitor: add to group_vars/uptime_kuma_internal.yml, re-run
+#   ansible-playbook ... --tags configure-uk
+# ---------------------------------------------------------------------------
+- name: Configure Uptime Kuma monitors
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tags: [configure-uk]
+
+  tasks:
+    - name: Read Uptime Kuma internal credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/uptime-kuma-internal
+      register: vault_uk_creds
+      changed_when: false
+      no_log: true
+
+    - name: Set Uptime Kuma credential facts
+      ansible.builtin.set_fact:
+        uk_username: "{{ (vault_uk_creds.stdout | from_json).data.data.username }}"
+        uk_password: "{{ (vault_uk_creds.stdout | from_json).data.data.password }}"
+        uk_gotify_token: "{{ (vault_uk_creds.stdout | from_json).data.data.gotify_token | default('') }}"
+      no_log: true
+
+    - name: Verify Gotify token is available for notifications
+      ansible.builtin.assert:
+        that: uk_gotify_token | length > 0
+        fail_msg: >
+          Gotify token not found in Vault (secret/services/uptime-kuma-internal,
+          key: gotify_token). Run gateway-deploy.yml --tags gotify first to
+          create the "Uptime Kuma (Internal)" app and store the token.
+
+    # -----------------------------------------------------------------------
+    # Ensure python3-pip and python-socketio are present on the LXC.
+    # The configure script uses raw Socket.IO — no lucasheld collection needed.
+    # -----------------------------------------------------------------------
+    - name: Ensure python3-pip is installed on LXC
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+      delegate_to: "uptime-kuma-internal"
+      become: true
+
+    - name: Ensure python-socketio is installed on LXC
+      ansible.builtin.pip:
+        name: "python-socketio[client]"
+        state: present
+        extra_args: "--break-system-packages"
+      delegate_to: "uptime-kuma-internal"
+      become: true
+
+    # -----------------------------------------------------------------------
+    # Reconcile monitors: creates missing, deletes removed, skips matching.
+    # First-run admin account setup is handled inside configure-uptime-kuma.py
+    # via the Socket.IO "setup" event (idempotent — safe on re-runs).
+    # Reads monitor list from group_vars/uptime_kuma_internal.yml.
+    # -----------------------------------------------------------------------
+    - name: Configure Uptime Kuma (first-run setup + Gotify notification + all monitors)
+      ansible.builtin.script:
+        cmd: "files/configure-uptime-kuma.py"
+        executable: python3
+      environment:
+        UK_URL: "http://localhost:3001"
+        UK_USERNAME: "{{ uk_username }}"
+        UK_PASSWORD: "{{ uk_password }}"
+        UK_GOTIFY_TOKEN: "{{ uk_gotify_token }}"
+        GOTIFY_URL: "https://gotify.example-lab.org"
+        UK_MONITORS_JSON: "{{ hostvars['uptime-kuma-internal']['uptime_kuma_monitors'] | to_json }}"
+      delegate_to: "uptime-kuma-internal"
+      register: uk_result
+      changed_when: (uk_result.stdout | from_json).changed | default(false)
+      failed_when: >
+        uk_result.rc != 0 or
+        ((uk_result.stdout | from_json).failed | default(false))
+      no_log: false
+
+    - name: Uptime Kuma configuration summary
+      ansible.builtin.debug:
+        msg: "{{ uk_result.stdout | from_json }}"

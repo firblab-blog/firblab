@@ -1,0 +1,48 @@
+# =============================================================================
+# Ghost Docker Compose
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  ghost:
+    image: {{ ghost_image }}
+    container_name: ghost
+    restart: unless-stopped
+    ports:
+      - "{{ ghost_port | default('2368') }}:2368"
+    env_file:
+      - /opt/ghost/config/ghost.env
+    volumes:
+      - /opt/ghost/data:/var/lib/ghost/content
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ghost-network
+
+  mysql:
+    image: {{ ghost_mysql_image }}
+    container_name: ghost-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "{{ ghost_mysql_root_password }}"
+      MYSQL_DATABASE: "{{ ghost_db_name | default('ghost') }}"
+      MYSQL_USER: "{{ ghost_db_user | default('ghost') }}"
+      MYSQL_PASSWORD: "{{ ghost_db_password }}"
+    volumes:
+      - /opt/ghost/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p{{ ghost_mysql_root_password }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ghost-network
+
+networks:
+  ghost-network:
+    driver: bridge

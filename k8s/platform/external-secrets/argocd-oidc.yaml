@@ -1,0 +1,40 @@
+# ExternalSecret: ArgoCD OIDC credentials from Vault
+# Syncs Vault path secret/k8s/argocd-oidc → K8s Secret argocd-oidc
+# in the argocd namespace. Referenced by argocd-cm ConfigMap via
+# ArgoCD's native $argocd-oidc:client_secret syntax.
+#
+# IMPORTANT: The target secret MUST have the label
+#   app.kubernetes.io/part-of: argocd
+# or ArgoCD will not read it for $secret:key references.
+#
+# Created by Terraform Layer 07-authentik-config.
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: argocd-oidc
+  namespace: argocd
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: argocd-oidc
+    creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/part-of: argocd
+      data:
+        client_id: "{{ .client_id }}"
+        client_secret: "{{ .client_secret }}"
+  data:
+    - secretKey: client_id
+      remoteRef:
+        key: secret/k8s/argocd-oidc
+        property: client_id
+    - secretKey: client_secret
+      remoteRef:
+        key: secret/k8s/argocd-oidc
+        property: client_secret

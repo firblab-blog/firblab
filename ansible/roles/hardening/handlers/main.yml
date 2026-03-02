@@ -1,0 +1,14 @@
+---
+# =============================================================================
+# Hardening Role Handlers
+# =============================================================================
+
+- name: Restart auditd
+  ansible.builtin.command:
+    cmd: service auditd restart
+  # auditd does not support systemctl restart; use service command
+
+- name: Restart sshd
+  ansible.builtin.systemd:
+    name: "{{ ssh_service_name }}"
+    state: restarted

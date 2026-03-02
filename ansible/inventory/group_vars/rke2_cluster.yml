@@ -1,0 +1,191 @@
+---
+# =============================================================================
+# RKE2 Cluster Configuration
+# =============================================================================
+# DISA STIG + CIS Kubernetes Benchmark compliant RKE2 deployment.
+# RKE2 is the ONLY Kubernetes distribution with an official DISA STIG
+# (NIST NCP Checklist 1040).
+#
+# All nodes deployed to Services VLAN 20 (10.0.20.0/24).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# RKE2 Version (pinned)
+# ---------------------------------------------------------------------------
+# renovate: datasource=github-releases depName=rancher/rke2 versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)\+rke2r(?<build>\d+)$
+rke2_version: "v1.32.11+rke2r3"
+
+# ---------------------------------------------------------------------------
+# CIS Hardening Profile
+# ---------------------------------------------------------------------------
+# This is the key RKE2 advantage — automatically applies CIS Benchmark
+# controls including:
+#   - Pod Security Standards (restricted mode)
+#   - API server hardening flags
+#   - etcd encryption
+#   - Kubelet hardening
+rke2_profile: "cis"
+
+# ---------------------------------------------------------------------------
+# Cluster Network
+# ---------------------------------------------------------------------------
+rke2_cluster_cidr: "10.42.0.0/16"
+rke2_service_cidr: "10.43.0.0/16"
+rke2_cluster_dns: "10.43.0.10"
+
+# ---------------------------------------------------------------------------
+# Cluster Bootstrap
+# ---------------------------------------------------------------------------
+# First server (cluster init node)
+rke2_init_node: "rke2-server-1"
+rke2_init_node_ip: "10.0.20.40"
+
+# Registration endpoint (first server; VIP via kube-vip later)
+rke2_server_url: "https://10.0.20.40:9345"
+
+# TLS SANs for API server cert
+rke2_tls_san:
+  - "10.0.20.40"
+  - "10.0.20.41"
+  - "10.0.20.42"
+  - "rke2.example-lab.local"
+
+# ---------------------------------------------------------------------------
+# CNI Configuration
+# ---------------------------------------------------------------------------
+# Canal (Calico + Flannel) — RKE2 default, provides NetworkPolicy support
+rke2_cni: "canal"
+
+# ---------------------------------------------------------------------------
+# Disabled Built-in Components
+# ---------------------------------------------------------------------------
+# Replaced: rke2-ingress-nginx → Traefik (custom hardened)
+# Replaced: rke2-metrics-server → kube-prometheus-stack
+rke2_disable:
+  - "rke2-ingress-nginx"
+  - "rke2-metrics-server"
+
+# ---------------------------------------------------------------------------
+# API Server Extra Args (additive to profile: cis)
+# ---------------------------------------------------------------------------
+rke2_kube_apiserver_args:
+  - "audit-log-path=/var/lib/rancher/rke2/server/logs/audit.log"
+  - "audit-policy-file=/etc/rancher/rke2/audit-policy.yaml"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  - "encryption-provider-config=/etc/rancher/rke2/encryption-config.yaml"
+  - "tls-min-version=VersionTLS12"
+
+# ---------------------------------------------------------------------------
+# Kubelet Args (additive to profile: cis)
+# ---------------------------------------------------------------------------
+rke2_kubelet_args:
+  - "streaming-connection-idle-timeout=5m"
+  - "make-iptables-util-chains=true"
+
+# ---------------------------------------------------------------------------
+# Controller Manager Args
+# ---------------------------------------------------------------------------
+rke2_kube_controller_manager_args:
+  - "terminated-pod-gc-threshold=10"
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zones
+# ---------------------------------------------------------------------------
+# K8s pods don't see /etc/hosts (Ansible's internal_dns_entries in all.yml).
+# They rely exclusively on CoreDNS, which forwards to gw-01 (10.0.20.1)
+# with a 30s cache. When the gateway is slow, CoreDNS returns NXDOMAIN —
+# breaking OIDC token exchange (Grafana, ArgoCD) and Git sync.
+#
+# This adds a dedicated CoreDNS server block for home.example-lab.org with a 5-min
+# cache and explicit forwarding to gw-01 (primary) + Cloudflare (fallback).
+# Deployed as a HelmChartConfig via the RKE2 server manifests directory.
+rke2_coredns_custom_zones:
+  - zone: "home.example-lab.org"
+    cache_ttl: 300
+    upstreams:
+      - "10.0.20.1"   # gw-01 Services VLAN gateway (internal DNS)
+      - "1.1.1.1"        # Cloudflare (authoritative fallback for example-lab.org)
+    forward_policy: "sequential"
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+rke2_firewall_ports:
+  - { port: "9345", proto: tcp, comment: "RKE2 supervisor API (node registration)" }
+  - { port: "6443", proto: tcp, comment: "Kubernetes API server" }
+  - { port: "10250", proto: tcp, comment: "kubelet metrics" }
+  - { port: "2379:2380", proto: tcp, comment: "etcd (servers only)" }
+  - { port: "8472", proto: udp, comment: "Canal/Flannel VXLAN" }
+  - { port: "4789", proto: udp, comment: "Calico VXLAN" }
+  - { port: "9099", proto: tcp, comment: "Calico health checks" }
+  - { port: "10010", proto: tcp, comment: "containerd metrics" }
+  - { port: "9100", proto: tcp, comment: "node_exporter" }
+  - { port: "30000:32767", proto: tcp, comment: "NodePort range" }
+
+rke2_firewall_sources:
+  - "10.0.20.0/24"   # Services VLAN (cluster peers)
+  - "10.0.10.0/24"   # Management VLAN (admin access)
+  - "10.0.4.0/24"    # Default LAN (workstation access)
+  - "10.0.30.0/24"   # DMZ VLAN — WireGuard tunnel traffic (NATted from 10.0.30.2)
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ rke2_firewall_ports }}"
+firewall_additional_sources: "{{ rke2_firewall_sources }}"
+
+# ---------------------------------------------------------------------------
+# Kernel Parameters — RKE2 CIS profile requires these pre-set
+# ---------------------------------------------------------------------------
+rke2_sysctl:
+  vm.panic_on_oom: 0
+  vm.overcommit_memory: 1
+  kernel.panic: 10
+  kernel.panic_on_oops: 1
+  net.ipv4.ip_forward: 1
+  net.ipv6.conf.all.forwarding: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+
+# ---------------------------------------------------------------------------
+# Required Kernel Modules
+# ---------------------------------------------------------------------------
+rke2_kernel_modules:
+  - br_netfilter
+  - overlay
+  - ip_tables
+  - ip_vs
+  - ip_vs_rr
+  - ip_vs_wrr
+  - ip_vs_sh
+  - nf_conntrack
+  - iscsi_tcp  # Longhorn
+
+# ---------------------------------------------------------------------------
+# Longhorn Prerequisites
+# ---------------------------------------------------------------------------
+rke2_longhorn_packages:
+  - open-iscsi
+  - nfs-common
+  - util-linux
+
+# ---------------------------------------------------------------------------
+# etcd User — required by CIS profile
+# ---------------------------------------------------------------------------
+rke2_create_etcd_user: true
+
+# ---------------------------------------------------------------------------
+# Security / Monitoring
+# ---------------------------------------------------------------------------
+wazuh_enabled: false  # Enable after Wazuh Manager is deployed
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+# node_exporter and Promtail are disabled on RKE2 nodes — monitoring is
+# handled entirely by kube-prometheus-stack (node_exporter DaemonSet on
+# host network; port 9100 would conflict with a separately installed binary)
+# and by Loki's Kubernetes log collection pipeline.
+monitoring_host_group: "rke2-cluster"
+monitoring_node_exporter_enabled: false
+monitoring_promtail_enabled: false

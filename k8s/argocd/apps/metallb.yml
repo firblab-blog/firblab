@@ -1,0 +1,32 @@
+# MetalLB — L2 LoadBalancer IP provider for VLAN 20 (Services)
+# Wave 0: Helm chart install (controller + speaker)
+# Config (IPAddressPool + L2Advertisement) applied by metallb-config (wave 1)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://metallb.github.io/metallb
+    chart: metallb
+    targetRevision: "0.*"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # MetalLB speaker needs hostNetwork, NET_RAW, SYS_ADMIN for L2 ARP
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

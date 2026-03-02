@@ -1,0 +1,24 @@
+# =============================================================================
+# Environment: gitlab-config (Layer 03-gitlab-config)
+# =============================================================================
+# This layer does NOT need a tfvars file for normal operation.
+# The Vault provider reads from environment variables:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#
+# The GitLab PAT is read from Vault at secret/services/gitlab/admin.
+#
+# Normal usage:
+#   cd terraform/layers/03-gitlab-config
+#   terraform init
+#   terraform apply
+#
+# This file is only needed for emergency fallback when Vault is unreachable:
+#   terraform apply -var-file=../../environments/gitlab-config.tfvars
+# =============================================================================
+
+# Emergency fallback — only use if Vault is down
+# use_vault     = false
+# gitlab_token  = "glpat-xxxxxxxxxxxxxxxxxxxx"
+# gitlab_base_url = "http://10.0.10.50"

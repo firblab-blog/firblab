@@ -1,0 +1,36 @@
+# =============================================================================
+# Dionaea Malware Capture Honeypot Configuration
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Low-interaction honeypot that emulates SMB, SIP, HTTP/HTTPS services.
+# Captures malware binaries in /opt/dionaea/var/lib/dionaea/binaries/.
+# JSON logs written to /opt/dionaea/var/log/dionaea.json for Alloy shipping.
+# =============================================================================
+
+[dionaea]
+download.dir=/opt/dionaea/var/lib/dionaea/binaries/
+bistreams.dir=/opt/dionaea/var/lib/dionaea/bistreams/
+download.limit=10485760
+
+[logging]
+default.filename=/opt/dionaea/var/log/dionaea.log
+default.levels=warning,error,critical
+default.domains=*
+
+[module.python]
+imports=dionaea.log.json,dionaea.smb,dionaea.sip,dionaea.http
+
+[module.log.json]
+filename=/opt/dionaea/var/log/dionaea.json
+
+[listen.smb]
+port={{ honeypot_dionaea_smb_port }}
+
+[listen.sip]
+port={{ honeypot_dionaea_sip_port }}
+
+[listen.http]
+port={{ honeypot_dionaea_http_port }}
+
+[listen.https]
+port={{ honeypot_dionaea_https_port }}

@@ -1,0 +1,470 @@
+---
+# =============================================================================
+# WireGuard Client Deployment Playbook
+# =============================================================================
+# Configures the DMZ LXC (10.0.30.2) as a WireGuard client that connects
+# to the Hetzner gateway server, establishing the site-to-site tunnel.
+#
+# The WireGuard peer config is downloaded from Hetzner Object Storage (S3),
+# where it was uploaded during Hetzner cloud-init (Phase 8.5 in user-data.sh).
+# This breaks the chicken-and-egg problem: Vault is unreachable from Hetzner
+# until the tunnel is up, but the peer config must exist before the tunnel.
+#
+# Traffic flow after deployment:
+#   Internet -> Hetzner VPS (Traefik HTTPS termination)
+#     -> WireGuard tunnel (10.8.0.1 -> 10.8.0.2, UDP 51820)
+#     -> DMZ LXC (10.0.30.2, VLAN 30) -- NAT/masquerade -> eth0
+#     -> gw-01 inter-VLAN routing (DMZ -> Services, port-filtered)
+#     -> Service hosts on VLAN 20 (Ghost, Mealie, FoundryVTT)
+#
+# Prerequisites:
+#   - WireGuard LXC provisioned by Terraform Layer 05
+#   - LXC bootstrapped: ansible-playbook lxc-bootstrap.yml --limit wireguard -e "ansible_user=root"
+#   - Hetzner gateway deployed with S3 peer config upload (Layer 06)
+#   - S3 credentials available (Vault or extra-vars)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/wireguard-deploy.yml
+#
+# Manual override (without Vault — provide S3 + server details directly):
+#   ansible-playbook -i inventory/hosts.yml playbooks/wireguard-deploy.yml \
+#     -e wg_s3_access_key="..." -e wg_s3_secret_key="..." \
+#     -e wg_s3_endpoint="nbg1.your-objectstorage.com" \
+#     -e wg_s3_bucket="firblab-wireguard" \
+#     -e wg_hetzner_endpoint="203.0.113.10:51820"
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags firewall    # Only firewall rules
+#   ansible-playbook ... --tags wireguard   # Only WireGuard installation + config
+#   ansible-playbook ... --tags verify      # Only tunnel verification
+# =============================================================================
+
+- name: Deploy WireGuard client (site-to-site tunnel to Hetzner)
+  hosts: wireguard
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Read S3 credentials from Vault
+    # -----------------------------------------------------------------
+    - name: Try reading Hetzner S3 credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: wg_s3_access_key is not defined
+      tags:
+        - always
+
+    - name: Set S3 credentials from Vault
+      ansible.builtin.set_fact:
+        wg_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        wg_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        wg_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+      when:
+        - wg_s3_access_key is not defined
+        - vault_hetzner_read.rc is defined
+        - vault_hetzner_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate S3 credentials are available
+      ansible.builtin.assert:
+        that:
+          - wg_s3_access_key is defined
+          - wg_s3_access_key | length > 0
+          - wg_s3_secret_key is defined
+          - wg_s3_bucket is defined
+          - wg_s3_endpoint is defined
+        fail_msg: >
+          Hetzner S3 credentials not available. Either set Vault env vars:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret infra/hetzner
+          Or provide directly: -e wg_s3_access_key=... -e wg_s3_secret_key=...
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying WireGuard client on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  vars:
+    # WireGuard peer name (must match Hetzner server's homelab_peer_name)
+    wg_peer_name: "peer1"
+    # WireGuard interface
+    wg_interface: wg0
+    # Hetzner S3 bucket name (Terraform-managed in Layer 06, not a secret)
+    wg_s3_bucket: "firblab-wireguard"
+    # Hetzner server endpoint (public IP:port) — auto-detected from peer config
+    # Override with -e wg_hetzner_endpoint="1.2.3.4:51820" if needed
+    wg_hetzner_endpoint: ""
+    # WireGuard tunnel subnet (only tunnel traffic routed through WG)
+    wg_allowed_ips: "10.8.0.0/24"
+    # NAT/masquerade interface (LXC's main network interface)
+    wg_nat_interface: eth0
+    # PersistentKeepalive (seconds) — LXC initiates, keeps NAT mapping alive
+    wg_keepalive: 25
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+  tasks:
+    # =================================================================
+    # WireGuard Installation
+    # =================================================================
+    - name: Install WireGuard and dependencies
+      ansible.builtin.apt:
+        name:
+          - wireguard
+          - wireguard-tools
+          - iptables
+          - curl
+          - unzip
+        state: present
+        update_cache: true
+      tags:
+        - wireguard
+
+    # awscli is not available via apt on Ubuntu 24.04 — install AWS CLI v2 from official bundle
+    - name: Check if AWS CLI is installed
+      ansible.builtin.command:
+        cmd: aws --version
+      register: aws_cli_check
+      changed_when: false
+      failed_when: false
+      tags:
+        - wireguard
+
+    - name: Install AWS CLI v2
+      when: aws_cli_check.rc != 0
+      block:
+        - name: Download AWS CLI v2 installer
+          ansible.builtin.get_url:
+            url: "https://awscli.amazonaws.com/awscli-exe-linux-{{ 'x86_64' if ansible_architecture == 'x86_64' else 'aarch64' }}.zip"
+            dest: /tmp/awscliv2.zip
+            mode: "0644"
+
+        - name: Extract AWS CLI installer
+          ansible.builtin.unarchive:
+            src: /tmp/awscliv2.zip
+            dest: /tmp
+            remote_src: true
+
+        - name: Run AWS CLI installer
+          ansible.builtin.command:
+            cmd: /tmp/aws/install
+            creates: /usr/local/bin/aws
+
+        - name: Clean up AWS CLI installer
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscliv2.zip
+            - /tmp/aws
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Download peer config from Hetzner S3
+    # =================================================================
+    - name: Create WireGuard config directory
+      ansible.builtin.file:
+        path: /etc/wireguard
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      tags:
+        - wireguard
+
+    - name: Create AWS credentials directory
+      ansible.builtin.file:
+        path: /root/.aws
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      tags:
+        - wireguard
+
+    - name: Configure AWS CLI for Hetzner S3
+      ansible.builtin.copy:
+        dest: /root/.aws/credentials
+        content: |
+          [default]
+          aws_access_key_id = {{ wg_s3_access_key }}
+          aws_secret_access_key = {{ wg_s3_secret_key }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      tags:
+        - wireguard
+
+    - name: Configure AWS CLI region
+      ansible.builtin.copy:
+        dest: /root/.aws/config
+        content: |
+          [default]
+          region = eu-central-1
+        owner: root
+        group: root
+        mode: "0600"
+      tags:
+        - wireguard
+
+    - name: Download peer config from Hetzner S3
+      ansible.builtin.command:
+        cmd: >-
+          aws s3 cp
+          s3://{{ wg_s3_bucket }}/peers/{{ wg_peer_name }}.conf
+          /tmp/{{ wg_peer_name }}.conf
+          --endpoint-url https://{{ wg_s3_endpoint }}
+      register: s3_download
+      changed_when: true
+      tags:
+        - wireguard
+
+    - name: Download server public key from Hetzner S3
+      ansible.builtin.command:
+        cmd: >-
+          aws s3 cp
+          s3://{{ wg_s3_bucket }}/peers/server_public_key
+          /tmp/server_public_key
+          --endpoint-url https://{{ wg_s3_endpoint }}
+      register: s3_server_key
+      changed_when: true
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Parse peer config and build WireGuard interface config
+    # =================================================================
+    - name: Read downloaded peer config
+      ansible.builtin.slurp:
+        src: /tmp/{{ wg_peer_name }}.conf
+      register: peer_config_raw
+      tags:
+        - wireguard
+
+    - name: Parse peer config values
+      ansible.builtin.set_fact:
+        wg_private_key: "{{ (peer_config_raw.content | b64decode) | regex_search('PrivateKey\\s*=\\s*(.+)', '\\1') | first | trim }}"
+        wg_peer_address: "{{ (peer_config_raw.content | b64decode) | regex_search('Address\\s*=\\s*(.+)', '\\1') | first | trim }}"
+        wg_server_public_key: "{{ (peer_config_raw.content | b64decode) | regex_search('PublicKey\\s*=\\s*(.+)', '\\1') | first | trim }}"
+        wg_preshared_key: "{{ (peer_config_raw.content | b64decode) | regex_search('PresharedKey\\s*=\\s*(.+)', '\\1') | first | trim }}"
+        wg_endpoint_from_config: "{{ (peer_config_raw.content | b64decode) | regex_search('Endpoint\\s*=\\s*(.+)', '\\1') | first | trim }}"
+      no_log: true
+      tags:
+        - wireguard
+
+    - name: Determine Hetzner endpoint
+      ansible.builtin.set_fact:
+        wg_final_endpoint: "{{ wg_hetzner_endpoint if (wg_hetzner_endpoint | length > 0) else wg_endpoint_from_config }}"
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Enable IP forwarding (required for NAT/masquerade)
+    # =================================================================
+    - name: Enable IPv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Write WireGuard config
+    # =================================================================
+    # The config is intentionally different from the downloaded peer config:
+    #   - Address: uses /32 (point-to-point tunnel, not /24)
+    #   - AllowedIPs: only 10.8.0.0/24 (tunnel subnet — NOT a full tunnel)
+    #   - PostUp/PostDown: NAT/masquerade so return traffic works
+    #   - PersistentKeepalive: LXC initiates, keeps NAT mapping alive
+    - name: Write WireGuard config
+      ansible.builtin.copy:
+        dest: /etc/wireguard/{{ wg_interface }}.conf
+        content: |
+          # =============================================================================
+          # WireGuard Client — Site-to-Site Tunnel to Hetzner Gateway
+          # =============================================================================
+          # Managed by Ansible (wireguard-deploy.yml) — do not edit manually.
+          # Peer config source: Hetzner S3 ({{ wg_s3_bucket }}/peers/{{ wg_peer_name }}.conf)
+          #
+          # Traffic routing:
+          #   AllowedIPs = 10.8.0.0/24 → only tunnel-subnet traffic through WG
+          #   Default route → 10.0.30.1 (DMZ gateway) for all other traffic
+          #   NAT/masquerade → service hosts see source IP 10.0.30.2
+          # =============================================================================
+
+          [Interface]
+          PrivateKey = {{ wg_private_key }}
+          Address = {{ wg_peer_address | regex_replace('/\\d+$', '/32') }}
+          PostUp = iptables -t nat -A POSTROUTING -o {{ wg_nat_interface }} -j MASQUERADE
+          PostDown = iptables -t nat -D POSTROUTING -o {{ wg_nat_interface }} -j MASQUERADE
+
+          [Peer]
+          PublicKey = {{ wg_server_public_key }}
+          PresharedKey = {{ wg_preshared_key }}
+          Endpoint = {{ wg_final_endpoint }}
+          AllowedIPs = {{ wg_allowed_ips }}
+          PersistentKeepalive = {{ wg_keepalive }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: restart wireguard
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Clean up downloaded config (contains private key)
+    # =================================================================
+    - name: Remove downloaded peer config (contains private key)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/{{ wg_peer_name }}.conf
+        - /tmp/server_public_key
+      tags:
+        - wireguard
+
+    # =================================================================
+    # Clean up AWS credentials (no longer needed)
+    # =================================================================
+    - name: Remove AWS credentials
+      ansible.builtin.file:
+        path: /root/.aws
+        state: absent
+      tags:
+        - wireguard
+
+    # =================================================================
+    # UFW: Allow forwarded (routed) traffic
+    # =================================================================
+    # WireGuard LXC acts as a NAT gateway: packets arrive on wg0 and get
+    # forwarded to eth0 (with masquerade). UFW defaults to deny routed
+    # traffic, which drops all forwarded packets. Without this, the tunnel
+    # handshakes but no traffic actually passes through.
+    - name: Allow routed traffic through UFW
+      ansible.builtin.command:
+        cmd: ufw default allow routed
+      register: ufw_routed
+      changed_when: "'Default routed policy changed' in ufw_routed.stdout"
+      tags:
+        - wireguard
+        - firewall
+
+    # =================================================================
+    # Enable and start WireGuard
+    # =================================================================
+    - name: Enable and start WireGuard interface
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wg_interface }}"
+        state: started
+        enabled: true
+      tags:
+        - wireguard
+
+  handlers:
+    - name: restart wireguard
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wg_interface }}"
+        state: restarted
+      tags:
+        - wireguard
+
+  post_tasks:
+    # =================================================================
+    # Verification
+    # =================================================================
+    - name: Wait for WireGuard handshake
+      ansible.builtin.command:
+        cmd: wg show {{ wg_interface }}
+      register: wg_show
+      retries: 12
+      delay: 5
+      until: "'latest handshake' in wg_show.stdout"
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display WireGuard tunnel status
+      ansible.builtin.debug:
+        msg: "{{ wg_show.stdout_lines }}"
+      tags:
+        - verify
+
+    - name: Test tunnel connectivity (ping Hetzner WireGuard IP)
+      ansible.builtin.command:
+        cmd: ping -c 3 -W 5 10.8.0.1
+      register: ping_test
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "WireGuard Deployment Summary"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Interface: {{ wg_interface }}"
+          - "Tunnel IP: {{ wg_peer_address | regex_replace('/\\d+$', '/32') }}"
+          - "Endpoint: {{ wg_final_endpoint }}"
+          - "Allowed IPs: {{ wg_allowed_ips }}"
+          - "NAT interface: {{ wg_nat_interface }}"
+          - "Keepalive: {{ wg_keepalive }}s"
+          - ""
+          - "Tunnel handshake: {{ 'YES' if ('latest handshake' in wg_show.stdout) else 'NO (check endpoint reachability)' }}"
+          - "Ping 10.8.0.1: {{ 'OK' if (ping_test.rc == 0) else 'FAILED' }}"
+          - ""
+          - "Management:"
+          - "  wg show {{ wg_interface }}"
+          - "  systemctl status wg-quick@{{ wg_interface }}"
+          - "  journalctl -u wg-quick@{{ wg_interface }}"
+          - "=========================================="
+      tags:
+        - verify

@@ -1,0 +1,29 @@
+# =============================================================================
+# Custom CoreDNS forward rule for internal DNS (home.example-lab.org)
+# =============================================================================
+# K3s CoreDNS Corefile imports /etc/coredns/custom/*.server — this ConfigMap
+# provides a server block that forwards home.example-lab.org queries to gw-01
+# (UDM Pro), which serves the authoritative internal DNS records.
+#
+# Without this, CoreDNS forwards to /etc/resolv.conf (systemd-resolved stub
+# at 127.0.0.53), which may use 1.1.1.1 as upstream — can't resolve internal
+# names like auth.home.example-lab.org, grafana.home.example-lab.org, etc.
+#
+# This fixes: Grafana OIDC token exchange failing with "no such host" for
+# auth.home.example-lab.org, and any other pod-to-internal-service DNS resolution.
+#
+# Apply:
+#   kubectl apply -f custom-dns.yaml --kubeconfig ~/.kube/k3s-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  home-firblab.server: |
+    home.example-lab.org:53 {
+      errors
+      cache 30
+      forward . 10.0.20.1
+    }

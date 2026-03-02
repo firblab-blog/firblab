@@ -1,0 +1,77 @@
+# =============================================================================
+# Layer 04: RKE2 Cluster - Example Variable Values
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# NOTE: Proxmox credentials are read from Vault by default (use_vault=true).
+#       Only set proxmox_api_url/proxmox_api_token for bootstrap (use_vault=false).
+# =============================================================================
+
+# ---------------------------------------------------------
+# Proxmox Connection (bootstrap only — normally reads from Vault)
+# ---------------------------------------------------------
+# proxmox_api_url   = "https://10.0.10.42:8006"
+# proxmox_api_token = "terraform@pam!terraform-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node      = "lab-01"
+
+# ---------------------------------------------------------
+# SSH
+# ---------------------------------------------------------
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-key-comment"
+
+# ---------------------------------------------------------
+# Cluster Identity
+# ---------------------------------------------------------
+cluster_name = "rke2"
+vm_id_start  = 4000
+
+# ---------------------------------------------------------
+# Master Node Configuration
+# ---------------------------------------------------------
+master_count           = 3
+master_cpu_cores       = 2
+master_memory_mb       = 4096
+master_os_disk_size_gb = 40
+
+# ---------------------------------------------------------
+# Worker Node Configuration
+# ---------------------------------------------------------
+worker_count           = 3
+worker_cpu_cores       = 4
+worker_memory_mb       = 8192
+worker_os_disk_size_gb = 40
+
+# ---------------------------------------------------------
+# RKE2 Configuration
+# ---------------------------------------------------------
+rke2_version = "v1.32.11+rke2r3"
+
+# ---------------------------------------------------------
+# Template Cloning (Packer-built Ubuntu 24.04)
+# ---------------------------------------------------------
+clone_template_vm_id = 9000
+clone_template_node  = "lab-01"
+
+# ---------------------------------------------------------
+# Cloud Image (fallback when not cloning)
+# ---------------------------------------------------------
+download_cloud_image = true
+cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+cloud_image_filename = "noble-server-cloudimg-amd64.qcow2"
+
+# ---------------------------------------------------------
+# Storage
+# ---------------------------------------------------------
+storage_pool    = "local-lvm"
+snippet_storage = "local"
+
+# ---------------------------------------------------------
+# Network Settings (Services VLAN 20)
+# ---------------------------------------------------------
+network_bridge = "vmbr0"
+vlan_tag       = 20
+gateway        = "10.0.20.1"
+domain_name    = "example-lab.local"
+dns_servers    = ["1.1.1.1", "8.8.8.8"]

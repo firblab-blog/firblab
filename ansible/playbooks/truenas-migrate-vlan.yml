@@ -1,0 +1,234 @@
+---
+# =============================================================================
+# TrueNAS SCALE — VLAN 40 Migration Playbook
+# =============================================================================
+# Migrates TrueNAS from Default LAN (VLAN 1, DHCP 10.0.4.194) to Storage
+# VLAN 40 (static 10.0.40.2). Uses midclt middleware CLI over SSH.
+#
+# The challenge: TrueNAS validates that the gateway is reachable from the
+# CURRENT active config. We can't set gateway 10.0.40.1 while on VLAN 1.
+#
+# Solution: Upload a migration script that runs via nohup (survives SSH
+# disconnect). The script:
+#   1. Queues static IP 10.0.40.2/24 (disabling DHCP)
+#   2. Commits the IP change (starts 1-hour rollback timer)
+#   3. Now that 10.0.40.0/24 is the active subnet, sets gateway + DNS
+#      (10.0.40.1 passes validation since it's on-subnet)
+#   4. Commits the gateway/DNS change
+#
+# After this playbook, TrueNAS goes dark (wrong IP for VLAN 1). The operator
+# must then:
+#   1. terraform apply Layer 00 — assigns Storage Access port profile
+#   2. ping 10.0.40.2 — verify TrueNAS on VLAN 40
+#   3. ssh truenas_admin@10.0.40.2 -p 2222 'sudo midclt call interface.checkin'
+#      — confirms the change (cancels rollback timer)
+#
+# If anything goes wrong, TrueNAS auto-reverts after 1 hour.
+#
+# Prerequisites:
+#   - SSH access: truenas_admin@10.0.4.194:2222 (~/.ssh/truenas_admin)
+#   - TrueNAS SCALE 25.04+ (midclt middleware CLI)
+#
+# Usage:
+#   ansible-playbook playbooks/truenas-migrate-vlan.yml
+#
+# After migration, run:
+#   cd terraform/layers/00-network && terraform apply
+#   ssh -i ~/.ssh/truenas_admin -p 2222 truenas_admin@10.0.40.2 \
+#     'sudo midclt call interface.checkin'
+#   ansible-playbook -i inventory/hosts.yml playbooks/traefik-standalone-deploy.yml
+#   ansible-playbook -i inventory/hosts.yml playbooks/truenas-deploy.yml
+# =============================================================================
+
+- name: TrueNAS VLAN 40 migration — change IP via midclt
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  vars:
+    truenas_old_ip: "10.0.4.194"
+    truenas_new_ip: "10.0.40.2"
+    truenas_new_netmask: 24
+    truenas_new_gateway: "10.0.40.1"
+    truenas_interface: "enp2s0"
+    truenas_ssh_user: "truenas_admin"
+    truenas_ssh_key: "~/.ssh/truenas_admin"
+    truenas_ssh_port: 2222
+    # Rollback timer: TrueNAS reverts if not checked in within this many seconds
+    truenas_checkin_timeout: 3600
+    truenas_ssh_opts: >-
+      -i {{ truenas_ssh_key }}
+      -p {{ truenas_ssh_port }}
+      -o StrictHostKeyChecking=no
+      -o IdentitiesOnly=yes
+
+  tasks:
+    - name: Verify current TrueNAS connectivity
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          -o ConnectTimeout=10
+          {{ truenas_ssh_user }}@{{ truenas_old_ip }}
+          'midclt call system.info'
+      register: truenas_info
+      changed_when: false
+
+    - name: Display current TrueNAS info
+      ansible.builtin.debug:
+        msg: "Connected to TrueNAS at {{ truenas_old_ip }}: {{ (truenas_info.stdout | from_json).hostname }} ({{ (truenas_info.stdout | from_json).version }})"
+
+    - name: Confirm current interface config
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_old_ip }}
+          'midclt call interface.query'
+      register: interface_query
+      changed_when: false
+
+    - name: Display current interface config
+      ansible.builtin.debug:
+        msg: >
+          Interface {{ truenas_interface }}:
+          DHCP={{ (interface_query.stdout | from_json | selectattr('id', 'equalto', truenas_interface) | first).ipv4_dhcp }},
+          Aliases={{ (interface_query.stdout | from_json | selectattr('id', 'equalto', truenas_interface) | first).aliases }}
+
+    # -----------------------------------------------------------------
+    # Rollback any stale pending changes from a previous failed run
+    # -----------------------------------------------------------------
+    - name: Rollback any stale pending changes
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_old_ip }}
+          'sudo midclt call interface.rollback'
+      register: rollback_result
+      failed_when: false
+      changed_when: rollback_result.rc == 0
+
+    - name: Confirm migration
+      ansible.builtin.pause:
+        prompt: |
+          === TrueNAS VLAN 40 Migration ===
+          Current:  {{ truenas_old_ip }} (DHCP, Default LAN / VLAN 1)
+          Target:   {{ truenas_new_ip }}/{{ truenas_new_netmask }} (static, Storage VLAN 40)
+          Gateway:  {{ truenas_new_gateway }}
+          Rollback: {{ truenas_checkin_timeout }}s (auto-revert if not checked in)
+
+          After this task, TrueNAS will go dark until you:
+            1. terraform apply Layer 00 (port profile)
+            2. ssh truenas_admin@{{ truenas_new_ip }} -p 2222 'sudo midclt call interface.checkin'
+
+          Press ENTER to proceed, or Ctrl+C to abort
+
+    # -----------------------------------------------------------------
+    # Upload migration script to TrueNAS
+    # -----------------------------------------------------------------
+    # We can't set the gateway while on VLAN 1 (TrueNAS validates gateway
+    # reachability against the CURRENT active config). The script commits
+    # the IP change first, making 10.0.40.0/24 the active subnet, then
+    # sets gateway (now passes validation). Runs via nohup to survive the
+    # SSH disconnect that occurs after the IP commit.
+    # -----------------------------------------------------------------
+
+    - name: Upload migration script to TrueNAS
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_old_ip }}
+          'cat > /tmp/migrate-vlan40.sh << "MIGRATESCRIPT"
+
+          #!/bin/bash
+          # TrueNAS VLAN 40 Migration Script
+          # Runs via nohup — survives SSH disconnect
+          LOG=/tmp/migrate-vlan40.log
+          exec > "$LOG" 2>&1
+          set -x
+
+          echo "=== TrueNAS VLAN 40 Migration ==="
+          echo "Started: $(date)"
+
+          # Step 1: Queue interface change (pending)
+          echo "Step 1: Setting static IP {{ truenas_new_ip }}/{{ truenas_new_netmask }} on {{ truenas_interface }}..."
+          midclt call interface.update {{ truenas_interface }} "{\"ipv4_dhcp\": false, \"aliases\": [{\"address\": \"{{ truenas_new_ip }}\", \"netmask\": {{ truenas_new_netmask }}}]}"
+          echo "RC=$?"
+
+          # Step 2: Commit interface change (activates new IP, starts rollback timer)
+          echo "Step 2: Committing interface change ({{ truenas_checkin_timeout }}s rollback timer)..."
+          midclt call interface.commit "{\"checkin_timeout\": {{ truenas_checkin_timeout }}}"
+          echo "RC=$?"
+          echo "IP committed. Active subnet is now {{ truenas_new_ip }}/{{ truenas_new_netmask }}."
+          sleep 3
+
+          # Step 3: Set gateway + DNS (now valid — 10.0.40.1 is on-subnet)
+          echo "Step 3: Setting gateway {{ truenas_new_gateway }} and DNS..."
+          midclt call network.configuration.update "{\"ipv4gateway\": \"{{ truenas_new_gateway }}\", \"nameserver1\": \"{{ truenas_new_gateway }}\", \"nameserver2\": \"1.1.1.1\"}"
+          echo "RC=$?"
+
+          # Step 4: Commit gateway/DNS change (resets rollback timer)
+          echo "Step 4: Committing gateway/DNS change..."
+          midclt call interface.commit "{\"checkin_timeout\": {{ truenas_checkin_timeout }}}"
+          echo "RC=$?"
+
+          echo "=== Migration script complete ==="
+          echo "Completed: $(date)"
+          echo "TrueNAS is now at {{ truenas_new_ip }} with gateway {{ truenas_new_gateway }}"
+          echo "Waiting for: terraform apply Layer 00 (port profile) + interface.checkin"
+
+          MIGRATESCRIPT
+          chmod +x /tmp/migrate-vlan40.sh'
+      changed_when: true
+
+    - name: Execute migration script (fire-and-forget via nohup)
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          -o ServerAliveInterval=2
+          -o ServerAliveCountMax=2
+          {{ truenas_ssh_user }}@{{ truenas_old_ip }}
+          'nohup sudo /tmp/migrate-vlan40.sh &'
+      # SSH connection will die after the script commits the IP change.
+      # nohup ensures the script continues running on TrueNAS.
+      failed_when: false
+      changed_when: true
+
+    - name: Wait for migration script to run
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Waiting 10s for migration script to complete on TrueNAS..."
+
+    - name: Migration initiated
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TrueNAS migration script executed.
+          TrueNAS is now UNREACHABLE at {{ truenas_old_ip }} (expected).
+
+          The script (running on TrueNAS via nohup) performed:
+            1. Set static IP {{ truenas_new_ip }}/{{ truenas_new_netmask }}
+            2. Committed IP change ({{ truenas_checkin_timeout }}s rollback)
+            3. Set gateway {{ truenas_new_gateway }} + DNS
+            4. Committed gateway/DNS change
+
+          Next steps:
+            1. cd terraform/layers/00-network && terraform apply
+               (assigns Storage Access port profile to closet port 2)
+
+            2. ping -c 3 {{ truenas_new_ip }}
+               (verify TrueNAS is reachable on VLAN 40)
+
+            3. ssh -i ~/.ssh/truenas_admin -p 2222 truenas_admin@{{ truenas_new_ip }} \
+                 'sudo midclt call interface.checkin'
+               (confirms the change — cancels rollback timer)
+
+            4. ssh -i ~/.ssh/truenas_admin -p 2222 truenas_admin@{{ truenas_new_ip }} \
+                 'cat /tmp/migrate-vlan40.log'
+               (verify all 4 steps succeeded)
+
+            5. ansible -i inventory/hosts.yml -m ping truenas
+               (verify Ansible inventory works with new IP)
+
+          If anything goes wrong:
+            - TrueNAS auto-reverts in {{ truenas_checkin_timeout // 60 }} minutes
+            - Or use physical console to fix manually
+          ============================================================

@@ -1,0 +1,27 @@
+# ClusterIssuer for Vault PKI — K3s RPi5 cluster.
+# Issues internal TLS certificates via the Vault intermediate CA.
+# Uses auth/kubernetes-k3s/ (separate from RKE2's auth/kubernetes/).
+#
+# Prerequisites:
+#   - cert-manager installed in the cluster
+#   - Vault PKI secrets engine configured with intermediate CA
+#   - Kubernetes-k3s auth method enabled in Vault with cert-manager role
+#   - k3s-vault-k8s-auth.yml playbook run (creates vault-ca Secret)
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+spec:
+  vault:
+    server: https://10.0.10.10:8200
+    path: pki_int/sign/firblab
+    caBundleSecretRef:
+      name: vault-ca
+      key: ca.crt
+    auth:
+      kubernetes:
+        role: cert-manager
+        mountPath: /v1/auth/kubernetes-k3s
+        serviceAccountRef:
+          name: cert-manager

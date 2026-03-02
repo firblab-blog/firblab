@@ -1,0 +1,217 @@
+---
+# =============================================================================
+# restic-server — REST Server Installation and Configuration
+# =============================================================================
+# Deploys the Restic REST server for centralized backup storage.
+# Runs as a systemd service with append-only mode and htpasswd auth.
+#
+# The REST server stores backup repositories on the local filesystem (typically
+# a ZFS mirror pool like hdd-mirror-0, bind-mounted at /mnt/restic in the
+# backup LXC). Each client gets an isolated subdirectory.
+#
+# Supports two deployment targets:
+#   - LXC container (default): Firewall via UFW (common role + group_vars)
+#   - Proxmox host (legacy):   Firewall via iptables (proxmox_skip_ufw=true)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Step 1: Create service user
+# ---------------------------------------------------------------------------
+- name: Create restic group
+  ansible.builtin.group:
+    name: "{{ restic_server_group }}"
+    system: true
+    state: present
+  tags: [restic-server]
+
+- name: Create restic user
+  ansible.builtin.user:
+    name: "{{ restic_server_user }}"
+    group: "{{ restic_server_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ restic_server_data_dir }}"
+    create_home: false
+    comment: "Restic REST server service account"
+  tags: [restic-server]
+
+# ---------------------------------------------------------------------------
+# Step 2: Install rest-server binary
+# ---------------------------------------------------------------------------
+- name: Check if rest-server is already installed at correct version
+  ansible.builtin.command:
+    cmd: "{{ restic_server_binary }} --version"
+  register: rest_server_version_check
+  changed_when: false
+  failed_when: false
+  tags: [restic-server]
+
+- name: Download rest-server binary
+  ansible.builtin.get_url:
+    url: "https://github.com/restic/rest-server/releases/download/v{{ restic_server_version }}/rest-server_{{ restic_server_version }}_linux_{{ restic_server_arch }}.tar.gz"
+    dest: "/tmp/rest-server-{{ restic_server_version }}.tar.gz"
+    mode: "0644"
+  when: >
+    rest_server_version_check.rc != 0 or
+    restic_server_version not in (rest_server_version_check.stdout | default(''))
+  tags: [restic-server]
+
+- name: Extract rest-server binary
+  ansible.builtin.unarchive:
+    src: "/tmp/rest-server-{{ restic_server_version }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+  when: >
+    rest_server_version_check.rc != 0 or
+    restic_server_version not in (rest_server_version_check.stdout | default(''))
+  tags: [restic-server]
+
+- name: Install rest-server binary
+  ansible.builtin.copy:
+    src: "/tmp/rest-server_{{ restic_server_version }}_linux_{{ restic_server_arch }}/rest-server"
+    dest: "{{ restic_server_binary }}"
+    mode: "0755"
+    remote_src: true
+  when: >
+    rest_server_version_check.rc != 0 or
+    restic_server_version not in (rest_server_version_check.stdout | default(''))
+  notify: restart restic-rest-server
+  tags: [restic-server]
+
+- name: Clean up download artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/rest-server-{{ restic_server_version }}.tar.gz"
+    - "/tmp/rest-server_{{ restic_server_version }}_linux_{{ restic_server_arch }}"
+  tags: [restic-server]
+
+# ---------------------------------------------------------------------------
+# Step 3: Create data directory
+# ---------------------------------------------------------------------------
+- name: Create Restic data directory
+  ansible.builtin.file:
+    path: "{{ restic_server_data_dir }}"
+    state: directory
+    owner: "{{ restic_server_user }}"
+    group: "{{ restic_server_group }}"
+    mode: "0750"
+  tags: [restic-server]
+
+# ---------------------------------------------------------------------------
+# Step 4: Configure htpasswd authentication
+# ---------------------------------------------------------------------------
+- name: Create htpasswd config directory
+  ansible.builtin.file:
+    path: "{{ restic_server_htpasswd_file | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ restic_server_group }}"
+    mode: "0750"
+  tags: [restic-server]
+
+- name: Deploy htpasswd file
+  ansible.builtin.copy:
+    content: "{{ restic_server_htpasswd_content }}"
+    dest: "{{ restic_server_htpasswd_file }}"
+    owner: root
+    group: "{{ restic_server_group }}"
+    mode: "0640"
+  when: restic_server_htpasswd_content is defined
+  no_log: true
+  notify: restart restic-rest-server
+  tags: [restic-server]
+
+# ---------------------------------------------------------------------------
+# Step 5: Deploy systemd service
+# ---------------------------------------------------------------------------
+- name: Deploy restic-rest-server systemd unit
+  ansible.builtin.template:
+    src: restic-rest-server.service.j2
+    dest: /etc/systemd/system/restic-rest-server.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart restic-rest-server
+  tags: [restic-server]
+
+- name: Enable and start restic-rest-server
+  ansible.builtin.systemd:
+    name: restic-rest-server
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [restic-server]
+
+# ---------------------------------------------------------------------------
+# Step 6: Firewall (iptables — Proxmox nodes only)
+# ---------------------------------------------------------------------------
+# Proxmox nodes use iptables, not UFW. Add rules for the REST server port
+# from Management VLAN 10 and Services VLAN 20 (where backup clients live).
+#
+# When running inside an LXC container (proxmox_skip_ufw is not set), firewall
+# is handled by the common role via firewall_additional_ports in group_vars.
+# This block only runs on bare Proxmox hosts where proxmox_skip_ufw=true.
+#
+# NOTE: These rules are inserted BEFORE the DROP policy. The proxmox-bootstrap
+# playbook manages the full iptables ruleset and saves to /etc/iptables/rules.v4.
+- name: Allow REST server port from Management VLAN
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ restic_server_port }}"
+    source: "{{ management_network }}"
+    jump: ACCEPT
+    comment: "Restic REST server from Management VLAN"
+  when: proxmox_skip_ufw | default(false) | bool
+  tags: [restic-server, firewall]
+
+- name: Allow REST server port from Services VLAN
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ restic_server_port }}"
+    source: "{{ services_network }}"
+    jump: ACCEPT
+    comment: "Restic REST server from Services VLAN"
+  when: proxmox_skip_ufw | default(false) | bool
+  tags: [restic-server, firewall]
+
+- name: Allow REST server port from LAN (admin workstation)
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ restic_server_port }}"
+    source: "{{ lan_network }}"
+    jump: ACCEPT
+    comment: "Restic REST server from LAN"
+  when: proxmox_skip_ufw | default(false) | bool
+  tags: [restic-server, firewall]
+
+- name: Save iptables rules
+  ansible.builtin.shell: |
+    iptables-save > /etc/iptables/rules.v4
+  changed_when: true
+  when: proxmox_skip_ufw | default(false) | bool
+  tags: [restic-server, firewall]
+
+# ---------------------------------------------------------------------------
+# Step 7: Verify
+# ---------------------------------------------------------------------------
+- name: Verify REST server is listening
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ restic_server_port }}"
+    timeout: 30
+  tags: [restic-server, verify]
+
+- name: Display restic-server configuration
+  ansible.builtin.debug:
+    msg:
+      - "Restic REST server configured on {{ inventory_hostname }}"
+      - "Listen: {{ restic_server_listen }}"
+      - "Data dir: {{ restic_server_data_dir }}"
+      - "Append-only: {{ restic_server_append_only }}"
+      - "htpasswd: {{ restic_server_htpasswd_file }}"
+  tags: [restic-server, verify]

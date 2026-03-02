@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# Vault — Linux Service (systemd)
+# =============================================================================
+# Sets up Vault as a systemd service with IPC_LOCK capability.
+# =============================================================================
+
+- name: Set IPC_LOCK capability on Vault binary
+  community.general.capabilities:
+    path: "{{ vault_binary_path }}"
+    capability: cap_ipc_lock=+ep
+    state: present
+  when: not vault_disable_mlock
+  tags:
+    - install
+    - service
+
+- name: Template Vault systemd service file
+  ansible.builtin.template:
+    src: vault.service.j2
+    dest: /etc/systemd/system/vault.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart vault
+  tags:
+    - service
+
+- name: Enable Vault service
+  ansible.builtin.systemd:
+    name: vault
+    enabled: true
+    daemon_reload: true
+  tags:
+    - service
+
+- name: Start Vault service
+  ansible.builtin.systemd:
+    name: vault
+    state: started
+  tags:
+    - service

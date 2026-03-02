@@ -1,0 +1,21 @@
+---
+# =============================================================================
+# Package Management — RedHat/Rocky
+# =============================================================================
+
+- name: Install base packages (RedHat)
+  ansible.builtin.dnf:
+    name: "{{ common_packages_shared + common_packages_redhat }}"
+    state: present
+  tags:
+    - packages
+
+- name: Remove unnecessary packages (RedHat)
+  ansible.builtin.dnf:
+    name:
+      - telnet
+      - rsh
+    state: absent
+  tags:
+    - packages
+    - hardening

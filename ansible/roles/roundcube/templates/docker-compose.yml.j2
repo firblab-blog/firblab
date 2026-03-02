@@ -1,0 +1,60 @@
+# =============================================================================
+# Roundcube Docker Compose — Webmail + PostgreSQL
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  roundcube:
+    image: "{{ roundcube_image }}"
+    container_name: roundcube
+    restart: unless-stopped
+    ports:
+      - "{{ roundcube_port }}:80"
+    environment:
+      ROUNDCUBEMAIL_DEFAULT_HOST: "{{ roundcube_imap_host }}"
+      ROUNDCUBEMAIL_DEFAULT_PORT: "{{ roundcube_imap_port }}"
+      ROUNDCUBEMAIL_SMTP_SERVER: "{{ roundcube_smtp_host }}"
+      ROUNDCUBEMAIL_SMTP_PORT: "{{ roundcube_smtp_port }}"
+      ROUNDCUBEMAIL_DB_TYPE: pgsql
+      ROUNDCUBEMAIL_DB_HOST: roundcube-db
+      ROUNDCUBEMAIL_DB_PORT: "5432"
+      ROUNDCUBEMAIL_DB_NAME: roundcube
+      ROUNDCUBEMAIL_DB_USER: "{{ roundcube_db_username }}"
+      ROUNDCUBEMAIL_DB_PASSWORD: "{{ roundcube_db_password }}"
+      ROUNDCUBEMAIL_DES_KEY: "{{ roundcube_des_key }}"
+      ROUNDCUBEMAIL_SKIN: "{{ roundcube_skin }}"
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: "{{ roundcube_upload_max_filesize }}"
+      ROUNDCUBEMAIL_PLUGINS: "{{ roundcube_plugins }}"
+    volumes:
+      - {{ roundcube_data_dir }}/config:/var/roundcube/config
+      - {{ roundcube_data_dir }}/temp:/tmp/roundcube
+    depends_on:
+      roundcube-db:
+        condition: service_healthy
+    networks:
+      - roundcube-network
+
+  roundcube-db:
+    image: "{{ roundcube_postgres_image }}"
+    container_name: roundcube-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: roundcube
+      POSTGRES_USER: "{{ roundcube_db_username }}"
+      POSTGRES_PASSWORD: "{{ roundcube_db_password }}"
+    volumes:
+      - {{ roundcube_data_dir }}/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ roundcube_db_username }} -d roundcube"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - roundcube-network
+
+networks:
+  roundcube-network:
+    driver: bridge

@@ -1,0 +1,150 @@
+---
+# =============================================================================
+# PatchMon Agent Role - Install and Enroll
+# =============================================================================
+# Installs the PatchMon agent via the server's auto-enrollment script.
+# The script handles architecture detection, binary download, credential
+# injection, and cron setup. Idempotent — skips if already enrolled.
+#
+# Requires: patchmon_enrollment_token_key + patchmon_enrollment_token_secret
+# (set by playbook from Vault — see patchmon-agent-deploy.yml).
+#
+# Supports: Debian/Ubuntu (apt), RedHat/Rocky (dnf)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Validate enrollment token is available
+# ---------------------------------------------------------------------------
+- name: Validate enrollment token is available
+  ansible.builtin.assert:
+    that:
+      - patchmon_enrollment_token_key is defined
+      - patchmon_enrollment_token_key | length > 0
+      - patchmon_enrollment_token_secret is defined
+      - patchmon_enrollment_token_secret | length > 0
+    fail_msg: >
+      PatchMon enrollment token not available. Ensure PatchMon server has been
+      deployed with onboarding (ansible-playbook playbooks/patchmon-deploy.yml)
+      and verify Vault:
+        vault kv get -mount=secret -field=enrollment_token_key services/patchmon
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install dependencies (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family PatchMon agent install tasks
+  ansible.builtin.include_tasks: "install-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Check if agent is already enrolled
+# ---------------------------------------------------------------------------
+- name: Check if PatchMon agent is already enrolled
+  ansible.builtin.stat:
+    path: "{{ patchmon_agent_credentials_path }}"
+  register: _patchmon_agent_creds
+  tags:
+    - install
+    - verify
+
+# ---------------------------------------------------------------------------
+# Download and run enrollment script
+# ---------------------------------------------------------------------------
+# Downloads the enrollment script from PatchMon server, writes to temp file,
+# then runs with bash -x to capture full debug output. This two-step approach
+# (vs curl|bash) lets us see exactly what the script does and where it fails.
+#
+# The script handles:
+#   - Architecture detection (amd64, arm64, armhf)
+#   - Agent binary download from PatchMon server
+#   - Credential file creation
+#   - Cron job setup (60-minute reporting interval)
+# ---------------------------------------------------------------------------
+- name: Download PatchMon enrollment script
+  ansible.builtin.uri:
+    url: "{{ patchmon_server_url }}/api/v1/auto-enrollment/script?type=direct-host&token_key={{ patchmon_enrollment_token_key }}&token_secret={{ patchmon_enrollment_token_secret }}"
+    return_content: true
+  register: _patchmon_script
+  no_log: true
+  when: not _patchmon_agent_creds.stat.exists
+  tags:
+    - install
+
+- name: Write enrollment script to temp file
+  ansible.builtin.copy:
+    content: "{{ _patchmon_script.content }}"
+    dest: /tmp/patchmon-enroll.sh
+    mode: "0700"
+  no_log: true
+  when:
+    - not _patchmon_agent_creds.stat.exists
+    - _patchmon_script.content is defined
+  tags:
+    - install
+
+- name: Run PatchMon enrollment script
+  ansible.builtin.shell:
+    cmd: "bash /tmp/patchmon-enroll.sh 2>&1"
+  environment:
+    PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  register: _patchmon_enroll
+  when: not _patchmon_agent_creds.stat.exists
+  tags:
+    - install
+
+- name: Display enrollment script output (on failure or first run)
+  ansible.builtin.debug:
+    msg: "{{ _patchmon_enroll.stdout_lines | default([]) }}"
+  when:
+    - _patchmon_enroll is not skipped
+    - _patchmon_enroll is changed or _patchmon_enroll is failed
+  tags:
+    - install
+
+- name: Clean up temp enrollment script
+  ansible.builtin.file:
+    path: /tmp/patchmon-enroll.sh
+    state: absent
+  when: not _patchmon_agent_creds.stat.exists
+  tags:
+    - install
+
+- name: Display enrollment result
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'PatchMon agent enrolled on ' ~ inventory_hostname ~ '.'
+         if _patchmon_enroll is changed
+         else 'PatchMon agent already enrolled on ' ~ inventory_hostname ~ '.' }}
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+- name: Verify agent credentials file exists
+  ansible.builtin.stat:
+    path: "{{ patchmon_agent_credentials_path }}"
+  register: _patchmon_verify_creds
+  failed_when: not _patchmon_verify_creds.stat.exists
+  tags:
+    - verify
+
+- name: Check PatchMon agent cron entry
+  ansible.builtin.command:
+    cmd: crontab -l
+  register: _patchmon_cron
+  changed_when: false
+  failed_when: false
+  tags:
+    - verify
+
+- name: Display agent verification status
+  ansible.builtin.debug:
+    msg: >-
+      Agent status on {{ inventory_hostname }}:
+      credentials={{ _patchmon_verify_creds.stat.exists | default(false) }},
+      cron={{ 'patchmon' in (_patchmon_cron.stdout | default('')) }}
+  tags:
+    - verify

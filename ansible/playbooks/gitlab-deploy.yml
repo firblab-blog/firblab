@@ -1,0 +1,228 @@
+---
+# =============================================================================
+# GitLab CE Deployment Playbook
+# =============================================================================
+# Deploys GitLab CE on the core_infra gitlab host. Handles:
+#   - Data disk formatting and mounting (scsi1 → /mnt/gitlab-data)
+#   - System baseline (common role: packages, NTP, firewall, fail2ban, SSH)
+#   - CIS hardening (hardening role: auditd, AIDE, sysctl, file perms)
+#   - GitLab CE installation and configuration (gitlab role)
+#
+# Prerequisites:
+#   - VM deployed via Terraform Layer 03 (terraform apply -var clone_template_vm_id=9000)
+#   - SSH key available (~/.ssh/id_ed25519_gitlab)
+#   - inventory/group_vars/core_infra.yml configured
+#
+# Usage:
+#   ansible-playbook playbooks/gitlab-deploy.yml --limit gitlab
+#   ansible-playbook playbooks/gitlab-deploy.yml --limit gitlab --tags install
+#   ansible-playbook playbooks/gitlab-deploy.yml --limit gitlab --tags configure
+# =============================================================================
+
+- name: Deploy GitLab CE
+  hosts: gitlab
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying GitLab CE on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup Secret Management (only when backup is enabled)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: gitlab_backup_enabled | default(false) | bool
+      tags: [always]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: gitlab_backup_enabled | default(false) | bool
+      tags: [always]
+
+    - name: Set backup secrets from Vault
+      ansible.builtin.set_fact:
+        gitlab_backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        gitlab_backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        gitlab_backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        gitlab_backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - gitlab_backup_enabled | default(false) | bool
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [always]
+
+    # -----------------------------------------------------------------
+    # OIDC Secret Management (Authentik SSO)
+    # -----------------------------------------------------------------
+    # Credentials created by Terraform Layer 07-authentik-config,
+    # stored at secret/services/gitlab/oidc in Vault.
+    # -----------------------------------------------------------------
+    - name: Read GitLab OIDC credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/gitlab/oidc
+      register: vault_gitlab_oidc_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set OIDC credentials from Vault
+      ansible.builtin.set_fact:
+        gitlab_oidc_enabled: true
+        gitlab_oidc_client_id: "{{ (vault_gitlab_oidc_read.stdout | from_json).data.data.client_id }}"
+        gitlab_oidc_client_secret: "{{ (vault_gitlab_oidc_read.stdout | from_json).data.data.client_secret }}"
+      when:
+        - vault_gitlab_oidc_read.rc is defined
+        - vault_gitlab_oidc_read.rc == 0
+      no_log: true
+      tags: [always]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-02:{{ (vault_restic_read.stdout | from_json).data.data.firblab02_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-02/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+  vars:
+    # Restic backup configuration (local backup to hdd-mirror-0 via REST server)
+    # gitlab-backup creates a tar in /var/opt/gitlab/backups/ without stopping services.
+    # /etc/gitlab contains gitlab.rb + gitlab-secrets.json (encryption keys — CRITICAL).
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: gitlab
+        pre_commands:
+          - "gitlab-backup create STRATEGY=copy SKIP=artifacts,builds,pages,registry"
+        paths:
+          - /var/opt/gitlab/backups
+          - /etc/gitlab
+        post_commands:
+          - "find /var/opt/gitlab/backups -name '*_gitlab_backup.tar' -mmin +60 -delete"
+        tags: ["gitlab", "scm"]
+        cron_hour: "2"
+        cron_minute: "30"
+
+  roles:
+    # Baseline system config + firewall (opens ports 80, 443 from management + LAN)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (auditd, AIDE, sysctl, SSH hardening, file perms)
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+    # GitLab CE (data disk, omnibus install, gitlab.rb config, reconfigure)
+    - role: gitlab
+      tags:
+        - gitlab
+        - install
+        - configure
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    # GitLab 18.x restricts /-/health and /-/readiness to localhost.
+    # First check: hit localhost on the remote host to confirm GitLab is healthy.
+    - name: Wait for GitLab to be healthy (localhost check on remote host)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ gitlab_http_port | default('80') }}/-/health"
+        method: GET
+        status_code: [200]
+      retries: 30
+      delay: 10
+      register: gitlab_health
+      until: gitlab_health.status is defined and gitlab_health.status == 200
+      tags:
+        - verify
+
+    # Second check: verify GitLab is reachable from the network (external IP).
+    # The root URL redirects to /users/sign_in (302) — that confirms nginx is serving.
+    - name: Verify GitLab is reachable from network
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ gitlab_http_port | default('80') }}/"
+        method: GET
+        status_code: [200, 302]
+        follow_redirects: none
+        validate_certs: false
+      delegate_to: localhost
+      become: false
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "GitLab CE Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: {{ gitlab_external_url }}"
+          - "Login: root"
+          - "Password: sudo cat /etc/gitlab/initial_root_password"
+          - ""
+          - "Management:"
+          - "  sudo gitlab-ctl status"
+          - "  sudo gitlab-ctl tail"
+          - "  sudo gitlab-rake gitlab:check"
+          - ""
+          - "Data disk: {{ gitlab_data_mount_point | default('/mnt/gitlab-data') }}"
+          - "Git repos: {{ gitlab_git_data_dir }}"
+          - "Backups: {{ gitlab_backup_path }}"
+          - "=========================================="
+      tags:
+        - verify

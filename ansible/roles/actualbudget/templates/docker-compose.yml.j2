@@ -1,0 +1,26 @@
+# =============================================================================
+# Actual Budget Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  actual-server:
+    image: {{ actualbudget_image }}
+    container_name: actualbudget
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ actualbudget_port }}:5006"
+    volumes:
+      - {{ actualbudget_install_dir }}/data:/data
+{% if actualbudget_oidc_enabled %}
+    environment:
+      ACTUAL_OPENID_DISCOVERY_URL: "{{ actualbudget_oidc_discovery_url }}"
+      ACTUAL_OPENID_CLIENT_ID: "{{ actualbudget_oidc_client_id }}"
+      ACTUAL_OPENID_CLIENT_SECRET: "{{ actualbudget_oidc_client_secret }}"
+      ACTUAL_OPENID_SERVER_HOSTNAME: "{{ actualbudget_oidc_server_hostname }}"
+{% endif %}

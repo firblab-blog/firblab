@@ -1,0 +1,18 @@
+# Wazuh Indexer — ClusterIP Service (internal only)
+# Manager Filebeat and Dashboard connect here for alert storage/retrieval.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-indexer
+  namespace: wazuh
+  labels:
+    app: wazuh-indexer
+spec:
+  type: ClusterIP
+  selector:
+    app: wazuh-indexer
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+      protocol: TCP

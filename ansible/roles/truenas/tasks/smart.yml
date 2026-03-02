@@ -1,0 +1,28 @@
+---
+# =============================================================================
+# TrueNAS — S.M.A.R.T. Test Scheduling
+# =============================================================================
+# Creates periodic SMART tests. Protection fix: probe found smartd running
+# but zero test tasks scheduled — no proactive disk health monitoring.
+#
+# Uses arensb.truenas.smart_test_task module.
+# Module params: name (required), test (long/short/conveyance/offline),
+#   disks (required, list), hour, day (alias: dom), month, weekday (alias: dow),
+#   state.
+# Note: disks must list actual disk device names (e.g., sda, sdb).
+#   Query with: midclt call disk.query | jq '.[].name'
+# =============================================================================
+
+- name: "Configure SMART {{ item.test }} test — {{ item.name }}"
+  arensb.truenas.smart_test_task:
+    name: "{{ item.name }}"
+    test: "{{ item.test }}"
+    disks: "{{ item.disks | default(truenas_disk_names) }}"
+    hour: "{{ item.hour | default('*') }}"
+    day: "{{ item.day | default('*') }}"
+    month: "{{ item.month | default('*') }}"
+    weekday: "{{ item.weekday | default('*') }}"
+    state: present
+  loop: "{{ truenas_smart_tests }}"
+  loop_control:
+    label: "{{ item.name }}"

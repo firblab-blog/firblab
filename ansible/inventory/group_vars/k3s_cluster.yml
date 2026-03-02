@@ -1,0 +1,145 @@
+---
+# =============================================================================
+# K3s Cluster Configuration (RPi5 Bare-Metal)
+# =============================================================================
+# CIS-hardened K3s deployment on 3x RPi5 (2x 8GB, 1x 4GB).
+# All nodes deployed to Services VLAN 20 (10.0.20.0/24).
+#
+# IMPORTANT: Pod and Service CIDRs MUST NOT overlap with the existing
+# RKE2 cluster (10.42.0.0/16 and 10.43.0.0/16) — both clusters share
+# the same L2 VLAN.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# K3s Version (pinned — same K8s version as the RKE2 cluster)
+# ---------------------------------------------------------------------------
+# renovate: datasource=github-releases depName=k3s-io/k3s versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)\+k3s(?<build>\d+)$
+k3s_version: "v1.32.11+k3s1"
+
+# ---------------------------------------------------------------------------
+# Cluster Network (non-overlapping with RKE2)
+# ---------------------------------------------------------------------------
+k3s_cluster_cidr: "10.44.0.0/16"
+k3s_service_cidr: "10.45.0.0/16"
+k3s_cluster_dns: "10.45.0.10"
+
+# ---------------------------------------------------------------------------
+# Cluster Bootstrap
+# ---------------------------------------------------------------------------
+k3s_init_node: "k3s-server-1"
+k3s_init_node_ip: "10.0.20.60"
+k3s_server_url: "https://10.0.20.60:6443"
+
+# TLS SANs for API server cert
+k3s_tls_san:
+  - "10.0.20.60"
+  - "10.0.20.61"
+  - "10.0.20.62"
+  - "k3s.example-lab.local"
+
+# ---------------------------------------------------------------------------
+# CNI / Networking
+# ---------------------------------------------------------------------------
+k3s_flannel_backend: "vxlan"
+
+# ---------------------------------------------------------------------------
+# Disabled Built-in Components
+# ---------------------------------------------------------------------------
+# Traefik: disabled — learning cluster uses manual kubectl, no ingress needed yet
+# metrics-server: disabled — lightweight cluster, no prometheus stack initially
+k3s_disable:
+  - "traefik"
+  - "metrics-server"
+
+# ---------------------------------------------------------------------------
+# CIS Hardening (K3s has no profile: "cis" one-liner like RKE2)
+# ---------------------------------------------------------------------------
+k3s_protect_kernel_defaults: true
+k3s_secrets_encryption: true
+
+k3s_kube_apiserver_args:
+  - "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log"
+  - "audit-policy-file=/etc/rancher/k3s/audit-policy.yaml"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  - "encryption-provider-config=/etc/rancher/k3s/encryption-config.yaml"
+  - "tls-min-version=VersionTLS12"
+
+k3s_kubelet_args:
+  - "streaming-connection-idle-timeout=5m"
+  - "make-iptables-util-chains=true"
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zones
+# ---------------------------------------------------------------------------
+k3s_coredns_custom_zones:
+  - zone: "home.example-lab.org"
+    cache_ttl: 300
+    upstreams:
+      - "10.0.20.1"
+      - "1.1.1.1"
+    forward_policy: "sequential"
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# K3s uses port 6443 for both API and node registration (no 9345 like RKE2).
+# No Calico ports (4789, 9099) — K3s uses Flannel only.
+k3s_firewall_ports:
+  - { port: "6443", proto: tcp, comment: "Kubernetes API server + node registration" }
+  - { port: "10250", proto: tcp, comment: "kubelet metrics" }
+  - { port: "2379:2380", proto: tcp, comment: "etcd (servers only)" }
+  - { port: "8472", proto: udp, comment: "Flannel VXLAN" }
+  - { port: "9100", proto: tcp, comment: "node_exporter" }
+  - { port: "30000:32767", proto: tcp, comment: "NodePort range" }
+
+k3s_firewall_sources:
+  - "10.0.20.0/24"   # Services VLAN (cluster peers + RKE2 cluster)
+  - "10.0.10.0/24"   # Management VLAN (admin access)
+  - "10.0.4.0/24"    # Default LAN (workstation access)
+  - "10.0.30.0/24"   # DMZ VLAN — WireGuard tunnel traffic
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ k3s_firewall_ports }}"
+firewall_additional_sources: "{{ k3s_firewall_sources }}"
+
+# ---------------------------------------------------------------------------
+# Kernel Parameters — required for protect-kernel-defaults: true
+# ---------------------------------------------------------------------------
+k3s_sysctl:
+  vm.panic_on_oom: 0
+  vm.overcommit_memory: 1
+  kernel.panic: 10
+  kernel.panic_on_oops: 1
+  net.ipv4.ip_forward: 1
+  net.ipv6.conf.all.forwarding: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+
+# ---------------------------------------------------------------------------
+# Required Kernel Modules
+# ---------------------------------------------------------------------------
+k3s_kernel_modules:
+  - br_netfilter
+  - overlay
+  - ip_tables
+  - ip_vs
+  - ip_vs_rr
+  - ip_vs_wrr
+  - ip_vs_sh
+  - nf_conntrack
+
+# etcd User — required for embedded etcd with CIS hardening
+k3s_create_etcd_user: true
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+# node_exporter enabled on K3s bare-metal nodes — scraped by Prometheus
+# on the RKE2 cluster (10.0.20.40-52). No kube-prometheus-stack DaemonSet
+# here to conflict.
+# Promtail disabled — logs stay local on the learning cluster.
+monitoring_host_group: "k3s-cluster"
+monitoring_node_exporter_enabled: true
+monitoring_promtail_enabled: false

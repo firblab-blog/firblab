@@ -1,0 +1,93 @@
+---
+# =============================================================================
+# Actual Budget Role - Personal Finance via Docker Compose
+# =============================================================================
+# Deploys Actual Budget using Docker Compose in an LXC container. Expects the
+# docker role to be applied first.
+#
+# Stack: Single container (actualbudget/actual-server), SQLite backend.
+# Data is stored in a bind mount for easy backup.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Actual Budget directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ actualbudget_install_dir }}"
+    - "{{ actualbudget_install_dir }}/data"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Actual Budget Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ actualbudget_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart actualbudget
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER containers
+# are running, killing them.
+- name: Flush handlers before starting Actual Budget containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Actual Budget container image
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ actualbudget_install_dir }}"
+  register: actualbudget_pull_result
+  changed_when: "'Pull complete' in actualbudget_pull_result.stdout or 'Downloaded' in actualbudget_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Actual Budget container
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ actualbudget_install_dir }}"
+  register: actualbudget_up_result
+  changed_when: "'Started' in actualbudget_up_result.stderr or 'Creating' in actualbudget_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Actual Budget to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ actualbudget_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: actualbudget_health
+  retries: 15
+  delay: 10
+  until: actualbudget_health.status is defined and actualbudget_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Actual Budget never became accessible
+  ansible.builtin.fail:
+    msg: "Actual Budget failed to respond after 150 seconds. Last status: {{ actualbudget_health.status | default('connection refused') }}"
+  when: actualbudget_health.status is not defined or actualbudget_health.status not in [200, 301, 302]
+  tags:
+    - verify

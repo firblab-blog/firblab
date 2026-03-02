@@ -1,0 +1,42 @@
+# GitLab CE — Kubernetes testing instance (internal only)
+# Wave 2: Workload application (depends on ingress, TLS, ESO)
+# Helm chart: https://charts.gitlab.io/ (multi-source pattern)
+#
+# This is a TESTING instance at gitlab-test.home.example-lab.org.
+# Production GitLab remains on the Omnibus VM (10.0.10.50).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitlab
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.gitlab.io/
+      chart: gitlab
+      targetRevision: "9.9.*"
+      helm:
+        releaseName: gitlab
+        valueFiles:
+          - $values/k8s/platform/gitlab/helm/values.yaml
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitlab
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # GitLab components need baseline (Gitaly runs as root, MinIO needs capabilities)
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,72 @@
+# =============================================================================
+# STP Priority Configuration
+# =============================================================================
+# Sets Spanning Tree Protocol bridge priority per switch device.
+# Uses PUT /rest/device/{device_id} with stp_priority field.
+#
+# The UniFi API requires the device's internal _id (not MAC address) for PUT.
+# We first GET all devices via stat/device (rest/device returns 404 on
+# UCG-Fiber controllers), find the _id for each MAC, then PUT via rest/device
+# (individual device CRUD still works at that path).
+#
+# Valid priorities: multiples of 4096, range 0-61440. Default: 32768.
+# Lower priority = more likely to become root bridge.
+# =============================================================================
+---
+
+- name: Fetch all adopted devices from UniFi controller
+  ansible.builtin.uri:
+    url: "{{ unifi_api_base }}/stat/device"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_api_key }}"
+    validate_certs: "{{ unifi_validate_certs }}"
+    return_content: true
+  register: unifi_devices_response
+  no_log: true
+
+- name: Build device lookup (MAC → _id and current STP priority)
+  ansible.builtin.set_fact:
+    unifi_device_map: >-
+      {{
+        unifi_device_map | default({}) | combine({
+          item.mac: {
+            'id': item._id,
+            'name': item.name | default(item.mac),
+            'current_stp_priority': item.stp_priority | default('32768')
+          }
+        })
+      }}
+  loop: "{{ (unifi_devices_response.json.data | default([])) }}"
+  loop_control:
+    label: "{{ item.name | default(item.mac) }}"
+  no_log: true
+
+- name: Set STP priority on each configured switch
+  ansible.builtin.uri:
+    url: "{{ unifi_api_base }}/rest/device/{{ unifi_device_map[item.key].id }}"
+    method: PUT
+    headers:
+      X-API-KEY: "{{ unifi_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      stp_priority: "{{ item.value | string }}"
+    validate_certs: "{{ unifi_validate_certs }}"
+    status_code:
+      - 200
+  loop: "{{ unifi_stp_priorities | dict2items }}"
+  loop_control:
+    label: "{{ unifi_device_map[item.key].name | default(item.key) }} → priority {{ item.value }}"
+  when:
+    - item.key in unifi_device_map
+    - (unifi_device_map[item.key].current_stp_priority | string) != (item.value | string)
+  register: stp_results
+
+- name: Report skipped devices (MAC not found)
+  ansible.builtin.debug:
+    msg: "WARNING: MAC {{ item.key }} not found in adopted devices — skipping STP priority"
+  loop: "{{ unifi_stp_priorities | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.key not in unifi_device_map

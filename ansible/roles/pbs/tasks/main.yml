@@ -1,0 +1,340 @@
+---
+# =============================================================================
+# PBS Role — Proxmox Backup Server Configuration
+# =============================================================================
+# Configures a freshly provisioned PBS instance:
+#   1. Create ZFS mirror from passthrough HDDs
+#   2. Disable enterprise repo, enable no-subscription repo
+#   3. Create PBS datastore on ZFS pool
+#   4. Create backup user and API token
+#   5. Configure retention/prune and garbage collection
+#   6. Store credentials in Vault
+#   7. Configure UFW firewall rules
+#
+# Runs on the PBS VM after Terraform provisioning + Packer base image.
+# The Packer template already installed PBS, QEMU guest agent, and
+# applied baseline SSH/firewall hardening.
+# PBS 4.x (Debian 13/Trixie) ships ZFS built-in — no extra packages.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ZFS Mirror Setup (Passthrough HDDs)
+# ---------------------------------------------------------------------------
+# Two physical HDDs are passed through from the Proxmox host by Terraform
+# (attach-passthrough-disks.sh). We create a ZFS mirror for backup data.
+# If the VM is rebuilt but HDDs retain ZFS labels, `zpool import` recovers
+# the pool without data loss — only `zpool create` on genuinely fresh disks.
+# ---------------------------------------------------------------------------
+
+- name: Verify passthrough disks exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ pbs_zfs_disks }}"
+  register: pbs_disk_check
+  tags: [pbs, zfs]
+
+- name: Fail if any passthrough disk is missing
+  ansible.builtin.fail:
+    msg: >
+      PBS passthrough disk {{ item.item }} not found. Ensure Terraform
+      attached the physical HDDs via attach-passthrough-disks.sh.
+  loop: "{{ pbs_disk_check.results }}"
+  when: not item.stat.exists
+  tags: [pbs, zfs]
+
+- name: Check if ZFS pool already exists
+  ansible.builtin.command:
+    cmd: zpool list -H -o name {{ pbs_zfs_pool_name }}
+  register: pbs_zpool_exists
+  changed_when: false
+  failed_when: false
+  tags: [pbs, zfs]
+
+# If pool doesn't exist locally, try importing it first. This handles the
+# case where the VM was destroyed and rebuilt but the physical HDDs still
+# have the ZFS pool labels from the previous deployment.
+- name: Try importing existing ZFS pool from disks
+  ansible.builtin.command:
+    cmd: zpool import {{ pbs_zfs_pool_name }}
+  register: pbs_zpool_import
+  changed_when: pbs_zpool_import.rc == 0
+  failed_when: false
+  when: pbs_zpool_exists.rc != 0
+  tags: [pbs, zfs]
+
+# Only create a new pool if import also failed (genuinely fresh disks)
+- name: Create ZFS mirror pool
+  ansible.builtin.command:
+    cmd: >-
+      zpool create -f
+      -o ashift={{ pbs_zfs_ashift }}
+      -O compression={{ pbs_zfs_compression }}
+      -O atime=off
+      {{ pbs_zfs_pool_name }}
+      mirror {{ pbs_zfs_disks | join(' ') }}
+  when:
+    - pbs_zpool_exists.rc != 0
+    - pbs_zpool_import.rc != 0
+  tags: [pbs, zfs]
+
+- name: Verify ZFS pool health
+  ansible.builtin.command:
+    cmd: zpool status {{ pbs_zfs_pool_name }}
+  register: pbs_zpool_status
+  changed_when: false
+  tags: [pbs, zfs]
+
+- name: Display ZFS pool status
+  ansible.builtin.debug:
+    msg: "{{ pbs_zpool_status.stdout_lines }}"
+  tags: [pbs, zfs]
+
+- name: Fail if ZFS pool is degraded
+  ansible.builtin.fail:
+    msg: >
+      ZFS pool {{ pbs_zfs_pool_name }} is not healthy!
+      Status: {{ pbs_zpool_status.stdout }}
+  when: "'DEGRADED' in pbs_zpool_status.stdout or 'FAULTED' in pbs_zpool_status.stdout"
+  tags: [pbs, zfs]
+
+# ---------------------------------------------------------------------------
+# PBS Repository Configuration
+# ---------------------------------------------------------------------------
+
+- name: Check which enterprise repo format exists
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/apt/sources.list.d/pbs-enterprise.list
+    - /etc/apt/sources.list.d/pbs-enterprise.sources
+  register: pbs_enterprise_repo_files
+  tags: [pbs, repo]
+
+# PBS 3.x uses .list format (deb822 not yet default)
+- name: Disable PBS enterprise repository (.list format)
+  ansible.builtin.lineinfile:
+    path: /etc/apt/sources.list.d/pbs-enterprise.list
+    regexp: '^deb'
+    line: '# deb https://enterprise.proxmox.com/debian/pbs {{ pbs_debian_codename }} pbs-enterprise'
+    backup: true
+  when: pbs_enterprise_repo_files.results[0].stat.exists
+  tags: [pbs, repo]
+
+# PBS 4.x (Debian 13/Trixie) uses .sources format (deb822)
+- name: Disable PBS enterprise repository (.sources format)
+  ansible.builtin.lineinfile:
+    path: /etc/apt/sources.list.d/pbs-enterprise.sources
+    regexp: '^Enabled:'
+    line: 'Enabled: no'
+  when: pbs_enterprise_repo_files.results[1].stat.exists
+  tags: [pbs, repo]
+
+- name: Enable PBS no-subscription repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/pbs-no-subscription.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      deb http://download.proxmox.com/debian/pbs {{ pbs_debian_codename }} pbs-no-subscription
+  notify: Update apt cache
+  tags: [pbs, repo]
+
+# ---------------------------------------------------------------------------
+# PBS Datastore
+# ---------------------------------------------------------------------------
+
+- name: Create datastore directory
+  ansible.builtin.file:
+    path: "{{ pbs_datastore_path }}"
+    state: directory
+    owner: backup
+    group: backup
+    mode: "0750"
+  tags: [pbs, datastore]
+
+- name: Check if datastore already exists
+  ansible.builtin.command:
+    cmd: proxmox-backup-manager datastore list --output-format json
+  register: pbs_datastore_list
+  changed_when: false
+  tags: [pbs, datastore]
+
+- name: Create PBS datastore
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-backup-manager datastore create
+      {{ pbs_datastore_name }}
+      {{ pbs_datastore_path }}
+      --gc-schedule "{{ pbs_gc_schedule }}"
+      --keep-daily {{ pbs_keep_daily }}
+      --keep-weekly {{ pbs_keep_weekly }}
+      --keep-monthly {{ pbs_keep_monthly }}
+  when: pbs_datastore_name not in (pbs_datastore_list.stdout | from_json | map(attribute='name') | list)
+  tags: [pbs, datastore]
+
+# ---------------------------------------------------------------------------
+# Backup User & API Token
+# ---------------------------------------------------------------------------
+
+- name: Check if backup user exists
+  ansible.builtin.command:
+    cmd: proxmox-backup-manager user list --output-format json
+  register: pbs_user_list
+  changed_when: false
+  tags: [pbs, user]
+
+- name: Create backup user
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-backup-manager user create
+      {{ pbs_backup_user }}
+      --comment "{{ pbs_backup_user_comment }}"
+  when: pbs_backup_user not in (pbs_user_list.stdout | from_json | map(attribute='userid') | list)
+  tags: [pbs, user]
+
+- name: Set backup user permissions (DatastoreAdmin on datastore)
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-backup-manager acl update
+      /datastore/{{ pbs_datastore_name }}
+      DatastoreAdmin
+      --auth-id {{ pbs_backup_user }}
+  changed_when: false
+  tags: [pbs, user]
+
+# API tokens in PBS have privilege separation ENABLED by default.
+# This means the token does NOT inherit the user's ACL — it needs
+# its own ACL entry. Set DatastoreAdmin on the token ID so PVE nodes
+# can verify the datastore exists during pvesm add (requires Audit).
+- name: Set API token permissions (DatastoreAdmin on datastore)
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-backup-manager acl update
+      /datastore/{{ pbs_datastore_name }}
+      DatastoreAdmin
+      --auth-id {{ pbs_backup_user }}!{{ pbs_api_token_name }}
+  changed_when: false
+  tags: [pbs, user]
+
+- name: Check if API token exists
+  ansible.builtin.command:
+    cmd: proxmox-backup-manager user list-tokens {{ pbs_backup_user }} --output-format json
+  register: pbs_token_list
+  changed_when: false
+  failed_when: false
+  tags: [pbs, user]
+
+# PBS 4.x renamed 'token create' → 'generate-token' and removed --output-format.
+# The command outputs JSON wrapped with a "Result: " prefix:
+#   Result: {
+#     "tokenid": "backup@pbs!pve-backup",
+#     "value": "c7eeac37-..."
+#   }
+- name: Create API token for backup user
+  ansible.builtin.command:
+    cmd: >-
+      proxmox-backup-manager user generate-token
+      {{ pbs_backup_user }}
+      {{ pbs_api_token_name }}
+  register: pbs_token_create
+  when: >-
+    pbs_token_list.rc != 0 or
+    pbs_api_token_name not in (pbs_token_list.stdout | from_json | map(attribute='token-name') | list)
+  no_log: true
+  tags: [pbs, user]
+
+# PBS 4.x generate-token outputs JSON prefixed with "Result: ".
+# Strip the prefix, parse as JSON, extract the token value.
+- name: Extract API token value
+  ansible.builtin.set_fact:
+    pbs_api_token_value: "{{ (pbs_token_create.stdout | regex_replace('^Result:\\s*', '') | from_json).value }}"
+  when: pbs_token_create is changed
+  no_log: true
+  tags: [pbs, user]
+
+# ---------------------------------------------------------------------------
+# Get PBS Fingerprint
+# ---------------------------------------------------------------------------
+
+# PBS 4.x removed --output-format from 'cert info'.
+# Use openssl to compute the SHA-256 fingerprint directly from the proxy cert.
+# This is the same fingerprint PBS displays in its UI and uses for verification.
+- name: Get PBS server fingerprint via openssl
+  ansible.builtin.shell:
+    cmd: >-
+      openssl x509 -in /etc/proxmox-backup/proxy.pem -noout -fingerprint -sha256
+      | sed 's/sha256 Fingerprint=//i' | tr -d ' '
+  register: pbs_cert_fingerprint
+  changed_when: false
+  tags: [pbs, fingerprint]
+
+- name: Extract fingerprint
+  ansible.builtin.set_fact:
+    pbs_fingerprint: "{{ pbs_cert_fingerprint.stdout | trim }}"
+  tags: [pbs, fingerprint]
+
+- name: Display PBS fingerprint
+  ansible.builtin.debug:
+    msg: "PBS fingerprint: {{ pbs_fingerprint }}"
+  tags: [pbs, fingerprint]
+
+# ---------------------------------------------------------------------------
+# Store Credentials in Vault
+# ---------------------------------------------------------------------------
+
+- name: Store PBS credentials in Vault
+  ansible.builtin.command:
+    cmd: >-
+      vault kv put -mount=secret infra/pbs
+      fingerprint={{ pbs_fingerprint }}
+      api_token_id={{ pbs_backup_user }}!{{ pbs_api_token_name }}
+      api_token_secret={{ pbs_api_token_value }}
+      server=10.0.10.15
+      datastore={{ pbs_datastore_name }}
+      port={{ pbs_api_port }}
+  environment:
+    VAULT_ADDR: "https://10.0.10.10:8200"
+    VAULT_CACERT: "{{ lookup('env', 'VAULT_CACERT') | default('~/.lab/tls/ca/ca.pem', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: pbs_api_token_value is defined
+  tags: [pbs, vault]
+
+# ---------------------------------------------------------------------------
+# UFW Firewall Rules
+# ---------------------------------------------------------------------------
+
+- name: Allow PBS API port from Management VLAN
+  community.general.ufw:
+    rule: allow
+    port: "{{ pbs_api_port }}"
+    proto: tcp
+    src: 10.0.10.0/24
+    comment: "PBS API from Management VLAN 10"
+  tags: [pbs, firewall]
+
+- name: Allow PBS API port from LAN (admin workstation)
+  community.general.ufw:
+    rule: allow
+    port: "{{ pbs_api_port }}"
+    proto: tcp
+    src: 10.0.4.0/24
+    comment: "PBS API from LAN (admin workstation)"
+  tags: [pbs, firewall]
+
+# ---------------------------------------------------------------------------
+# Verify PBS is Running
+# ---------------------------------------------------------------------------
+
+- name: Ensure PBS services are running
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - proxmox-backup
+    - proxmox-backup-proxy
+  tags: [pbs, verify]

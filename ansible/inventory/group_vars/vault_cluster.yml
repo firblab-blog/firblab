@@ -1,0 +1,117 @@
+---
+# =============================================================================
+# Vault Cluster Configuration
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Vault Version and Binary
+# ---------------------------------------------------------------------------
+vault_version: "1.21.3"
+# Architecture: Apple Silicon reports arm64, Linux ARM reports aarch64
+vault_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+# OS: macOS = darwin, Linux = linux
+vault_os: "{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}"
+vault_download_url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_{{ vault_os }}_{{ vault_arch }}.zip"
+vault_checksum_url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_SHA256SUMS"
+vault_binary_path: /usr/local/bin/vault
+
+# ---------------------------------------------------------------------------
+# Vault Directories
+# ---------------------------------------------------------------------------
+vault_data_dir: /opt/vault/data
+vault_config_dir: /etc/vault.d
+vault_tls_dir: /etc/vault.d/tls
+vault_log_dir: /var/log/vault
+
+# ---------------------------------------------------------------------------
+# Vault User and Group
+# ---------------------------------------------------------------------------
+vault_user: vault
+vault_group: vault
+
+# ---------------------------------------------------------------------------
+# Vault Network Configuration
+# ---------------------------------------------------------------------------
+vault_api_port: 8200
+vault_cluster_port: 8201
+vault_api_addr: "https://{{ ansible_host }}:{{ vault_api_port }}"
+vault_cluster_addr: "https://{{ ansible_host }}:{{ vault_cluster_port }}"
+
+# ---------------------------------------------------------------------------
+# Vault TLS Configuration
+# ---------------------------------------------------------------------------
+vault_tls_cert_file: "{{ vault_tls_dir }}/vault-cert.pem"
+vault_tls_key_file: "{{ vault_tls_dir }}/vault-key.pem"
+vault_tls_ca_file: "{{ vault_tls_dir }}/ca.pem"
+vault_tls_min_version: "tls12"
+
+# ---------------------------------------------------------------------------
+# Vault Storage (Integrated Raft)
+# ---------------------------------------------------------------------------
+vault_storage_backend: raft
+
+# All Raft peers in the cluster — used for retry_join configuration
+vault_raft_peers:
+  - node_id: vault-1
+    api_addr: "https://10.0.10.10:{{ vault_api_port }}"
+    cluster_addr: "https://10.0.10.10:{{ vault_cluster_port }}"
+  - node_id: vault-2
+    api_addr: "https://10.0.50.2:{{ vault_api_port }}"
+    cluster_addr: "https://10.0.50.2:{{ vault_cluster_port }}"
+  - node_id: vault-3
+    api_addr: "https://10.0.10.13:{{ vault_api_port }}"
+    cluster_addr: "https://10.0.10.13:{{ vault_cluster_port }}"
+
+# ---------------------------------------------------------------------------
+# Vault Seal Configuration
+# ---------------------------------------------------------------------------
+# Transit auto-unseal is configured conditionally in vault.hcl.j2.
+# Set to true once the transit seal backend is available.
+vault_transit_unseal_enabled: true
+vault_transit_seal_address: "https://10.0.10.10:8210"
+vault_transit_seal_mount_path: "transit"
+vault_transit_seal_key_name: "autounseal"
+# vault_transit_seal_token should be provided via Ansible Vault or extra-vars
+# vault_transit_seal_token: ""
+
+# ---------------------------------------------------------------------------
+# Vault Telemetry (Prometheus)
+# ---------------------------------------------------------------------------
+vault_telemetry_enabled: true
+vault_prometheus_retention_time: "30s"
+
+# ---------------------------------------------------------------------------
+# Vault UI
+# ---------------------------------------------------------------------------
+vault_ui_enabled: true
+
+# ---------------------------------------------------------------------------
+# Vault Service
+# ---------------------------------------------------------------------------
+vault_service_name: vault
+vault_disable_mlock: true
+
+# ---------------------------------------------------------------------------
+# Vault Firewall Rules (used by both UFW and firewalld)
+# ---------------------------------------------------------------------------
+vault_firewall_ports:
+  - { port: "{{ vault_api_port }}", proto: tcp, comment: "Vault API" }
+  - { port: "{{ vault_cluster_port }}", proto: tcp, comment: "Vault cluster" }
+vault_firewall_sources:
+  - "{{ management_network }}"
+  - "{{ workload_subnet }}"
+  - "{{ lan_network }}"
+  - "{{ iot_network }}"            # VLAN 60 — Home Assistant Vault REST sensors
+
+# Map vault-specific firewall vars to common role's generic interface.
+# The common role consumes these in firewall-debian.yml and firewall-redhat.yml.
+firewall_additional_ports: "{{ vault_firewall_ports }}"
+firewall_additional_sources: "{{ vault_firewall_sources }}"
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+# vault-2 (10.0.50.2, Security VLAN 50) requires an additional UniFi
+# zone policy (services_to_security_monitoring) allowing TCP/9100 from the
+# Services VLAN. See terraform/layers/00-network/main.tf.
+monitoring_host_group: "vault"

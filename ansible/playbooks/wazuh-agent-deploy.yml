@@ -1,0 +1,117 @@
+---
+# =============================================================================
+# Wazuh Agent Fleet Deployment Playbook
+# =============================================================================
+# Deploys the Wazuh SIEM agent to all Linux hosts in the fleet. Agents
+# report to the Wazuh Manager on the RKE2 cluster via MetalLB VIP
+# (10.0.20.221:1514).
+#
+# Prerequisites:
+#   - Wazuh Manager deployed on RKE2 (k8s/platform/wazuh/manifests/)
+#   - Agent enrollment password stored in Vault at secret/k8s/wazuh
+#     (created by Terraform Layer 02-vault-config)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/wazuh-agent-deploy.yml
+#
+# Selective deployment:
+#   ansible-playbook ... --limit proxmox_nodes    # Only Proxmox hypervisors
+#   ansible-playbook ... --limit rke2_cluster     # Only RKE2 nodes
+#   ansible-playbook ... --limit gitlab           # Single host
+#
+# Tags:
+#   ansible-playbook ... --tags install    # Only agent installation
+#   ansible-playbook ... --tags configure  # Only reconfigure existing agents
+#   ansible-playbook ... --tags service    # Only restart agent service
+# =============================================================================
+
+- name: Deploy Wazuh agent to all Linux hosts
+  hosts: patchmon_agent_targets
+  become: true
+  gather_facts: true
+  serial: 5
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+          - os_family
+
+    # Skip macOS hosts (vault-1 is in vault_cluster but runs Darwin)
+    - name: Skip non-Linux hosts
+      ansible.builtin.meta: end_host
+      when: ansible_os_family == 'Darwin'
+
+    # Skip TrueNAS (not a standard Linux host — managed via arensb.truenas)
+    - name: Skip TrueNAS hosts
+      ansible.builtin.meta: end_host
+      when: "'truenas' in group_names"
+
+    # -----------------------------------------------------------------
+    # Read enrollment password from Vault
+    # -----------------------------------------------------------------
+    - name: Read Wazuh secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json k8s/wazuh
+      register: _vault_wazuh
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Set Wazuh enrollment password from Vault
+      ansible.builtin.set_fact:
+        wazuh_registration_password: "{{ (_vault_wazuh.stdout | from_json).data.data.agent_enrollment_password }}"
+        wazuh_manager_address: "{{ wazuh_manager_ip }}"
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Validate enrollment password exists
+      ansible.builtin.assert:
+        that:
+          - wazuh_registration_password | length > 0
+        fail_msg: >-
+          Wazuh enrollment password not found in Vault (secret/k8s/wazuh).
+          Ensure Terraform Layer 02-vault-config has been applied.
+      run_once: true
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >-
+          Deploying Wazuh agent on {{ inventory_hostname }}
+          ({{ ansible_os_family }}, {{ ansible_host }})
+          → Manager: {{ wazuh_manager_address }}
+
+  roles:
+    - role: wazuh-agent
+      tags:
+        - wazuh-agent
+        - install
+        - configure
+        - service
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          Wazuh agent deployed on {{ inventory_hostname }} ({{ ansible_host }}).
+          Manager: {{ wazuh_manager_address }}:1514.
+          Check enrollment: /var/ossec/bin/agent-auth -m {{ wazuh_manager_address }}
+      tags:
+        - verify

@@ -1,0 +1,167 @@
+---
+# =============================================================================
+# node_exporter Installation — Prometheus metrics agent
+# =============================================================================
+# Downloads and installs node_exporter as a systemd service on Linux hosts.
+# Exposes host metrics (CPU, RAM, disk, network, filesystems) on port 9100.
+# Prometheus scrapes these via additionalScrapeConfigs in the kube-prometheus-stack.
+#
+# Supported architectures: amd64, arm64 (RPi5, RPi4), armv7
+# Supported OS families: Debian/Ubuntu, RedHat/Rocky (skipped on Darwin/macOS)
+#
+# Network path for Prometheus scraping:
+#   Services VLAN (10.0.20.x) → port 9100 → target host
+#   - Management VLAN hosts: services_to_mgmt ALLOW (unrestricted)
+#   - Services VLAN hosts:   same VLAN, no zone policy needed
+#   - Default LAN hosts:     services_to_lan ALLOW (unrestricted)
+#   - Security VLAN hosts:   services_to_security_monitoring ALLOW (port 9100)
+#   - Proxmox nodes:         iptables must allow 9100 from 10.0.20.0/24
+#
+# Controlled by: monitoring_node_exporter_enabled (default: true in all.yml)
+# =============================================================================
+
+- name: node_exporter | set architecture
+  ansible.builtin.set_fact:
+    node_exporter_arch: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else ('armv7' if ansible_architecture == 'armv7l' else 'amd64') }}"
+  tags:
+    - monitoring
+    - node-exporter
+
+- name: node_exporter | check current version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/node_exporter --version
+  register: node_exporter_current_version
+  changed_when: false
+  failed_when: false
+  tags:
+    - monitoring
+    - node-exporter
+
+- name: node_exporter | set install flag
+  ansible.builtin.set_fact:
+    node_exporter_needs_install: >-
+      {{ node_exporter_current_version.rc != 0 or
+         monitoring_node_exporter_version not in (node_exporter_current_version.stdout | default('')) }}
+  tags:
+    - monitoring
+    - node-exporter
+
+- name: node_exporter | create system user
+  ansible.builtin.user:
+    name: node_exporter
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/node_exporter
+    create_home: false
+    comment: "Prometheus node_exporter"
+  tags:
+    - monitoring
+    - node-exporter
+
+- name: node_exporter | install (download + extract)
+  when: node_exporter_needs_install | bool
+  block:
+    - name: node_exporter | download archive
+      ansible.builtin.get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ monitoring_node_exporter_version }}/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+        dest: "/tmp/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+        mode: "0644"
+        timeout: 60
+      tags:
+        - monitoring
+        - node-exporter
+
+    - name: node_exporter | extract archive
+      ansible.builtin.unarchive:
+        src: "/tmp/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+        dest: /tmp/
+        remote_src: true
+      tags:
+        - monitoring
+        - node-exporter
+
+    - name: node_exporter | install binary
+      ansible.builtin.copy:
+        src: "/tmp/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        owner: root
+        group: root
+        mode: "0755"
+        remote_src: true
+      notify: Restart node_exporter
+      tags:
+        - monitoring
+        - node-exporter
+
+    - name: node_exporter | cleanup temp files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
+        - "/tmp/node_exporter-{{ monitoring_node_exporter_version }}.linux-{{ node_exporter_arch }}"
+      tags:
+        - monitoring
+        - node-exporter
+
+- name: node_exporter | install systemd unit
+  ansible.builtin.template:
+    src: node-exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart node_exporter
+  tags:
+    - monitoring
+    - node-exporter
+
+- name: node_exporter | enable and start service
+  ansible.builtin.systemd:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - monitoring
+    - node-exporter
+
+# ---------------------------------------------------------------------------
+# Firewall — open port 9100 for Prometheus scraping
+# ---------------------------------------------------------------------------
+# Only runs on hosts using UFW (not Proxmox nodes; proxmox_skip_ufw=true).
+# Proxmox nodes rely on iptables managed by proxmox-bootstrap.yml — ensure
+# the monitoring_network (Services VLAN 20) is allowed in iptables on those hosts.
+
+- name: node_exporter | allow port 9100 from monitoring network (UFW)
+  community.general.ufw:
+    rule: allow
+    port: "9100"
+    proto: tcp
+    from_ip: "{{ item }}"
+    comment: "node_exporter — Prometheus scraping"
+  loop: "{{ monitoring_scrape_sources }}"
+  when:
+    - not (proxmox_skip_ufw | default(false) | bool)
+    - ansible_os_family == 'Debian'
+  tags:
+    - monitoring
+    - node-exporter
+    - firewall
+
+- name: node_exporter | allow port 9100 from monitoring network (firewalld)
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item }}"
+      port port="9100" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ monitoring_scrape_sources }}"
+  when: ansible_os_family == 'RedHat'
+  tags:
+    - monitoring
+    - node-exporter
+    - firewall

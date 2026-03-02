@@ -1,0 +1,184 @@
+---
+# =============================================================================
+# RKE2 Prerequisites
+# =============================================================================
+# Prepares nodes for RKE2 installation: kernel modules, sysctl, packages,
+# swap disabled, etcd user (CIS requirement).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Disable Swap (Kubernetes requirement)
+# ---------------------------------------------------------------------------
+- name: Disable swap immediately
+  ansible.builtin.command:
+    cmd: swapoff -a
+  changed_when: false
+  tags:
+    - prerequisites
+
+- name: Remove swap entries from fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+    backup: true
+  tags:
+    - prerequisites
+
+# ---------------------------------------------------------------------------
+# Kernel Modules
+# ---------------------------------------------------------------------------
+- name: Load required kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ rke2_kernel_modules }}"
+  tags:
+    - prerequisites
+    - kernel
+
+- name: Persist kernel modules across reboot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/rke2.conf
+    content: |
+      # RKE2 required kernel modules — managed by Ansible
+      {% for mod in rke2_kernel_modules %}
+      {{ mod }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - prerequisites
+    - kernel
+
+# ---------------------------------------------------------------------------
+# Sysctl (CIS profile prerequisites)
+# ---------------------------------------------------------------------------
+- name: Set RKE2 CIS-required sysctl parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/90-rke2-cis.conf
+  loop: "{{ rke2_sysctl | dict2items }}"
+  tags:
+    - prerequisites
+    - sysctl
+
+# ---------------------------------------------------------------------------
+# Longhorn Prerequisite Packages
+# ---------------------------------------------------------------------------
+- name: Install Longhorn prerequisite packages
+  ansible.builtin.apt:
+    name: "{{ rke2_longhorn_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags:
+    - prerequisites
+    - packages
+
+# ---------------------------------------------------------------------------
+# Longhorn Data Disk (format + mount)
+# ---------------------------------------------------------------------------
+# Terraform provisions a dedicated data disk on scsi1 (/dev/sdb) for Longhorn
+# storage. This section formats it (if needed) and mounts it at the Longhorn
+# data path. Uses LABEL-based fstab entry for stability across disk reorders.
+# Pattern: identical to ansible/roles/gitlab/tasks/main.yml disk setup.
+# ---------------------------------------------------------------------------
+- name: Check if Longhorn data disk exists
+  ansible.builtin.stat:
+    path: "{{ rke2_data_disk_device }}"
+  register: longhorn_data_disk
+  tags:
+    - prerequisites
+    - data_disk
+
+- name: Check if Longhorn data disk has a filesystem
+  ansible.builtin.command:
+    cmd: "blkid -o value -s TYPE {{ rke2_data_disk_device }}"
+  register: longhorn_disk_fs
+  changed_when: false
+  failed_when: false
+  when: longhorn_data_disk.stat.exists
+  tags:
+    - prerequisites
+    - data_disk
+
+- name: Format Longhorn data disk as ext4
+  ansible.builtin.command:
+    cmd: "mkfs.ext4 -L {{ rke2_data_disk_label }} {{ rke2_data_disk_device }}"
+  when:
+    - longhorn_data_disk.stat.exists
+    - longhorn_disk_fs.rc != 0 or longhorn_disk_fs.stdout == ""
+  tags:
+    - prerequisites
+    - data_disk
+
+- name: Create Longhorn data mount point
+  ansible.builtin.file:
+    path: "{{ rke2_data_disk_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: longhorn_data_disk.stat.exists
+  tags:
+    - prerequisites
+    - data_disk
+
+- name: Mount Longhorn data disk via fstab
+  ansible.posix.mount:
+    path: "{{ rke2_data_disk_mount }}"
+    src: "LABEL={{ rke2_data_disk_label }}"
+    fstype: ext4
+    opts: defaults,noatime
+    state: mounted
+  when: longhorn_data_disk.stat.exists
+  tags:
+    - prerequisites
+    - data_disk
+
+# ---------------------------------------------------------------------------
+# etcd User (CIS Benchmark requirement)
+# ---------------------------------------------------------------------------
+# RKE2 CIS profile expects an 'etcd' user to own etcd data files.
+# Must exist BEFORE RKE2 starts.
+- name: Create etcd group
+  ansible.builtin.group:
+    name: etcd
+    system: true
+    state: present
+  when: rke2_create_etcd_user | bool
+  tags:
+    - prerequisites
+
+- name: Create etcd user
+  ansible.builtin.user:
+    name: etcd
+    group: etcd
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/etcd
+    create_home: false
+    state: present
+  when: rke2_create_etcd_user | bool
+  tags:
+    - prerequisites
+
+# ---------------------------------------------------------------------------
+# RKE2 Config Directory
+# ---------------------------------------------------------------------------
+- name: Create RKE2 config directory
+  ansible.builtin.file:
+    path: "{{ rke2_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - prerequisites

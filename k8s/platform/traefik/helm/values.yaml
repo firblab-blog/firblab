@@ -1,0 +1,173 @@
+# =============================================================================
+# Traefik Ingress Controller Helm Values
+# =============================================================================
+# Replaces ingress-nginx. Traefik provides:
+#   - Native Kubernetes Ingress + IngressRoute CRD support
+#   - Built-in middleware (rate limiting, headers, IP allow-listing)
+#   - cert-manager integration for automatic TLS
+#   - Prometheus metrics endpoint
+#
+# Install:
+#   helm repo add traefik https://traefik.github.io/charts
+#   helm install traefik traefik/traefik \
+#     -n traefik --create-namespace -f values.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+deployment:
+  replicas: 2
+
+# Pod anti-affinity to spread across agent nodes
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - traefik
+          topologyKey: kubernetes.io/hostname
+
+# ---------------------------------------------------------------------------
+# Service (MetalLB LoadBalancer)
+# ---------------------------------------------------------------------------
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.universe.tf/address-pool: services-pool
+
+# ---------------------------------------------------------------------------
+# Entrypoints
+# ---------------------------------------------------------------------------
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    protocol: TCP
+    # Redirect HTTP → HTTPS (v34+ syntax)
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    port: 8443
+    exposedPort: 443
+    protocol: TCP
+    tls:
+      enabled: true
+    # WebSocket connections (Grafana /api/live/ws, ArgoCD) require unlimited
+    # read/write timeouts. Traefik's defaults kill long-lived connections
+    # after ~30s, causing "NetworkError when attempting to fetch resource".
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s
+        writeTimeout: 0s
+
+# ---------------------------------------------------------------------------
+# TLS Hardening
+# ---------------------------------------------------------------------------
+tlsOptions:
+  default:
+    minVersion: VersionTLS12
+    cipherSuites:
+      - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+      - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+
+# ---------------------------------------------------------------------------
+# Cross-namespace middleware (required for IngressRoutes in other namespaces
+# to reference Middleware resources in the traefik namespace, e.g.
+# default-headers, authentik-forwardauth)
+# ---------------------------------------------------------------------------
+providers:
+  kubernetesCRD:
+    allowCrossNamespace: true
+
+# ---------------------------------------------------------------------------
+# Security Headers (default middleware applied to ALL websecure routes)
+# ---------------------------------------------------------------------------
+# Traefik CRD provider namespaces resources as <namespace>-<name>.
+# The Middleware "default-headers" in namespace "traefik" becomes
+# "traefik-default-headers@kubernetescrd".
+additionalArguments:
+  - "--entryPoints.websecure.http.middlewares=traefik-default-headers@kubernetescrd"
+
+# ---------------------------------------------------------------------------
+# Prometheus Metrics
+# ---------------------------------------------------------------------------
+metrics:
+  prometheus:
+    entryPoint: metrics
+    service:
+      enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+
+# ---------------------------------------------------------------------------
+# Resource Limits
+# ---------------------------------------------------------------------------
+# Note: 256Mi was insufficient — Traefik v3 handling TLS termination,
+# HTTP/2, WebSocket proxying, access logging, and middleware evaluation
+# for all K8s services needs headroom. Increased to 512Mi to prevent
+# GC pressure from dropping in-flight connections.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Security Context
+# ---------------------------------------------------------------------------
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+podSecurityContext:
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+    format: json
+
+# ---------------------------------------------------------------------------
+# IngressClass
+# ---------------------------------------------------------------------------
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+# ---------------------------------------------------------------------------
+# Dashboard (disabled for security — access via port-forward if needed)
+# ---------------------------------------------------------------------------
+ingressRoute:
+  dashboard:
+    enabled: false

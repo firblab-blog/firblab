@@ -1,0 +1,79 @@
+# =============================================================================
+# Layer 05: Standalone Services - Example Variable Values
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# =============================================================================
+
+# ---------------------------------------------------------
+# Proxmox Connection
+# ---------------------------------------------------------
+proxmox_api_url   = "https://10.0.10.10:8006"
+proxmox_api_token = "terraform@pam!terraform-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node      = "lab-02"
+
+# ---------------------------------------------------------
+# SSH
+# ---------------------------------------------------------
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-key-comment"
+
+# ---------------------------------------------------------
+# Shared Infrastructure Settings
+# ---------------------------------------------------------
+storage_pool         = "local-lvm"
+snippet_storage      = "local"
+download_cloud_image = true
+cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+cloud_image_filename = "noble-server-cloudimg-amd64.qcow2"
+
+# ---------------------------------------------------------
+# Network Settings (Services VLAN 20)
+# ---------------------------------------------------------
+network_bridge = "vmbr0"
+vlan_tag       = 20
+gateway        = "10.0.20.1"
+domain_name    = "example-lab.local"
+dns_servers    = ["10.0.20.1"]
+
+# ---------------------------------------------------------
+# Ghost (LXC)
+# ---------------------------------------------------------
+ghost_vm_id       = 5010
+ghost_name        = "ghost"
+ghost_cpu_cores   = 2
+ghost_memory_mb   = 2048
+ghost_disk_size_gb = 20
+ghost_ip_address  = "dhcp"
+
+# ---------------------------------------------------------
+# FoundryVTT (VM)
+# ---------------------------------------------------------
+foundryvtt_vm_id             = 5011
+foundryvtt_name              = "foundryvtt"
+foundryvtt_cpu_cores         = 2
+foundryvtt_memory_mb         = 4096
+foundryvtt_os_disk_size_gb   = 40
+foundryvtt_data_disk_size_gb = 30
+foundryvtt_ip_address        = "dhcp"
+
+# ---------------------------------------------------------
+# Plex (VM)
+# ---------------------------------------------------------
+plex_vm_id          = 5012
+plex_name           = "plex"
+plex_cpu_cores      = 4
+plex_memory_mb      = 8192
+plex_os_disk_size_gb = 40
+plex_ip_address     = "dhcp"
+
+# ---------------------------------------------------------
+# Roundcube (LXC)
+# ---------------------------------------------------------
+roundcube_vm_id       = 5013
+roundcube_name        = "roundcube"
+roundcube_cpu_cores   = 1
+roundcube_memory_mb   = 1024
+roundcube_disk_size_gb = 10
+roundcube_ip_address  = "dhcp"

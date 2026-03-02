@@ -1,0 +1,13 @@
+# =============================================================================
+# NUT Configuration — /etc/nut/nut.conf
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+#
+# MODE options:
+#   standalone — local UPS monitoring only
+#   netserver  — serve UPS data to remote NUT clients on port 3493
+#   netclient  — monitor a remote NUT server (no local UPS)
+# =============================================================================
+
+MODE={{ nut_mode }}

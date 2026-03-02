@@ -1,0 +1,23 @@
+# Traefik Config — default-headers Middleware (OWASP security headers)
+# Wave 1: Applied after Traefik controller + CRDs are running (wave 0)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://10.0.10.50/infrastructure/firblab.git
+    targetRevision: HEAD
+    path: k8s/platform/traefik/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traefik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

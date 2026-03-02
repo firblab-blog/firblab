@@ -1,0 +1,187 @@
+---
+# =============================================================================
+# Vault TLS Certificate Generation (Localhost Only)
+# =============================================================================
+# Generates a CA and per-node TLS certificates for the Vault cluster.
+# Runs entirely on the Ansible controller (localhost) — no SSH to remote hosts.
+#
+# Output: ~/.lab/tls/
+#   ca/ca.pem           — CA certificate (deployed to all nodes)
+#   ca/ca-key.pem       — CA private key (NEVER deployed remotely)
+#   vault-N/vault-cert.pem — Node certificate
+#   vault-N/vault-key.pem  — Node private key
+#   unseal/vault-cert.pem  — Unseal vault certificate (port 8210)
+#
+# Algorithm: ECDSA P-256 (modern, fast, small — good for ARM + Apple Silicon)
+# CA validity: 10 years (offline, stored securely)
+# Node cert validity: 365 days (rotated via Ansible)
+#
+# Usage:
+#   ansible-playbook playbooks/vault-tls-generate.yml
+#   ansible-playbook playbooks/vault-tls-generate.yml -e force_regenerate_ca=true
+#   ansible-playbook playbooks/vault-tls-generate.yml -e force_regenerate_certs=true
+#
+# Verification:
+#   openssl x509 -in ~/.lab/tls/vault-1/vault-cert.pem -text -noout
+#   openssl verify -CAfile ~/.lab/tls/ca/ca.pem ~/.lab/tls/vault-1/vault-cert.pem
+# =============================================================================
+
+- name: Generate Vault TLS Certificates
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars:
+    tls_base_dir: "{{ lookup('env', 'HOME') }}/.lab/tls"
+    ca_dir: "{{ tls_base_dir }}/ca"
+    domain_name: example-lab.local
+    ca_validity_days: 3650    # 10 years
+    cert_validity_days: 365   # 1 year
+    force_regenerate_ca: false
+    force_regenerate_certs: false
+
+    # Vault cluster nodes — must match inventory hosts.yml and vault_cluster.yml
+    vault_nodes:
+      - node_id: vault-1
+        ip: 10.0.10.10
+      - node_id: vault-2
+        ip: 10.0.50.2
+      - node_id: vault-3
+        ip: 10.0.10.13
+      # Unseal vault instance — runs on Mac Mini alongside vault-1 on port 8210
+      - node_id: unseal
+        ip: 10.0.10.10
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Directory Structure
+    # =========================================================================
+    - name: Create TLS base directory
+      ansible.builtin.file:
+        path: "{{ tls_base_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create CA directory
+      ansible.builtin.file:
+        path: "{{ ca_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create per-node directories
+      ansible.builtin.file:
+        path: "{{ tls_base_dir }}/{{ item.node_id }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ vault_nodes }}"
+      loop_control:
+        label: "{{ item.node_id }}"
+
+    # =========================================================================
+    # Phase 2: Certificate Authority
+    # =========================================================================
+    - name: Check if CA already exists
+      ansible.builtin.stat:
+        path: "{{ ca_dir }}/ca.pem"
+      register: ca_exists
+
+    - name: Generate CA private key (ECDSA P-256)
+      ansible.builtin.command: >
+        openssl ecparam -genkey -name prime256v1
+        -out {{ ca_dir }}/ca-key.pem
+      args:
+        creates: "{{ ca_dir }}/ca-key.pem"
+      when: not ca_exists.stat.exists or force_regenerate_ca | bool
+
+    - name: Set CA key permissions
+      ansible.builtin.file:
+        path: "{{ ca_dir }}/ca-key.pem"
+        mode: "0600"
+      when: not ca_exists.stat.exists or force_regenerate_ca | bool
+
+    - name: Generate CA certificate
+      ansible.builtin.command: >
+        openssl req -new -x509 -sha256
+        -key {{ ca_dir }}/ca-key.pem
+        -out {{ ca_dir }}/ca.pem
+        -days {{ ca_validity_days }}
+        -subj "/C=US/ST=Virginia/L=Arlington/O=firblab/OU=Infrastructure/CN=firblab Vault CA"
+      args:
+        creates: "{{ ca_dir }}/ca.pem"
+      when: not ca_exists.stat.exists or force_regenerate_ca | bool
+
+    - name: Display CA info
+      ansible.builtin.command: >
+        openssl x509 -in {{ ca_dir }}/ca.pem -subject -dates -noout
+      register: ca_info
+      changed_when: false
+
+    - name: Show CA certificate details
+      ansible.builtin.debug:
+        msg: "{{ ca_info.stdout_lines }}"
+
+    # =========================================================================
+    # Phase 3: Per-Node Certificates
+    # =========================================================================
+    - name: Check existing node certificates
+      ansible.builtin.stat:
+        path: "{{ tls_base_dir }}/{{ item.node_id }}/vault-cert.pem"
+      register: node_certs_exist
+      loop: "{{ vault_nodes }}"
+      loop_control:
+        label: "{{ item.node_id }}"
+
+    - name: Generate node certificates
+      ansible.builtin.include_tasks:
+        file: ../tasks/vault-tls-node.yml
+      vars:
+        node_id: "{{ item.item.node_id }}"
+        node_ip: "{{ item.item.ip }}"
+        node_cert_exists: "{{ item.stat.exists }}"
+      loop: "{{ node_certs_exist.results }}"
+      loop_control:
+        label: "{{ item.item.node_id }}"
+      when: not item.stat.exists or force_regenerate_certs | bool
+
+    # =========================================================================
+    # Phase 4: Verification
+    # =========================================================================
+    - name: Verify each node certificate against CA
+      ansible.builtin.command: >
+        openssl verify -CAfile {{ ca_dir }}/ca.pem
+        {{ tls_base_dir }}/{{ item.node_id }}/vault-cert.pem
+      register: verify_results
+      changed_when: false
+      loop: "{{ vault_nodes }}"
+      loop_control:
+        label: "{{ item.node_id }}"
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ verify_results.results }}"
+      loop_control:
+        label: "{{ item.item.node_id }}"
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    - name: Display TLS generation summary
+      ansible.builtin.debug:
+        msg:
+          - "Vault TLS Certificate Generation Complete"
+          - ""
+          - "CA Certificate: {{ ca_dir }}/ca.pem"
+          - "CA Key (KEEP SAFE): {{ ca_dir }}/ca-key.pem"
+          - ""
+          - "Node Certificates:"
+          - "  vault-1: {{ tls_base_dir }}/vault-1/vault-cert.pem"
+          - "  vault-2: {{ tls_base_dir }}/vault-2/vault-cert.pem"
+          - "  vault-3: {{ tls_base_dir }}/vault-3/vault-cert.pem"
+          - "  unseal:  {{ tls_base_dir }}/unseal/vault-cert.pem"
+          - ""
+          - "Next steps:"
+          - "  1. Deploy: ansible-playbook playbooks/vault-deploy.yml --limit vault-1"
+          - "  2. Verify TLS: openssl s_client -connect 10.0.10.10:8200 -CAfile {{ ca_dir }}/ca.pem"
+          - "  3. Health: curl -sk https://10.0.10.10:8200/v1/sys/health"

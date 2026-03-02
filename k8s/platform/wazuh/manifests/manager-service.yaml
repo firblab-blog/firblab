@@ -1,0 +1,35 @@
+# =============================================================================
+# Wazuh Manager — LoadBalancer Service (MetalLB)
+# =============================================================================
+# Exposes agent enrollment (1515) and event collection (1514) ports to
+# the Services VLAN. Agents outside the cluster connect to this VIP.
+#
+# IP 10.0.20.221 is reserved from the MetalLB services-pool (.220-.250).
+# Update ansible/inventory/group_vars/all.yml wazuh_manager_ip to match.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-manager
+  namespace: wazuh
+  labels:
+    app: wazuh-manager
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "10.0.20.221"
+spec:
+  type: LoadBalancer
+  selector:
+    app: wazuh-manager
+  ports:
+    - name: events
+      port: 1514
+      targetPort: 1514
+      protocol: TCP
+    - name: enrollment
+      port: 1515
+      targetPort: 1515
+      protocol: TCP
+    - name: api
+      port: 55000
+      targetPort: 55000
+      protocol: TCP

@@ -1,0 +1,458 @@
+---
+# =============================================================================
+# lab-08 Bootstrap Playbook (RPi5, Default LAN VLAN 1)
+# =============================================================================
+# Three-phase bootstrap for lab-08 running Raspberry Pi OS Lite 64-bit
+# (Debian bookworm). Adapted from rpi-bootstrap.yml (vault-3) but simplified:
+# no WiFi-to-wired cutover needed — already wired on VLAN 1 via DHCP.
+#
+# Play 1 - Diagnostic Pre-Flight (READ-ONLY):
+#   Detects wired interface, verifies link/carrier, detects network manager
+#   (NetworkManager vs dhcpcd vs netplan), displays all interface info. Makes ZERO changes.
+#
+# Play 2 - Setup + Static IP:
+#   Creates admin user, sets hostname, configures static IP via nmcli
+#   (NetworkManager), locks admin user. SSH drops on IP change — expected.
+#
+# Play 3 - System Hardening (as admin at new static IP):
+#   Applies common baseline and CIS L1 hardening via reusable roles.
+#   Same hardening as Proxmox VMs — bare metal gets the full treatment.
+#
+# After running this playbook, the host is ready for lab-08-deploy.yml.
+#
+# Prerequisites:
+#   1. Raspberry Pi OS Lite 64-bit flashed via Imager with user 'admin'
+#   2. RPi connected to closet switch (switch-01) Port 4 (Default LAN)
+#   3. SSH key deployed: ssh-copy-id -i ~/.ssh/id_ed25519_lab-08 admin@<dhcp_ip>
+#
+# Usage:
+#   # Diagnostic only (read-only, safe to run anytime):
+#   ansible-playbook playbooks/lab-08-bootstrap.yml --tags diagnostic \
+#     -e "dhcp_ip=10.0.4.241"
+#
+#   # Full bootstrap (all 3 plays):
+#   ansible-playbook playbooks/lab-08-bootstrap.yml --tags full_bootstrap \
+#     -e "dhcp_ip=10.0.4.241"
+# =============================================================================
+
+# =========================================================================
+# Play 1: Diagnostic Pre-Flight (READ-ONLY)
+# =========================================================================
+# Makes ZERO changes. Detects wired interface, verifies link, detects
+# network manager, displays state for operator review.
+# Run standalone with: --tags diagnostic
+# =========================================================================
+- name: "Bootstrap lab-08 (Play 1/3: Diagnostic Pre-Flight)"
+  hosts: lab-08
+  become: true
+  gather_facts: true
+  tags: [diagnostic, always]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ dhcp_ip | default('10.0.4.241') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_lab-08"
+
+  tasks:
+    # -------------------------------------------------------------------
+    # Detect wired interface name from kernel metadata
+    # -------------------------------------------------------------------
+    # Scans /sys/class/net/ for interfaces that are:
+    #   - type 1 (Ethernet)
+    #   - NOT wireless (no /sys/class/net/*/wireless directory)
+    #   - NOT virtual (has /sys/class/net/*/device symlink = real hardware)
+    #   - NOT loopback
+    # Works regardless of naming scheme: eth0, end0, enp1s0, etc.
+    # -------------------------------------------------------------------
+    - name: Detect wired Ethernet interface name
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          # Skip loopback
+          [ "$name" = "lo" ] && continue
+          # Skip wireless interfaces
+          [ -d "$iface/wireless" ] && continue
+          # Must be a real hardware device (has /device symlink)
+          [ -e "$iface/device" ] || continue
+          # Must be type 1 (Ethernet)
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        echo "NONE"
+        exit 1
+      register: wired_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if no wired Ethernet interface detected
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: No wired Ethernet interface detected on lab-08.
+          ================================================================
+          Checked /sys/class/net/ for type=1 (Ethernet), non-wireless,
+          hardware-backed interfaces. Found none.
+
+          Possible causes:
+            - Ethernet cable not plugged in
+            - NIC not recognized by Raspberry Pi OS
+            - Missing driver
+
+          Diagnostic commands (run on RPi console):
+            ls -la /sys/class/net/
+            ip link show
+            dmesg | grep -i eth
+          ================================================================
+      when: wired_detect.rc != 0
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+      when: wired_detect.rc == 0
+
+    - name: Display detected wired interface
+      ansible.builtin.debug:
+        msg: "Detected wired interface: {{ wired_iface }}"
+
+    # -------------------------------------------------------------------
+    # Verify wired link state (carrier)
+    # -------------------------------------------------------------------
+    - name: Check wired interface carrier (link state)
+      ansible.builtin.slurp:
+        src: "/sys/class/net/{{ wired_iface }}/carrier"
+      register: carrier_check
+      failed_when: false
+
+    - name: Fail if wired interface has no link
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: Wired interface '{{ wired_iface }}' has no link (no carrier).
+          ================================================================
+          The interface exists but there is no active Ethernet link.
+
+          Possible causes:
+            - Ethernet cable not plugged in or loose
+            - Switch port is down or disabled
+            - Cable fault
+
+          Check:
+            1. Physical cable connection at closet switch Port 4
+            2. Switch port LED status
+            3. UniFi: Devices > switch-01 > Port 4 status
+          ================================================================
+      when: >
+        carrier_check.failed or
+        (carrier_check.content | default('') | b64decode | trim) != '1'
+
+    - name: Wired link confirmed UP
+      ansible.builtin.debug:
+        msg: "Interface '{{ wired_iface }}' has active carrier (link UP)"
+
+    # -------------------------------------------------------------------
+    # Detect network manager (NetworkManager vs dhcpcd vs netplan)
+    # -------------------------------------------------------------------
+    # Raspberry Pi OS (bookworm+) ships with NetworkManager, NOT dhcpcd.
+    # The dhcpcd.conf file may exist as a leftover but dhcpcd won't be
+    # running. Check for active services, not just config files.
+    # -------------------------------------------------------------------
+    - name: Check if NetworkManager is active
+      ansible.builtin.command: systemctl is-active NetworkManager
+      register: nm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if dhcpcd is active
+      ansible.builtin.command: systemctl is-active dhcpcd
+      register: dhcpcd_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if netplan is available
+      ansible.builtin.command: which netplan
+      register: netplan_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set network manager fact
+      ansible.builtin.set_fact:
+        network_manager: >-
+          {{ 'NetworkManager' if nm_check.stdout | trim == 'active'
+             else ('dhcpcd' if dhcpcd_check.stdout | trim == 'active'
+             else ('netplan' if netplan_check.rc == 0
+             else 'unknown')) }}
+
+    - name: Display network manager
+      ansible.builtin.debug:
+        msg: "Network manager: {{ network_manager }}"
+
+    # -------------------------------------------------------------------
+    # Display full interface and OS state for operator review
+    # -------------------------------------------------------------------
+    - name: Gather all interface information
+      ansible.builtin.command: ip addr show
+      register: ip_addr_output
+      changed_when: false
+
+    - name: Display all interface information
+      ansible.builtin.debug:
+        msg: "{{ ip_addr_output.stdout_lines }}"
+
+    - name: Show NetworkManager connection details (if NM active)
+      ansible.builtin.command: nmcli con show "Wired connection 1"
+      register: nm_con_details
+      changed_when: false
+      failed_when: false
+      when: network_manager == 'NetworkManager'
+
+    - name: Display NetworkManager connection
+      ansible.builtin.debug:
+        msg: "{{ nm_con_details.stdout_lines | default(['NetworkManager not active']) }}"
+      when: network_manager == 'NetworkManager' and nm_con_details is not failed
+
+    - name: Diagnostic summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          Diagnostic Pre-Flight PASSED
+          ================================================================
+          Wired interface:    {{ wired_iface }}
+          Link state:         UP (carrier detected)
+          Network manager:    {{ network_manager }}
+          Current DHCP IP:    {{ ansible_host }}
+          Target static IP:   10.0.4.20/24
+          Gateway:            10.0.4.1
+          OS:                 {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+          OS family:          {{ ansible_os_family }}
+
+          Ready to proceed with setup + static IP assignment.
+          ================================================================
+
+# =========================================================================
+# Play 2: Setup + Static IP Assignment
+# =========================================================================
+# Creates admin user, sets hostname, configures static IP via nmcli
+# (NetworkManager), locks admin user, reactivates connection.
+# SSH drops — expected.
+# =========================================================================
+- name: "Bootstrap lab-08 (Play 2/3: Setup + Static IP)"
+  hosts: lab-08
+  become: true
+  gather_facts: true
+  tags: [never, full_bootstrap]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ dhcp_ip | default('10.0.4.241') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_lab-08"
+    admin_user: admin
+    admin_ssh_pubkey: "{{ lookup('file', '~/.ssh/id_ed25519_lab-08.pub') }}"
+    target_hostname: lab-08
+    target_ip: 10.0.4.20
+    target_cidr: 24
+    target_gateway: 10.0.4.1
+    dns_1: 1.1.1.1
+    dns_2: 8.8.8.8
+
+  tasks:
+    # Re-detect wired interface (Play 1 facts don't carry between plays)
+    - name: Re-detect wired Ethernet interface
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        exit 1
+      register: wired_detect
+      changed_when: false
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+
+    # -------------------------------------------------------------------
+    # Hostname
+    # -------------------------------------------------------------------
+    - name: Set hostname to {{ target_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ target_hostname }}"
+
+    - name: Update /etc/hosts with new hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ target_hostname }}"
+        state: present
+
+    # -------------------------------------------------------------------
+    # Admin User Setup
+    # -------------------------------------------------------------------
+    - name: Create admin user with sudo privileges
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Set up SSH authorized key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_ssh_pubkey }}"
+        state: present
+        exclusive: false
+
+    - name: Grant admin user passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    # -------------------------------------------------------------------
+    # Static IP Configuration (NetworkManager via nmcli)
+    # -------------------------------------------------------------------
+    # Raspberry Pi OS (bookworm+) uses NetworkManager. The default wired
+    # connection is "Wired connection 1" on eth0. We modify it in place
+    # to use a static IP instead of DHCP.
+    # -------------------------------------------------------------------
+    - name: Get current NM connection name for wired interface
+      ansible.builtin.shell: |
+        nmcli -t -f NAME,DEVICE con show --active | grep ':{{ wired_iface }}$' | cut -d: -f1
+      register: nm_con_name
+      changed_when: false
+
+    - name: Set NM connection name fact
+      ansible.builtin.set_fact:
+        nm_connection: "{{ nm_con_name.stdout | trim }}"
+
+    - name: Display detected NM connection
+      ansible.builtin.debug:
+        msg: "NetworkManager connection: '{{ nm_connection }}' on {{ wired_iface }}"
+
+    - name: Check if static IP already configured
+      ansible.builtin.shell: |
+        nmcli -t -f ipv4.addresses con show "{{ nm_connection }}" | grep -c '{{ target_ip }}/{{ target_cidr }}'
+      register: nm_static_check
+      changed_when: false
+      failed_when: false
+
+    - name: Configure static IP via nmcli
+      ansible.builtin.shell: |
+        nmcli con mod "{{ nm_connection }}" \
+          ipv4.method manual \
+          ipv4.addresses "{{ target_ip }}/{{ target_cidr }}" \
+          ipv4.gateway "{{ target_gateway }}" \
+          ipv4.dns "{{ dns_1 }} {{ dns_2 }}"
+      when: nm_static_check.stdout | trim | int == 0
+      register: nm_static_configured
+
+    # -------------------------------------------------------------------
+    # Lock Imager User (admin)
+    # -------------------------------------------------------------------
+    - name: Lock admin user password
+      ansible.builtin.user:
+        name: admin
+        password_lock: true
+
+    - name: Remove admin sudoers entry (if any)
+      ansible.builtin.file:
+        path: /etc/sudoers.d/admin
+        state: absent
+
+    - name: Remove admin from sudo group
+      ansible.builtin.user:
+        name: admin
+        groups: ""
+        append: false
+
+    # -------------------------------------------------------------------
+    # Apply Network Config (SSH will drop — SAFE, same VLAN new IP)
+    # -------------------------------------------------------------------
+    - name: Flush handlers before network restart
+      ansible.builtin.meta: flush_handlers
+
+    # Fire-and-forget: nmcli reactivates the connection after a 2-second
+    # delay. SSH drops — this is expected AND safe because we're staying
+    # on VLAN 1, just changing from DHCP to static IP.
+    - name: Reactivate NM connection to apply static IP (SSH will drop — expected)
+      ansible.builtin.shell: |
+        nohup bash -c 'sleep 2 && nmcli con up "{{ nm_connection }}"' &>/dev/null &
+      async: 0
+      poll: 0
+      changed_when: true
+
+# =========================================================================
+# Play 3: System Hardening (as admin at new static IP)
+# =========================================================================
+# Connects as the newly-created admin user at the static IP.
+# Uses inventory defaults for lab-08 (10.0.4.20, admin user).
+# Applies the full common baseline and CIS L1 hardening.
+# =========================================================================
+- name: "Bootstrap lab-08 (Play 3/3: Hardening)"
+  hosts: lab-08
+  become: true
+  gather_facts: false
+  tags: [never, full_bootstrap]
+
+  # No connection overrides — inventory defaults are correct:
+  #   ansible_host: 10.0.4.20
+  #   ansible_user: admin
+  #   ansible_ssh_private_key_file: ~/.ssh/id_ed25519_lab-08
+
+  pre_tasks:
+    - name: Wait for host to come up at new IP (10.0.4.20)
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 120
+
+    - name: Gather facts from host at new IP
+      ansible.builtin.setup:
+
+    - name: Verify admin user connectivity
+      ansible.builtin.ping:
+
+  roles:
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+  post_tasks:
+    - name: Display bootstrap summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          lab-08 Bootstrap Complete!
+          ================================================================
+          Hostname:   {{ ansible_hostname }}
+          IP:         {{ ansible_default_ipv4.address | default('10.0.4.20') }}
+          OS:         {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+          User:       admin (admin locked)
+          VLAN:       1 (Default LAN)
+          Roles:      common + hardening applied
+
+          Next steps:
+            1. Verify SSH:
+               ssh -i ~/.ssh/id_ed25519_lab-08 admin@10.0.4.20
+
+            2. Deploy Scanopy + NUT:
+               export VAULT_ADDR=https://10.0.10.10:8200
+               export VAULT_TOKEN=hvs.xxxxx
+               export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+               ansible-playbook playbooks/lab-08-deploy.yml
+          ================================================================

@@ -1,0 +1,70 @@
+# =============================================================================
+# Layer 03: Core Infrastructure - Example Variable Values
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# =============================================================================
+
+# ---------------------------------------------------------
+# Proxmox Connection
+# ---------------------------------------------------------
+proxmox_api_url   = "https://10.0.10.10:8006"
+proxmox_api_token = "terraform@pam!terraform-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node      = "lab-02"
+
+# ---------------------------------------------------------
+# SSH
+# ---------------------------------------------------------
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-key-comment"
+
+# ---------------------------------------------------------
+# Shared Infrastructure Settings
+# ---------------------------------------------------------
+storage_pool         = "local-lvm"
+snippet_storage      = "local"
+download_cloud_image = true
+cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+cloud_image_filename = "noble-server-cloudimg-amd64.qcow2"
+
+# ---------------------------------------------------------
+# Network Settings (Security VLAN 50)
+# ---------------------------------------------------------
+network_bridge = "vmbr0"
+vlan_tag       = 50
+gateway        = "10.0.50.1"
+domain_name    = "example-lab.local"
+dns_servers    = ["1.1.1.1", "8.8.8.8"]
+
+# ---------------------------------------------------------
+# GitLab CE (VM)
+# ---------------------------------------------------------
+gitlab_vm_id             = 3001
+gitlab_name              = "gitlab"
+gitlab_cpu_cores         = 4
+gitlab_memory_mb         = 8192
+gitlab_os_disk_size_gb   = 80
+gitlab_data_disk_size_gb = 50
+gitlab_ip_address        = "dhcp"
+
+# ---------------------------------------------------------
+# GitLab Runner (LXC)
+# ---------------------------------------------------------
+gitlab_runner_vm_id       = 3002
+gitlab_runner_name        = "gitlab-runner"
+gitlab_runner_cpu_cores   = 2
+gitlab_runner_memory_mb   = 4096
+gitlab_runner_disk_size_gb = 40
+gitlab_runner_ip_address  = "dhcp"
+
+# ---------------------------------------------------------
+# Wazuh Manager (VM)
+# ---------------------------------------------------------
+wazuh_vm_id             = 3003
+wazuh_name              = "wazuh"
+wazuh_cpu_cores         = 4
+wazuh_memory_mb         = 8192
+wazuh_os_disk_size_gb   = 80
+wazuh_data_disk_size_gb = 50
+wazuh_ip_address        = "dhcp"

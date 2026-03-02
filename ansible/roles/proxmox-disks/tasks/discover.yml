@@ -1,0 +1,358 @@
+---
+# =============================================================================
+# proxmox-disks — Disk Discovery & Classification
+# =============================================================================
+# Scans all block devices, filters out anything in use, and classifies
+# remaining disks by type (NVMe/SSD/HDD) for storage strategy assignment.
+#
+# Sets facts:
+#   proxmox_discovered_disks (list of dicts)
+#     Each entry: { name, size_bytes, size_human, rotational, disk_type,
+#                   strategy, pool_name }
+#   proxmox_zfs_mirror_groups (dict)
+#     Groups zfs-mirror disks by pool name: { "hdd-mirror-0": [disk1, disk2] }
+#
+# NOTE: All shell tasks export PATH to include /usr/sbin where Proxmox/LVM
+# admin tools live. Ansible's become + shell may not inherit the login PATH.
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Step 1: Identify the OS disk (the one Proxmox installed to)
+# -------------------------------------------------------------------------
+- name: "Discover | Find the OS disk (contains root filesystem)"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      # Find which device holds the root filesystem
+      ROOT_DEV=$(findmnt -n -o SOURCE / | head -1)
+
+      # Resolve LVM/dm devices to their physical volume
+      if [[ "$ROOT_DEV" == /dev/mapper/* ]] || [[ "$ROOT_DEV" == /dev/dm-* ]]; then
+        # Get the VG name from the root LV (e.g., /dev/mapper/pve-root → pve)
+        ROOT_VG=$(lvs --noheadings -o vg_name "$ROOT_DEV" 2>/dev/null | tr -d ' ')
+        if [ -n "$ROOT_VG" ]; then
+          # Find the PV that belongs to THIS VG (not just any PV)
+          PV_DEV=$(pvs --noheadings -o pv_name -S "vg_name=$ROOT_VG" 2>/dev/null | head -1 | tr -d ' ')
+          if [ -n "$PV_DEV" ]; then
+            ROOT_DEV="$PV_DEV"
+          fi
+        fi
+      fi
+
+      # Strip partition suffix to get the parent disk
+      # Handles: /dev/sda1 → /dev/sda, /dev/nvme0n1p3 → /dev/nvme0n1
+      echo "$ROOT_DEV" | sed -E 's/p?[0-9]+$//'
+    executable: /bin/bash
+  register: os_disk_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+- name: "Discover | Set OS disk fact"
+  ansible.builtin.set_fact:
+    proxmox_os_disk: "{{ os_disk_result.stdout | trim }}"
+  tags: [proxmox-disks, discovery]
+
+- name: "Discover | Display OS disk"
+  ansible.builtin.debug:
+    msg: "OS disk identified: {{ proxmox_os_disk }}"
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 2: Get all block devices
+# -------------------------------------------------------------------------
+- name: "Discover | List all block devices"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      lsblk -dnpo NAME,SIZE,ROTA --bytes \
+        | grep -v '^$'
+    executable: /bin/bash
+  register: lsblk_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 3: Get disks already used by LVM
+# -------------------------------------------------------------------------
+- name: "Discover | List LVM physical volumes"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvs --noheadings -o pv_name 2>/dev/null | tr -d ' ' || true
+    executable: /bin/bash
+  register: pvs_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 4: Get disks already used by ZFS
+# -------------------------------------------------------------------------
+- name: "Discover | List ZFS pool devices"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      if command -v zpool &>/dev/null; then
+        zpool status 2>/dev/null | grep -oP '/dev/\S+' || true
+      fi
+    executable: /bin/bash
+  register: zfs_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 5: Get disks already used by mdraid
+# -------------------------------------------------------------------------
+- name: "Discover | List mdraid devices"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      if [ -f /proc/mdstat ]; then
+        grep -oP 'sd[a-z]+|nvme\S+' /proc/mdstat 2>/dev/null \
+          | sed 's/^/\/dev\//' || true
+      fi
+    executable: /bin/bash
+  register: mdraid_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 6: Check each disk for MEANINGFUL usage (filesystem, LVM, ZFS)
+# -------------------------------------------------------------------------
+# IMPORTANT: We check for actual USAGE, not just partition tables.
+# After a wipe + partial configure run, a disk might have a GPT partition
+# table (from parted) but no filesystem or LVM structures — that disk
+# should still be considered "uninitialized" and eligible for setup.
+#
+# What DOES mark a disk as "in use":
+#   - Has an actual filesystem (ext4, xfs, etc.) on any partition
+#   - Has LVM signatures (already caught by pvs in Step 3)
+#   - Has partitions with data on them (filesystem or LVM PV)
+#
+# What does NOT mark a disk as "in use":
+#   - Just having a GPT/MBR partition table (empty partitions are fine)
+- name: "Discover | Check for filesystems and meaningful data on all disks"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      for disk in $(lsblk -dnpo NAME); do
+        IN_USE=false
+        # Check if the disk itself has a filesystem directly (no partitions)
+        FS_TYPE=$(blkid -o value -s TYPE "$disk" 2>/dev/null || true)
+        if [ -n "$FS_TYPE" ] && [ "$FS_TYPE" != "gpt_member" ]; then
+          IN_USE=true
+        fi
+        # Check each partition for actual filesystems
+        for part in $(lsblk -npo NAME "$disk" 2>/dev/null | tail -n +2); do
+          if [ -b "$part" ]; then
+            PART_FS=$(blkid -o value -s TYPE "$part" 2>/dev/null || true)
+            if [ -n "$PART_FS" ]; then
+              IN_USE=true
+              break
+            fi
+            # Check if partition is an LVM PV
+            if pvs "$part" &>/dev/null; then
+              IN_USE=true
+              break
+            fi
+          fi
+        done
+        if $IN_USE; then
+          echo "$disk"
+        fi
+      done | sort -u
+    executable: /bin/bash
+  register: in_use_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 7: Get existing Proxmox storage pools
+# -------------------------------------------------------------------------
+- name: "Discover | List existing Proxmox storage pools"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvesm status --output-format json 2>/dev/null || echo '[]'
+    executable: /bin/bash
+  register: pvesm_result
+  changed_when: false
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 8: Build the list of unused, uninitialized disks
+# -------------------------------------------------------------------------
+# First pass: collect eligible disk entries (without pool name indexes)
+- name: "Discover | Identify eligible unused disks"
+  ansible.builtin.set_fact:
+    _proxmox_eligible_disks: >-
+      {{
+        _proxmox_eligible_disks | default([]) + [{
+          'name': item.split()[0],
+          'size_bytes': item.split()[1] | int,
+          'size_human': ((item.split()[1] | int / 1073741824) | round(1) | string) + ' GB',
+          'rotational': item.split()[2] | int == 1,
+          'disk_type': (
+            'nvme' if item.split()[0] is match('/dev/nvme')
+            else ('hdd' if item.split()[2] | int == 1 else 'ssd')
+          ),
+          'strategy': (
+            proxmox_disk_overrides[item.split()[0]].strategy
+            if item.split()[0] in proxmox_disk_overrides and 'strategy' in proxmox_disk_overrides[item.split()[0]]
+            else (
+              'dir' if item.split()[2] | int == 1
+              else 'lvmthin'
+            )
+          )
+        }]
+      }}
+  loop: "{{ lsblk_result.stdout_lines }}"
+  when:
+    # Not the OS disk
+    - item.split()[0] != proxmox_os_disk
+    # Not already an LVM PV (check disk itself, not partitions like /dev/sda3)
+    - item.split()[0] not in pvs_result.stdout_lines
+    # Not in a ZFS pool
+    - item.split()[0] not in (zfs_result.stdout_lines | default([]))
+    # Not in an mdraid array
+    - item.split()[0] not in (mdraid_result.stdout_lines | default([]))
+    # No actual filesystem or LVM data on the disk
+    - item.split()[0] not in (in_use_result.stdout_lines | default([]))
+    # Not explicitly skipped via overrides
+    - not (proxmox_disk_overrides.get(item.split()[0], {}).get('skip', false) | bool)
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 8b: Reclassify size-matched HDDs as zfs-mirror
+# -------------------------------------------------------------------------
+# When 2+ HDDs of the same size are discovered, group them as a ZFS mirror
+# instead of individual directory pools. Single HDDs (no matching partner)
+# keep the 'dir' strategy. Disks with explicit overrides are not reclassified.
+- name: "Discover | Reclassify size-matched HDDs as zfs-mirror"
+  ansible.builtin.set_fact:
+    _proxmox_eligible_disks: >-
+      {%- set eligible = _proxmox_eligible_disks | default([]) -%}
+      {%- set ns = namespace(result=[], size_counts={}) -%}
+      {%- set hdd_disks = eligible | selectattr('disk_type', 'equalto', 'hdd') | selectattr('strategy', 'equalto', 'dir') | list -%}
+      {%- for disk in hdd_disks -%}
+        {%- set sz = disk.size_bytes | string -%}
+        {%- set _ = ns.size_counts.update({sz: (ns.size_counts.get(sz, 0) + 1)}) -%}
+      {%- endfor -%}
+      {%- for disk in eligible -%}
+        {%- if disk.disk_type == 'hdd' and disk.strategy == 'dir' and ns.size_counts.get(disk.size_bytes | string, 0) >= (proxmox_zfs_mirror_min_disks | int) -%}
+          {%- set _ = ns.result.append(disk | combine({'strategy': 'zfs-mirror'})) -%}
+        {%- else -%}
+          {%- set _ = ns.result.append(disk) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.result }}
+  tags: [proxmox-disks, discovery]
+
+# Second pass: assign pool names with correct per-type indexes
+# (e.g., ssd-thin-0, hdd-data-0, hdd-mirror-0 — indexed within their TYPE)
+# ZFS mirror disks that share the same size_bytes get the SAME pool name
+# (they form a single mirror vdev, not individual pools).
+- name: "Discover | Assign pool names to discovered disks"
+  ansible.builtin.set_fact:
+    proxmox_discovered_disks: >-
+      {%- set ns = namespace(result=[], nvme_idx=0, ssd_idx=0, hdd_idx=0, mirror_idx=0, mirror_size_map={}) -%}
+      {%- for disk in _proxmox_eligible_disks | default([]) -%}
+        {%- if disk.name in proxmox_disk_overrides and 'pool_name' in proxmox_disk_overrides[disk.name] -%}
+          {%- set pool = proxmox_disk_overrides[disk.name].pool_name -%}
+        {%- elif disk.strategy == 'zfs-mirror' -%}
+          {%- set size_key = disk.size_bytes | string -%}
+          {%- if size_key in ns.mirror_size_map -%}
+            {%- set pool = ns.mirror_size_map[size_key] -%}
+          {%- else -%}
+            {%- set pool = 'hdd-mirror-' + (ns.mirror_idx | string) -%}
+            {%- set _ = ns.mirror_size_map.update({size_key: pool}) -%}
+            {%- set ns.mirror_idx = ns.mirror_idx + 1 -%}
+          {%- endif -%}
+        {%- elif disk.disk_type == 'nvme' -%}
+          {%- set pool = 'nvme-thin-' + (ns.nvme_idx | string) -%}
+          {%- set ns.nvme_idx = ns.nvme_idx + 1 -%}
+        {%- elif disk.disk_type == 'hdd' -%}
+          {%- set pool = 'hdd-data-' + (ns.hdd_idx | string) -%}
+          {%- set ns.hdd_idx = ns.hdd_idx + 1 -%}
+        {%- else -%}
+          {%- set pool = 'ssd-thin-' + (ns.ssd_idx | string) -%}
+          {%- set ns.ssd_idx = ns.ssd_idx + 1 -%}
+        {%- endif -%}
+        {%- set _ = ns.result.append(disk | combine({'pool_name': pool})) -%}
+      {%- endfor -%}
+      {{ ns.result }}
+  tags: [proxmox-disks, discovery]
+
+# Build ZFS mirror groups dict: { "hdd-mirror-0": [disk1, disk2], ... }
+# This is consumed by main.yml to call configure-zfs-mirror.yml once per group
+- name: "Discover | Build ZFS mirror groups"
+  ansible.builtin.set_fact:
+    proxmox_zfs_mirror_groups: >-
+      {%- set groups = {} -%}
+      {%- for disk in proxmox_discovered_disks | default([]) | selectattr('strategy', 'equalto', 'zfs-mirror') -%}
+        {%- if disk.pool_name in groups -%}
+          {%- set _ = groups[disk.pool_name].append(disk) -%}
+        {%- else -%}
+          {%- set _ = groups.update({disk.pool_name: [disk]}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ groups }}
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 9: Ensure facts are initialized (even if no disks found)
+# -------------------------------------------------------------------------
+- name: "Discover | Default to empty list if no unused disks found"
+  ansible.builtin.set_fact:
+    proxmox_discovered_disks: "{{ proxmox_discovered_disks | default([]) }}"
+    _proxmox_eligible_disks: "{{ _proxmox_eligible_disks | default([]) }}"
+    proxmox_zfs_mirror_groups: "{{ proxmox_zfs_mirror_groups | default({}) }}"
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Step 10: Report findings
+# -------------------------------------------------------------------------
+- name: "Discover | No uninitialized disks found"
+  ansible.builtin.debug:
+    msg: >-
+      No uninitialized disks found on {{ inventory_hostname }}.
+      OS disk: {{ proxmox_os_disk }}.
+      All other disks are already in use (LVM, ZFS, mdraid, or have filesystems).
+  when: proxmox_discovered_disks | length == 0
+  tags: [proxmox-disks, discovery]
+
+- name: "Discover | Found uninitialized disks"
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      Uninitialized disks found on {{ inventory_hostname }}:
+      ============================================================
+      {% for disk in proxmox_discovered_disks %}
+      {{ disk.name }}:
+        Size:     {{ disk.size_human }}
+        Type:     {{ disk.disk_type | upper }}
+        Strategy: {{ disk.strategy }}
+        Pool:     {{ disk.pool_name }}
+      {% endfor %}
+      {% if proxmox_zfs_mirror_groups | default({}) | length > 0 %}
+      ZFS Mirror Groups:
+      {% for pool_name, disks in (proxmox_zfs_mirror_groups | default({})).items() %}
+        {{ pool_name }}: {{ disks | map(attribute='name') | join(' + ') }}
+      {% endfor %}
+      {% endif %}
+      ============================================================
+      {% if not proxmox_disks_initialize %}
+      DRY RUN — No changes will be made.
+      To initialize, re-run with: -e proxmox_disks_initialize=true
+      {% else %}
+      LIVE RUN — Disks will be initialized!
+      {% endif %}
+      ============================================================
+  when: proxmox_discovered_disks | length > 0
+  tags: [proxmox-disks, discovery]

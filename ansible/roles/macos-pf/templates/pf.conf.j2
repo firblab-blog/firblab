@@ -1,0 +1,44 @@
+# =============================================================================
+# macOS pf Firewall Rules - Managed by Ansible
+# =============================================================================
+# Do not edit manually. Changes will be overwritten.
+# Host: {{ inventory_hostname }}
+# =============================================================================
+
+# Macros
+mgmt_net = "{{ pf_management_network }}"
+sec_net = "{{ pf_security_network }}"
+lan_net = "{{ pf_lan_network }}"
+
+# Options
+set block-policy drop
+set skip on lo0
+
+# Scrub incoming packets
+scrub in all
+
+# Default: block all inbound, allow all outbound
+block in all
+pass out all keep state
+
+# Allow ICMP (ping) from management and LAN networks
+pass in inet proto icmp from $mgmt_net to any icmp-type echoreq keep state
+pass in inet proto icmp from $lan_net to any icmp-type echoreq keep state
+
+# Allow SSH from management network and LAN (workstation access)
+{% for port in pf_mgmt_tcp_ports %}
+pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
+pass in inet proto tcp from $lan_net to any port {{ port }} keep state
+{% endfor %}
+
+# Allow Vault API and cluster ports from management and security VLANs
+# (Vault runs natively on this host as a LaunchDaemon)
+{% for port in pf_vault_tcp_ports %}
+pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
+pass in inet proto tcp from $sec_net to any port {{ port }} keep state
+{% endfor %}
+
+# Allow unseal Vault from management network only
+{% for port in pf_unseal_tcp_ports %}
+pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
+{% endfor %}

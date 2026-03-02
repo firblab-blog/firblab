@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# RKE2 Post-Install Verification
+# =============================================================================
+# Health checks run after installation to confirm the cluster is healthy.
+# Only runs full kubectl checks on server nodes (agents don't have kubectl).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service Status
+# ---------------------------------------------------------------------------
+- name: Check RKE2 service status (server)
+  ansible.builtin.systemd:
+    name: rke2-server
+  register: rke2_server_service
+  when: rke2_role == "server"
+  tags:
+    - verify
+
+- name: Check RKE2 service status (agent)
+  ansible.builtin.systemd:
+    name: rke2-agent
+  register: rke2_agent_service
+  when: rke2_role == "agent"
+  tags:
+    - verify
+
+- name: Assert RKE2 service is running
+  ansible.builtin.assert:
+    that:
+      - (rke2_server_service.status.ActiveState | default('')) == 'active' or
+        (rke2_agent_service.status.ActiveState | default('')) == 'active'
+    fail_msg: "RKE2 service is not running on {{ inventory_hostname }}"
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Cluster Health (first server only)
+# ---------------------------------------------------------------------------
+- name: Check cluster node status
+  ansible.builtin.command:
+    cmd: >-
+      {{ rke2_bin_dir }}/kubectl --kubeconfig {{ rke2_data_dir }}/server/cred/admin.kubeconfig
+      get nodes -o wide
+  register: node_status
+  changed_when: false
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+- name: Display cluster node status
+  ansible.builtin.debug:
+    msg: "{{ node_status.stdout_lines }}"
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+- name: Check system pods
+  ansible.builtin.command:
+    cmd: >-
+      {{ rke2_bin_dir }}/kubectl --kubeconfig {{ rke2_data_dir }}/server/cred/admin.kubeconfig
+      get pods -A -o wide
+  register: pod_status
+  changed_when: false
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+- name: Display system pod status
+  ansible.builtin.debug:
+    msg: "{{ pod_status.stdout_lines }}"
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# CIS Profile Verification
+# ---------------------------------------------------------------------------
+- name: Verify CIS profile is active
+  ansible.builtin.command:
+    cmd: >-
+      {{ rke2_bin_dir }}/kubectl --kubeconfig {{ rke2_data_dir }}/server/cred/admin.kubeconfig
+      get configmap -n kube-system rke2-cis-profile -o name
+  register: cis_profile
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+- name: Report CIS profile status
+  ansible.builtin.debug:
+    msg: >-
+      CIS profile status: {{ 'ACTIVE' if cis_profile.rc == 0 else 'NOT FOUND — investigate' }}
+  when: inventory_hostname == rke2_init_node
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zone Verification
+# ---------------------------------------------------------------------------
+- name: Verify CoreDNS Corefile includes custom zone
+  ansible.builtin.shell:
+    cmd: >-
+      {{ rke2_bin_dir }}/kubectl --kubeconfig {{ rke2_data_dir }}/server/cred/admin.kubeconfig
+      get configmap -n kube-system rke2-coredns-rke2-coredns
+      -o jsonpath='{.data.Corefile}' | grep -q '{{ item.zone }}'
+  loop: "{{ rke2_coredns_custom_zones | default([]) }}"
+  loop_control:
+    label: "{{ item.zone }}"
+  register: coredns_zone_check
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname == rke2_init_node
+    - rke2_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - verify
+    - coredns
+
+- name: Report CoreDNS custom zone status
+  ansible.builtin.debug:
+    msg: >-
+      CoreDNS custom zone '{{ item.item.zone }}':
+      {{ 'ACTIVE — zone found in Corefile' if item.rc == 0 else 'NOT FOUND — HelmChartConfig may not be reconciled yet' }}
+  loop: "{{ coredns_zone_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.zone }}"
+  when:
+    - inventory_hostname == rke2_init_node
+    - coredns_zone_check.results is defined
+  tags:
+    - verify
+    - coredns

@@ -1,0 +1,161 @@
+---
+# =============================================================================
+# Backup Role — Docker Volume Backup Automation
+# =============================================================================
+# Installs a backup script + cron job that:
+#   1. Stops Docker Compose services (brief downtime for consistent backup)
+#   2. Tars Docker named volumes
+#   3. Encrypts with age
+#   4. Uploads to Hetzner S3
+#   5. Restarts containers
+#   6. Cleans up old backups (local + S3 retention)
+#
+# Skipped entirely when backup_enabled is false.
+# =============================================================================
+
+- name: Validate backup configuration
+  ansible.builtin.assert:
+    that:
+      - backup_services | length > 0
+      - backup_s3_access_key is defined and backup_s3_access_key | length > 0
+      - backup_s3_secret_key is defined and backup_s3_secret_key | length > 0
+      - backup_s3_endpoint is defined and backup_s3_endpoint | length > 0
+      - backup_age_recipient is defined and backup_age_recipient | length > 0
+    fail_msg: >
+      Backup role requires: backup_services (non-empty), backup_s3_access_key,
+      backup_s3_secret_key, backup_s3_endpoint, backup_age_recipient.
+      These should be set from Vault in the playbook pre_tasks.
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# Install Prerequisites
+# ---------------------------------------------------------------------------
+- name: Install backup prerequisites (age + pip)
+  ansible.builtin.apt:
+    name:
+      - age
+      - python3-pip
+    state: present
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Install AWS CLI for S3 uploads
+  ansible.builtin.pip:
+    name: awscli
+    state: present
+    extra_args: --break-system-packages
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create backup script directory
+  ansible.builtin.file:
+    path: /opt/firblab/scripts
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create local backup directory
+  ansible.builtin.file:
+    path: "{{ backup_local_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# AWS CLI Configuration
+# ---------------------------------------------------------------------------
+- name: Create root .aws directory
+  ansible.builtin.file:
+    path: /root/.aws
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Configure AWS CLI credentials for S3
+  ansible.builtin.copy:
+    dest: /root/.aws/credentials
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      [default]
+      aws_access_key_id = {{ backup_s3_access_key }}
+      aws_secret_access_key = {{ backup_s3_secret_key }}
+  no_log: true
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Configure AWS CLI config
+  ansible.builtin.copy:
+    dest: /root/.aws/config
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      [default]
+      region = {{ backup_s3_endpoint.split('.')[0] | default('nbg1') }}
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# Deploy Backup Script
+# ---------------------------------------------------------------------------
+- name: Deploy Docker volume backup script
+  ansible.builtin.template:
+    src: docker-backup.sh.j2
+    dest: /opt/firblab/scripts/docker-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# Cron Job
+# ---------------------------------------------------------------------------
+- name: Create backup cron job
+  ansible.builtin.cron:
+    name: "docker-volume-backup"
+    minute: "{{ backup_cron_minute }}"
+    hour: "{{ backup_cron_hour }}"
+    job: "/opt/firblab/scripts/docker-backup.sh >> /var/log/docker-backup.log 2>&1"
+    user: root
+    state: present
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create backup log file
+  ansible.builtin.file:
+    path: /var/log/docker-backup.log
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  when: backup_enabled | default(false) | bool
+  tags:
+    - backup

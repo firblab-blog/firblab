@@ -1,0 +1,29 @@
+# ExternalSecret: Grafana OIDC credentials from Vault
+# Syncs Vault path secret/k8s/grafana-oidc → K8s Secret grafana-oidc
+# in the monitoring namespace. Consumed by Grafana's extraSecretMounts
+# for $__file{} secret injection into grafana.ini.
+#
+# Created by Terraform Layer 07-authentik-config.
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: grafana-oidc
+  namespace: monitoring
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: grafana-oidc
+    creationPolicy: Owner
+  data:
+    - secretKey: client_id
+      remoteRef:
+        key: secret/k8s/grafana-oidc
+        property: client_id
+    - secretKey: client_secret
+      remoteRef:
+        key: secret/k8s/grafana-oidc
+        property: client_secret

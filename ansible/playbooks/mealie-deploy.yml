@@ -1,0 +1,231 @@
+---
+# =============================================================================
+# Mealie Recipe Manager Deployment Playbook
+# =============================================================================
+# Deploys Mealie via Docker Compose on an LXC container.
+#
+# Prerequisites:
+#   - Mealie LXC provisioned by Terraform Layer 05
+#   - LXC bootstrapped via lxc-bootstrap.yml (creates admin user, SSH keys)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/mealie-deploy.yml
+#
+# With backup restore (copies ZIP into Mealie data dir for UI-based restore):
+#   ansible-playbook -i inventory/hosts.yml playbooks/mealie-deploy.yml \
+#     -e mealie_backup_path=/absolute/path/to/mealie_2026.02.11.03.08.09.zip
+#
+# After playbook completes:
+#   1. Go to Mealie: http://10.0.20.13:9000
+#   2. Create admin account (default: changeme@email.com / MyPassword)
+#   3. If restoring backup: Admin -> Backups -> select the uploaded backup
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags mealie      # Only Mealie app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+#   ansible-playbook ... --tags backup      # Only backup automation
+# =============================================================================
+
+- name: Deploy Mealie recipe manager
+  hosts: mealie
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Mealie on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    mealie_port: 9000
+
+    # Backup configuration (S3 off-site for recipe data)
+    backup_enabled: true
+    backup_cron_hour: "4"
+    backup_cron_minute: "0"
+    backup_services:
+      - name: mealie
+        compose_path: /opt/mealie
+        paths:
+          - /opt/mealie/data
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: mealie
+        stop_compose: /opt/mealie
+        paths:
+          - /opt/mealie/data
+        tags: ["mealie", "recipes"]
+        cron_hour: "1"
+        cron_minute: "20"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Mealie (Docker Compose: single container, SQLite)
+    - role: mealie
+      tags:
+        - mealie
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for Mealie to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ mealie_port }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: mealie_health
+      retries: 15
+      delay: 10
+      until: mealie_health.status is defined and mealie_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if Mealie never became accessible
+      ansible.builtin.fail:
+        msg: "Mealie failed to respond after 150 seconds. Last status: {{ mealie_health.status | default('connection refused') }}"
+      when: mealie_health.status is not defined or mealie_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Mealie Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ mealie_port }}"
+          - "Port: {{ mealie_port }}"
+          - "Image: {{ mealie_image }}"
+          - ""
+          - "Default credentials (first login):"
+          - "  Email: changeme@email.com"
+          - "  Password: MyPassword"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/mealie/docker-compose.yml ps"
+          - "  docker compose -f /opt/mealie/docker-compose.yml logs -f"
+          - ""
+          - "Backup restore:"
+          - "  Admin -> Backups -> select uploaded backup"
+          - "=========================================="
+      tags:
+        - verify

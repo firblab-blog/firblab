@@ -1,0 +1,85 @@
+# =============================================================================
+# AdGuard Home Configuration — Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: adguard.yaml.j2
+#
+# AdGuard runs on port 3000 (admin UI) and port 53 (DNS).
+# DNS is restricted to WireGuard clients (10.8.0.0/24), the Docker network,
+# and loopback. Not exposed to the public internet.
+# =============================================================================
+
+bind_host: 0.0.0.0
+bind_port: 3000
+
+users:
+  - name: admin
+    password: "{{ gateway_adguard_password_hash }}"
+
+auth_attempts: 5
+block_auth_min: 15
+
+# Traefik runs network_mode: host and proxies to AdGuard via port mapping.
+# Inside the container, the request appears from the Docker bridge gateway
+# (172.18.x.1 range). Without trusted_proxies, AdGuard rejects the session
+# and loops back to the login page on every request.
+trusted_proxies:
+  - 127.0.0.1
+  - ::1
+  - 172.16.0.0/12
+
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  protection_enabled: true
+  blocking_mode: default
+  ratelimit: 20
+  refuse_any: true
+
+  upstream_dns:
+    - https://1.1.1.1/dns-query
+    - https://1.0.0.1/dns-query
+
+  bootstrap_dns:
+    - 9.9.9.10
+    - 149.112.112.10
+
+  all_servers: false
+  fastest_addr: false
+
+  # Only allow DNS from WireGuard clients, Docker containers, and localhost.
+  # Not a public resolver — Hetzner firewall also restricts port 53 to WG network.
+  allowed_clients:
+    - {{ gateway_wireguard_network }}
+    - 127.0.0.0/8
+    - {{ gateway_docker_network }}
+
+  cache_size: 4194304
+  cache_ttl_min: 0
+  cache_ttl_max: 0
+
+  filtering_enabled: true
+  filters_update_interval: 24
+
+querylog:
+  enabled: true
+  file_enabled: true
+  interval: 2160h     # 90 days
+  size_memory: 1000
+
+statistics:
+  enabled: true
+  interval: 24h
+
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+    name: AdGuard DNS filter
+    id: 1
+  - enabled: true
+    url: https://adaway.org/hosts.txt
+    name: AdAway Default Blocklist
+    id: 2
+
+schema_version: 20

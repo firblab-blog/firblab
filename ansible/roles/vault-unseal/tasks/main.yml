@@ -1,0 +1,90 @@
+---
+# =============================================================================
+# Vault Unseal Role — Main Task Dispatcher
+# =============================================================================
+# Deploys a standalone lightweight Vault instance for transit auto-unseal.
+# Runs on port 8210, file storage backend, separate service account and TLS.
+# Dispatches to platform-specific task files based on ansible_os_family.
+#
+# Supports:
+#   - Linux (Debian/Ubuntu, RedHat/Rocky) — systemd
+#   - macOS (Darwin) — LaunchDaemon + dscl service account
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Platform-specific user/group + binary install
+# ---------------------------------------------------------------------------
+- name: Include platform-specific install tasks
+  ansible.builtin.include_tasks:
+    file: "install_{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}.yml"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# 2. Directories and configuration
+# ---------------------------------------------------------------------------
+- name: Create unseal-vault directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ vault_unseal_data_dir }}"
+      mode: "0700"
+    - path: "{{ vault_unseal_config_dir }}"
+      mode: "0750"
+    - path: "{{ vault_unseal_tls_dir }}"
+      mode: "0750"
+    - path: "{{ vault_unseal_log_dir }}"
+      mode: "0750"
+  tags:
+    - install
+    - directories
+
+- name: Template unseal vault configuration
+  ansible.builtin.template:
+    src: vault-unseal.hcl.j2
+    dest: "{{ vault_unseal_config_dir }}/vault-unseal.hcl"
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "0640"
+    backup: true
+  notify: Restart vault-unseal
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# 3. TLS certificate deployment
+# ---------------------------------------------------------------------------
+- name: Include TLS certificate deployment tasks
+  ansible.builtin.include_tasks:
+    file: tls.yml
+  tags:
+    - tls
+    - security
+    - configure
+
+# ---------------------------------------------------------------------------
+# 4. Platform-specific service setup
+# ---------------------------------------------------------------------------
+- name: Include platform-specific service tasks
+  ansible.builtin.include_tasks:
+    file: "service_{{ 'darwin' if ansible_os_family == 'Darwin' else 'linux' }}.yml"
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# 5. Cleanup
+# ---------------------------------------------------------------------------
+- name: Clean up downloaded archives
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/vault-unseal_{{ vault_version }}_{{ vault_unseal_os_resolved }}_{{ vault_unseal_arch_resolved }}.zip"
+    - "/tmp/vault-unseal_{{ vault_version }}_SHA256SUMS"
+  tags:
+    - install
+    - cleanup

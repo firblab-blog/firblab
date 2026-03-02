@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# Vault Role Defaults
+# =============================================================================
+# Default values for the vault role. Most variables are set in
+# group_vars/vault_cluster.yml — these are role-level fallbacks.
+# =============================================================================
+
+# LaunchDaemon label (macOS only)
+vault_launchd_label: "com.example-lab.vault"

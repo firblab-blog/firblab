@@ -1,0 +1,126 @@
+---
+# =============================================================================
+# Proxmox Backup Server Deployment Playbook
+# =============================================================================
+# Configures a Proxmox Backup Server instance after Terraform provisioning.
+# Handles ZFS mirror setup (passthrough HDDs), datastore creation, user/token
+# management, retention policies, garbage collection, and Vault credential
+# storage.
+#
+# Prerequisites:
+#   - PBS VM provisioned by Terraform Layer 05 (VM ID 5031, lab-04)
+#   - Physical HDDs attached via terraform_data.pbs_disk_passthrough
+#   - PBS Packer template built and cloned (tmpl-pbs-base, VM ID 9002)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# PBS credentials are stored in Vault automatically:
+#   vault kv get -mount=secret infra/pbs
+#   Fields: fingerprint, api_token_id, api_token_secret, server, datastore, port
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/pbs-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags pbs         # PBS configuration only
+#   ansible-playbook ... --tags zfs         # ZFS mirror setup only
+#   ansible-playbook ... --tags datastore   # Datastore creation only
+#   ansible-playbook ... --tags verify      # Health checks only
+#
+# After deployment:
+#   1. Access PBS UI: https://10.0.10.15:8007
+#   2. Login: root / (password set during Packer build)
+#   3. Register PBS on PVE nodes:
+#      ansible-playbook -i inventory/hosts.yml playbooks/proxmox-pbs-register.yml
+# =============================================================================
+
+- name: Deploy Proxmox Backup Server
+  hosts: pbs
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying PBS on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # PBS configuration (ZFS mirror, datastore, users, retention, vault)
+    - role: pbs
+      tags:
+        - pbs
+
+  post_tasks:
+    - name: Wait for PBS API to be accessible
+      ansible.builtin.uri:
+        url: "https://localhost:{{ pbs_api_port | default(8007) }}/api2/json/version"
+        method: GET
+        validate_certs: false
+        status_code: [200, 400, 401]
+      register: pbs_health
+      retries: 10
+      delay: 5
+      until: pbs_health.status is defined and pbs_health.status in [200, 400, 401]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if PBS never became accessible
+      ansible.builtin.fail:
+        msg: "PBS failed to respond after 50 seconds. Last status: {{ pbs_health.status | default('connection refused') }}"
+      when: pbs_health.status is not defined or pbs_health.status not in [200, 400, 401]
+      tags:
+        - verify
+
+    - name: Get datastore status
+      ansible.builtin.command:
+        cmd: proxmox-backup-manager datastore list --output-format json
+      register: pbs_final_datastores
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Get ZFS pool status for summary
+      ansible.builtin.command:
+        cmd: zpool list -H -o name,size,alloc,free,health {{ pbs_zfs_pool_name | default('pbs-backup') }}
+      register: pbs_zpool_summary
+      changed_when: false
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "PBS Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: https://{{ ansible_host }}:{{ pbs_api_port | default(8007) }}"
+          - "Port: {{ pbs_api_port | default(8007) }}"
+          - "Datastore: {{ pbs_datastore_name | default('backups') }}"
+          - "ZFS pool: {{ pbs_zfs_pool_name | default('pbs-backup') }} ({{ pbs_zpool_summary.stdout | default('unknown') }})"
+          - "ZFS disks: {{ pbs_zfs_disks | default(['/dev/sdb', '/dev/sdc']) | join(', ') }}"
+          - ""
+          - "Retention: daily={{ pbs_keep_daily | default(7) }}, weekly={{ pbs_keep_weekly | default(4) }}, monthly={{ pbs_keep_monthly | default(3) }}"
+          - ""
+          - "Credentials stored in Vault:"
+          - "  vault kv get -mount=secret infra/pbs"
+          - ""
+          - "Next steps:"
+          - "  1. Login to PBS UI: https://{{ ansible_host }}:{{ pbs_api_port | default(8007) }}"
+          - "  2. Register PBS on PVE nodes:"
+          - "     ansible-playbook -i inventory/hosts.yml playbooks/proxmox-pbs-register.yml"
+          - "=========================================="
+      tags:
+        - verify

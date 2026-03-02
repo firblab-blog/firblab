@@ -1,0 +1,99 @@
+# =============================================================================
+# loki-stack Helm values — K3s RPi5 cluster
+# =============================================================================
+# Deploys Loki (log aggregation) + Promtail (log collector) on K3s.
+#
+# Key differences from RKE2 (k8s/platform/monitoring/loki/values.yaml):
+#   - LoadBalancer VIP (10.0.20.201) instead of NodePort 31100
+#   - local-path instead of Longhorn StorageClass
+#   - 10Gi storage (from 20Gi)
+#
+# External log ingestion:
+#   Hetzner gateway + honeypot Alloy push logs to Loki via WireGuard tunnel.
+#   After Phase 3 cutover, configure external senders to use:
+#     http://10.0.20.201:3100/loki/api/v1/push
+#
+# Install:
+#   helm repo add grafana https://grafana.github.io/helm-charts
+#   helm install loki grafana/loki-stack \
+#     -n monitoring -f values.yaml
+
+loki:
+  enabled: true
+
+  # Persistence — local-path on NVMe
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 10Gi
+
+  # Expose Loki via MetalLB LoadBalancer for external log ingestion.
+  # VIP 10.0.20.201 — dedicated address for Hetzner Alloy senders.
+  # More resilient than NodePort (survives individual node failures via L2 failover).
+  service:
+    type: LoadBalancer
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: 10.0.20.201
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Pin to 8GB nodes — Loki can spike during high-ingestion bursts
+  nodeSelector:
+    example-lab.org/ram-tier: standard
+
+  # Retention — table_manager is deprecated in Loki 2.9+ but still functional
+  # in loki-stack chart v2.10.x (ships Loki 2.9.3). When migrating to the
+  # standalone Loki chart with Loki 3.x, switch to compactor-based retention.
+  config:
+    table_manager:
+      retention_deletes_enabled: true
+      retention_period: 336h  # 14 days
+    # Raise per-tenant query queue depth. Default (100) is saturated when the
+    # honeypot-soc dashboard (30s refresh, 6+ parallel queries) runs alongside
+    # promtail ingestion.
+    query_scheduler:
+      max_outstanding_requests_per_tenant: 2048
+
+# Promtail (log collector on each K3s node)
+promtail:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 25m
+      memory: 48Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+
+  # Collect logs from all pods
+  config:
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+    positions:
+      filename: /tmp/positions.yaml
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_pod_label_app
+            target_label: app
+          - source_labels:
+              - __meta_kubernetes_namespace
+            target_label: namespace
+          - source_labels:
+              - __meta_kubernetes_pod_name
+            target_label: pod
+
+# Grafana is managed by kube-prometheus-stack, not here
+grafana:
+  enabled: false

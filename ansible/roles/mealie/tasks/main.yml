@@ -1,0 +1,115 @@
+---
+# =============================================================================
+# Mealie Role - Recipe Manager via Docker Compose
+# =============================================================================
+# Deploys Mealie using Docker Compose in an LXC container. Expects the docker
+# role to be applied first.
+#
+# Optional backup restore: pass -e mealie_backup_path=/path/to/backup.zip
+# to copy a backup ZIP into the data directory. After deployment, restore
+# via Mealie Admin UI: Admin -> Backups -> select the uploaded backup.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Mealie directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ mealie_install_dir }}"
+    - "{{ mealie_install_dir }}/data"
+    - "{{ mealie_install_dir }}/data/backups"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Mealie Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ mealie_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart mealie
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER Mealie
+# containers are running, killing them. The Mealie restart handler then runs
+# "docker compose up -d --force-recreate" on nothing.
+- name: Flush handlers before starting Mealie containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Mealie container image
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ mealie_install_dir }}"
+  register: mealie_pull_result
+  changed_when: "'Pull complete' in mealie_pull_result.stdout or 'Downloaded' in mealie_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Mealie container
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ mealie_install_dir }}"
+  register: mealie_up_result
+  changed_when: "'Started' in mealie_up_result.stderr or 'Creating' in mealie_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Mealie to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ mealie_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: mealie_health
+  retries: 15
+  delay: 10
+  until: mealie_health.status is defined and mealie_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Mealie never became accessible
+  ansible.builtin.fail:
+    msg: "Mealie failed to respond after 150 seconds. Last status: {{ mealie_health.status | default('connection refused') }}"
+  when: mealie_health.status is not defined or mealie_health.status not in [200, 301, 302]
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Backup Restore (optional)
+# ---------------------------------------------------------------------------
+# Copy a backup ZIP into Mealie's backups directory for restore via the
+# admin UI. Pass -e mealie_backup_path=/absolute/path/to/backup.zip
+- name: Copy backup file for restore
+  ansible.builtin.copy:
+    src: "{{ mealie_backup_path }}"
+    dest: "{{ mealie_install_dir }}/data/backups/"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - mealie_backup_path is defined
+    - mealie_backup_path | default('') | length > 0
+  tags:
+    - backup
+    - deploy

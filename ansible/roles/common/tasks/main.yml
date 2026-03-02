@@ -1,0 +1,259 @@
+---
+# =============================================================================
+# Common Role - Baseline System Configuration
+# =============================================================================
+# Applied to all managed Linux hosts. Sets up packages, NTP, fail2ban, SSH
+# hardening, and firewall. Dispatches OS-specific tasks by ansible_os_family.
+#
+# Supports: Debian/Ubuntu (apt, UFW) and RedHat/Rocky (dnf, firewalld)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Package Management (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family package tasks
+  ansible.builtin.include_tasks: "packages-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - packages
+
+# ---------------------------------------------------------------------------
+# Automatic Security Updates (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family auto-update tasks
+  ansible.builtin.include_tasks: "updates-{{ ansible_os_family | lower }}.yml"
+  tags:
+    - updates
+
+# ---------------------------------------------------------------------------
+# Timezone
+# ---------------------------------------------------------------------------
+- name: Set system timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+  notify: Restart chrony
+  tags:
+    - timezone
+    - ntp
+
+# ---------------------------------------------------------------------------
+# Internal DNS (Split-Horizon /etc/hosts)
+# ---------------------------------------------------------------------------
+# Public DNS resolves *.home.example-lab.org to the Hetzner public IP, but
+# internal hosts must reach these via the Traefik standalone reverse proxy.
+# This ensures OIDC discovery (which mandates HTTPS) works from backends.
+- name: Add internal DNS entries to /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: ".*{{ item.1 }}$"
+    line: "{{ item.0.ip }}    {{ item.1 }}"
+    state: present
+  loop: "{{ internal_dns_entries | default([]) | subelements('hostnames') }}"
+  loop_control:
+    label: "{{ item.1 }} -> {{ item.0.ip }}"
+  when: internal_dns_entries is defined and internal_dns_entries | length > 0
+  tags:
+    - dns
+    - hosts
+
+# ---------------------------------------------------------------------------
+# NTP (Chrony)
+# ---------------------------------------------------------------------------
+# Config path differs: Debian=/etc/chrony/chrony.conf, RedHat=/etc/chrony.conf
+- name: Configure chrony NTP
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: "{{ '/etc/chrony.conf' if ansible_os_family == 'RedHat' else '/etc/chrony/chrony.conf' }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart chrony
+  tags:
+    - ntp
+
+- name: Enable and start chrony service
+  ansible.builtin.systemd:
+    name: "{{ chrony_service_name }}"
+    enabled: true
+    state: started
+  tags:
+    - ntp
+
+# ---------------------------------------------------------------------------
+# Fail2ban
+# ---------------------------------------------------------------------------
+# Auth log path differs: Debian=/var/log/auth.log, RedHat=/var/log/secure
+- name: Configure fail2ban SSH jail
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.conf
+    content: |
+      [sshd]
+      enabled = true
+      port = {{ ssh_port }}
+      filter = sshd
+      logpath = {{ '/var/log/secure' if ansible_os_family == 'RedHat' else '/var/log/auth.log' }}
+      maxretry = 3
+      bantime = 3600
+      findtime = 600
+      ignoreip = 127.0.0.1/8 {{ management_network }} {{ lan_network }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+  tags:
+    - fail2ban
+    - security
+
+- name: Enable and start fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: started
+  tags:
+    - fail2ban
+    - security
+
+# ---------------------------------------------------------------------------
+# SSH Hardening
+# ---------------------------------------------------------------------------
+- name: Disable SSH password authentication
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PasswordAuthentication"
+    line: "PasswordAuthentication no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Enable SSH public key authentication
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PubkeyAuthentication"
+    line: "PubkeyAuthentication yes"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Disable SSH challenge-response authentication
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?ChallengeResponseAuthentication"
+    line: "ChallengeResponseAuthentication no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Disable SSH X11 forwarding
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?X11Forwarding"
+    line: "X11Forwarding no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Set SSH MaxAuthTries
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?MaxAuthTries"
+    line: "MaxAuthTries {{ ssh_max_auth_tries }}"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Disable SSH agent forwarding
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?AllowAgentForwarding"
+    line: "AllowAgentForwarding no"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+- name: Set SSH login grace time
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?LoginGraceTime"
+    line: "LoginGraceTime 30"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - ssh
+    - security
+
+# ---------------------------------------------------------------------------
+# Firewall (OS-family dispatch)
+# ---------------------------------------------------------------------------
+- name: Include OS-family firewall tasks
+  ansible.builtin.include_tasks: "firewall-{{ ansible_os_family | lower }}.yml"
+  when: not (proxmox_skip_ufw | default(false) | bool)
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Storage Maintenance — Periodic TRIM (fstrim)
+# ---------------------------------------------------------------------------
+# Enables the weekly fstrim.timer for SSD/NVMe TRIM. Required for LVM-thin
+# space reclamation and SSD longevity. Skipped on LXC containers (rootfs is
+# host-managed — TRIM handled at hypervisor level) and non-Linux systems.
+- name: Enable fstrim.timer for periodic TRIM
+  ansible.builtin.systemd:
+    name: fstrim.timer
+    enabled: true
+    state: started
+  when:
+    - fstrim_enabled | bool
+    - ansible_virtualization_type | default('') != 'lxc'
+    - ansible_system == 'Linux'
+  tags:
+    - storage
+    - fstrim
+
+# ---------------------------------------------------------------------------
+# node_exporter — Prometheus metrics agent
+# ---------------------------------------------------------------------------
+# Installs node_exporter on all Linux hosts (skipped on macOS).
+# Opens port 9100 in UFW for Prometheus scraping from monitoring_scrape_sources.
+# Disable with monitoring_node_exporter_enabled: false in host_vars/group_vars.
+- name: Include node_exporter tasks
+  ansible.builtin.include_tasks: node-exporter.yml
+  when:
+    - monitoring_node_exporter_enabled | bool
+    - ansible_os_family != 'Darwin'
+  tags:
+    - monitoring
+    - node-exporter
+
+# ---------------------------------------------------------------------------
+# Promtail — Loki log shipping agent
+# ---------------------------------------------------------------------------
+# Ships system logs to the Loki instance on the RKE2 cluster.
+# Requires monitoring VLAN reachability to Loki NodePort (10.0.20.40:31100).
+# Disable with monitoring_promtail_enabled: false in host_vars/group_vars.
+- name: Include promtail tasks
+  ansible.builtin.include_tasks: promtail.yml
+  when:
+    - monitoring_promtail_enabled | bool
+    - ansible_os_family != 'Darwin'
+  tags:
+    - monitoring
+    - promtail

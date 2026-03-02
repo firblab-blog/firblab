@@ -1,0 +1,332 @@
+---
+# =============================================================================
+# AI GPU Guest VM — ROCm + Ollama + Open WebUI + n8n
+# =============================================================================
+# Deploys AI/ML workloads on a VM with AMD GPU passthrough.
+# Uses ROCm (AMD's GPU compute stack) instead of NVIDIA CUDA.
+#
+# Prerequisites:
+#   - AMD GPU passed through to the VM (hostpci0/1 via Terraform)
+#   - /dev/kfd and /dev/dri devices available in the VM
+#   - Data disk attached as scsi1 (Terraform) — formatted/mounted by this role
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ROCm Driver Installation
+# ---------------------------------------------------------------------------
+# Uses signed-by keyring (not deprecated apt-key) and pinned version repos.
+# Ref: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager/package-manager-ubuntu.html
+# ---------------------------------------------------------------------------
+- name: Install ROCm prerequisites
+  ansible.builtin.apt:
+    name:
+      - wget
+      - gnupg2
+    state: present
+    update_cache: true
+  tags:
+    - rocm
+
+- name: Create APT keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - rocm
+
+- name: Remove legacy apt-key entry (if exists from prior run)
+  ansible.builtin.apt_key:
+    url: https://repo.radeon.com/rocm/rocm.gpg.key
+    state: absent
+  failed_when: false
+  tags:
+    - rocm
+
+- name: Download and dearmor AMD ROCm GPG key
+  ansible.builtin.shell:
+    cmd: >
+      wget -qO - https://repo.radeon.com/rocm/rocm.gpg.key |
+      gpg --dearmor > /etc/apt/keyrings/rocm.gpg
+    creates: /etc/apt/keyrings/rocm.gpg
+  tags:
+    - rocm
+
+- name: Set permissions on ROCm keyring
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/rocm.gpg
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - rocm
+
+- name: Remove stale AMDGPU repo file (legacy URL)
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/amdgpu.list
+    state: absent
+  tags:
+    - rocm
+
+- name: Remove stale ROCm repo file (legacy URL)
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/rocm.list
+    state: absent
+  tags:
+    - rocm
+
+- name: Add AMD ROCm and Graphics repositories (signed-by keyring)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/rocm.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/{{ ai_gpu_rocm_version }} noble main
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/graphics/{{ ai_gpu_rocm_version }}/ubuntu noble main
+  tags:
+    - rocm
+
+- name: Pin AMD ROCm packages (priority 600)
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/rocm-pin-600
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Package: *
+      Pin: release o=repo.radeon.com
+      Pin-Priority: 600
+  tags:
+    - rocm
+
+- name: Install ROCm runtime packages
+  ansible.builtin.apt:
+    name:
+      - rocm-hip-runtime
+      - rocm-opencl-runtime
+    state: present
+    update_cache: true
+  tags:
+    - rocm
+
+# ---------------------------------------------------------------------------
+# Device Permissions
+# ---------------------------------------------------------------------------
+- name: Ensure render group exists
+  ansible.builtin.group:
+    name: render
+    state: present
+  tags:
+    - rocm
+
+- name: Add admin user to video and render groups
+  ansible.builtin.user:
+    name: admin
+    groups:
+      - video
+      - render
+    append: true
+  tags:
+    - rocm
+
+- name: Get video group GID
+  ansible.builtin.command: getent group video
+  register: video_group_info
+  changed_when: false
+  tags:
+    - rocm
+
+- name: Get render group GID
+  ansible.builtin.command: getent group render
+  register: render_group_info
+  changed_when: false
+  tags:
+    - rocm
+
+- name: Set GPU group GID facts for Docker Compose template
+  ansible.builtin.set_fact:
+    ai_gpu_video_gid: "{{ video_group_info.stdout.split(':')[2] }}"
+    ai_gpu_render_gid: "{{ render_group_info.stdout.split(':')[2] }}"
+  tags:
+    - rocm
+
+# ---------------------------------------------------------------------------
+# Data Disk Setup
+# ---------------------------------------------------------------------------
+# Terraform creates the data disk (scsi1 → /dev/sdb). Ansible formats,
+# mounts, and persists it via fstab. Safe to re-run: format is gated on
+# the disk NOT already having ext4.
+# ---------------------------------------------------------------------------
+- name: Check existing filesystem on data disk
+  ansible.builtin.command:
+    cmd: "blkid -o value -s TYPE {{ ai_gpu_data_disk_device }}"
+  register: ai_gpu_disk_fs_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - configure
+    - storage
+
+- name: Format data disk as ext4 (only if no existing filesystem)
+  community.general.filesystem:
+    dev: "{{ ai_gpu_data_disk_device }}"
+    fstype: ext4
+    opts: "-L {{ ai_gpu_data_disk_label }}"
+  when: ai_gpu_disk_fs_check.stdout | default('') != 'ext4'
+  tags:
+    - configure
+    - storage
+
+- name: Mount data disk and add fstab entry (by label)
+  ansible.posix.mount:
+    src: "LABEL={{ ai_gpu_data_disk_label }}"
+    path: "{{ ai_gpu_data_disk_mount }}"
+    fstype: "{{ ai_gpu_data_disk_fstype }}"
+    opts: "{{ ai_gpu_data_disk_opts }}"
+    state: mounted
+  tags:
+    - configure
+    - storage
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create AI GPU directories (root-owned)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ ai_gpu_install_dir }}"
+    - "{{ ai_gpu_ollama_data }}"
+    - "{{ ai_gpu_install_dir }}/open-webui"
+  tags:
+    - configure
+    - directories
+
+# n8n runs as UID 1000 (node user) inside the container and needs write
+# access to /home/node/.n8n (bind-mounted from this host directory).
+# Root ownership causes crash: "SQLITE_CANTOPEN: unable to open database file"
+- name: Create n8n data directory (UID 1000 — n8n node user)
+  ansible.builtin.file:
+    path: "{{ ai_gpu_install_dir }}/n8n"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template AI GPU Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ ai_gpu_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart ai-gpu
+  tags:
+    - configure
+
+# Flush pending handlers before starting containers
+- name: Flush handlers before starting AI GPU containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull AI GPU container images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ ai_gpu_install_dir }}"
+  register: ai_gpu_pull_result
+  changed_when: "'Pull complete' in ai_gpu_pull_result.stdout or 'Downloaded' in ai_gpu_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start AI GPU containers
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ ai_gpu_install_dir }}"
+  register: ai_gpu_up_result
+  changed_when: "'Started' in ai_gpu_up_result.stderr or 'Creating' in ai_gpu_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Checks
+# ---------------------------------------------------------------------------
+- name: Wait for Ollama API to respond
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ai_gpu_ollama_port }}/api/version"
+    method: GET
+    status_code: [200]
+  register: ollama_health
+  retries: 15
+  delay: 10
+  until: ollama_health.status is defined and ollama_health.status == 200
+  failed_when: false
+  tags:
+    - verify
+
+- name: Display Ollama health status
+  ansible.builtin.debug:
+    msg: "Ollama API status: {{ ollama_health.status | default('not responding') }}"
+  tags:
+    - verify
+
+- name: Wait for Open WebUI to respond
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ai_gpu_openwebui_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: openwebui_health
+  retries: 30
+  delay: 10
+  until: openwebui_health.status is defined and openwebui_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Display Open WebUI health status
+  ansible.builtin.debug:
+    msg: "Open WebUI status: {{ openwebui_health.status | default('not responding') }}"
+  tags:
+    - verify
+
+- name: Wait for n8n to respond
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ai_gpu_n8n_port }}/healthz"
+    method: GET
+    status_code: [200]
+  register: n8n_health
+  retries: 15
+  delay: 10
+  until: n8n_health.status is defined and n8n_health.status == 200
+  failed_when: false
+  tags:
+    - verify
+
+- name: Display n8n health status
+  ansible.builtin.debug:
+    msg: "n8n status: {{ n8n_health.status | default('not responding') }}"
+  tags:
+    - verify
+
+- name: Display AI GPU service health summary
+  ansible.builtin.debug:
+    msg:
+      - "AI GPU Service Health Check Summary:"
+      - "  Ollama API:   {{ ollama_health.status | default('not responding') }}"
+      - "  Open WebUI:   {{ openwebui_health.status | default('not responding') }}"
+      - "  n8n:          {{ n8n_health.status | default('not responding') }}"
+  tags:
+    - verify

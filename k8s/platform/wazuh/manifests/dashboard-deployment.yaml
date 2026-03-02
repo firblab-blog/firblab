@@ -1,0 +1,71 @@
+# =============================================================================
+# Wazuh Dashboard — Deployment
+# =============================================================================
+# OpenSearch Dashboards fork with the Wazuh plugin pre-installed.
+# Single replica, stateless. Uses Recreate strategy for clean restarts.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+  labels:
+    app: wazuh-dashboard
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wazuh-dashboard
+  template:
+    metadata:
+      labels:
+        app: wazuh-dashboard
+    spec:
+      # Schedule on agent nodes (server nodes only have 4GB)
+      nodeSelector:
+        node-role.kubernetes.io/agent: "true"
+      containers:
+        - name: wazuh-dashboard
+          image: wazuh/wazuh-dashboard:4.14.3
+          ports:
+            - containerPort: 5601
+              name: http
+              protocol: TCP
+          env:
+            - name: WAZUH_API_URL
+              value: "http://wazuh-manager"
+            - name: API_USERNAME
+              value: "wazuh-wui"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+          volumeMounts:
+            - name: dashboard-config
+              mountPath: /usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+              subPath: opensearch_dashboards.yml
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5601
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5601
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: dashboard-config
+          configMap:
+            name: wazuh-dashboard-config

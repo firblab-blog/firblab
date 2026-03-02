@@ -1,0 +1,32 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ubuntu-template
+    username: admin
+    # Password: "packer" — only used during Packer build, SSH password auth
+    # is disabled by the hardening provisioner afterward.
+    password: "$6$randomsalt$Y9I6baU6/XBXbwHqL9WqhUxEtpn068Ssu.yflHxMZNsO9tIi1ARi9m1vhY8szl1bF.So//IYQx378cx9SFCDF/"
+  ssh:
+    install-server: yes
+    allow-pw: yes
+  packages:
+    - qemu-guest-agent
+    - cloud-init
+    - curl
+    - wget
+    - jq
+    - openssh-server
+  storage:
+    layout:
+      name: direct
+  late-commands:
+    - "echo 'admin ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/admin"
+    - "chmod 0440 /target/etc/sudoers.d/admin"
+    - "curtin in-target -- systemctl enable qemu-guest-agent"
+    - "curtin in-target -- systemctl enable ssh"
+    - "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /target/etc/ssh/sshd_config"
+    - "rm -f /target/etc/ssh/sshd_config.d/60-cloudimg-settings.conf"

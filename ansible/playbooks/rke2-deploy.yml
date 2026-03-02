@@ -1,0 +1,328 @@
+---
+# =============================================================================
+# RKE2 Cluster Deployment Playbook
+# =============================================================================
+# Deploys a DISA STIG-hardened RKE2 Kubernetes cluster.
+# 3 server (control plane) nodes + 2 agent (worker) nodes on Services VLAN 20.
+#
+# Prerequisites:
+#   - VMs deployed via Terraform Layer 04 (04-rke2-cluster)
+#   - SSH keys available in terraform/layers/04-rke2-cluster/.secrets/
+#   - Vault running and accessible (for encryption key seeding, optional)
+#
+# Deployment order (critical for HA cluster bootstrap):
+#   1. ALL nodes: prerequisites + hardening (parallel)
+#   2. First server (rke2-server-1): cluster-init (serial: 1)
+#   3. Remaining servers: join cluster (serial: 1)
+#   4. All agents: join cluster (parallel)
+#   5. Post-deploy: label nodes, verify health
+#
+# Usage (run from repo root):
+#   cd ~/repos/firb-lab/firblab
+#   ansible-playbook ansible/playbooks/rke2-deploy.yml
+#
+# Tags:
+#   --tags prerequisites    # Only run prerequisite setup
+#   --tags hardening        # Only run STIG hardening configs
+#   --tags install          # Only run RKE2 install + start
+#   --tags configure        # Only run config-related tasks (server config + CoreDNS)
+#   --tags coredns          # Only deploy CoreDNS custom zone config
+#   --tags verify           # Only run verification checks
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Prerequisites + Hardening (all RKE2 nodes, parallel)
+# ---------------------------------------------------------------------------
+- name: "RKE2 | Prerequisites and hardening (all nodes)"
+  hosts: rke2_cluster
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Wait for hosts to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Preparing {{ inventory_hostname }}
+          (role={{ rke2_role }}, os={{ ansible_os_family }},
+          ip={{ ansible_host }})
+      tags:
+        - always
+
+  roles:
+    # Baseline system config + firewall (SSH hardening, fail2ban, UFW, packages)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (sysctl, kernel modules, audit, AppArmor, AIDE)
+    # RKE2 nodes are VMs — full hardening applies (unlike LXC containers)
+    - role: hardening
+      tags:
+        - hardening
+
+  tasks:
+    # RKE2-specific prerequisites (kernel modules, sysctl, swap, etcd user)
+    - name: Run RKE2 prerequisites
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: prerequisites.yml
+      tags:
+        - prerequisites
+        - rke2
+
+    # Deploy STIG configs (audit policy, encryption config) before install
+    - name: Run RKE2 STIG hardening
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: hardening.yml
+      tags:
+        - hardening
+        - rke2
+
+# ---------------------------------------------------------------------------
+# Play 2: First server — cluster-init (serial: 1)
+# ---------------------------------------------------------------------------
+- name: "RKE2 | Initialize cluster (first server)"
+  hosts: rke2-server-1
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Install and start RKE2 server (cluster-init)
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: install-server.yml
+      tags:
+        - install
+        - configure
+        - coredns
+        - rke2
+
+    # Propagate the cluster token to all other nodes via fact caching
+    - name: Read cluster token
+      ansible.builtin.slurp:
+        src: "{{ rke2_config_dir | default('/etc/rancher/rke2') }}/cluster-token"
+      register: _rke2_token_raw
+      no_log: true
+      tags:
+        - install
+
+    - name: Set cluster token fact for sharing
+      ansible.builtin.set_fact:
+        rke2_cluster_token: "{{ _rke2_token_raw.content | b64decode | trim }}"
+        cacheable: true
+      no_log: true
+      tags:
+        - install
+
+# ---------------------------------------------------------------------------
+# Play 3: Remaining servers — join cluster (serial: 1)
+# ---------------------------------------------------------------------------
+- name: "RKE2 | Join remaining servers to cluster"
+  hosts: rke2_servers:!rke2-server-1
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Retrieve cluster token from first server
+      ansible.builtin.set_fact:
+        rke2_cluster_token: "{{ hostvars['rke2-server-1']['rke2_cluster_token'] }}"
+      no_log: true
+      tags:
+        - install
+
+  tasks:
+    - name: Install and start RKE2 server (join)
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: install-server.yml
+      tags:
+        - install
+        - configure
+        - coredns
+        - rke2
+
+# ---------------------------------------------------------------------------
+# Play 4: All agents — join cluster (parallel)
+# ---------------------------------------------------------------------------
+- name: "RKE2 | Join agent nodes to cluster"
+  hosts: rke2_agents
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Retrieve cluster token from first server
+      ansible.builtin.set_fact:
+        rke2_cluster_token: "{{ hostvars['rke2-server-1']['rke2_cluster_token'] }}"
+      no_log: true
+      tags:
+        - install
+
+  tasks:
+    - name: Install and start RKE2 agent
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: install-agent.yml
+      tags:
+        - install
+        - rke2
+
+# ---------------------------------------------------------------------------
+# Play 5: Post-deploy — label nodes, verify health
+# ---------------------------------------------------------------------------
+- name: "RKE2 | Post-deploy verification and node labeling"
+  hosts: rke2-server-1
+  become: true
+  gather_facts: false
+
+  tasks:
+    # Label server nodes
+    - name: Label server nodes with role
+      ansible.builtin.command:
+        cmd: >-
+          {{ rke2_bin_dir | default('/var/lib/rancher/rke2/bin') }}/kubectl
+          --kubeconfig {{ rke2_data_dir | default('/var/lib/rancher/rke2') }}/server/cred/admin.kubeconfig
+          label node {{ item }} node-role.kubernetes.io/server=true --overwrite
+      loop: "{{ groups['rke2_servers'] }}"
+      changed_when: true
+      tags:
+        - post-deploy
+
+    # Label agent nodes
+    - name: Label agent nodes with role
+      ansible.builtin.command:
+        cmd: >-
+          {{ rke2_bin_dir | default('/var/lib/rancher/rke2/bin') }}/kubectl
+          --kubeconfig {{ rke2_data_dir | default('/var/lib/rancher/rke2') }}/server/cred/admin.kubeconfig
+          label node {{ item }} node-role.kubernetes.io/agent=true --overwrite
+      loop: "{{ groups['rke2_agents'] }}"
+      changed_when: true
+      tags:
+        - post-deploy
+
+    # Label all nodes for Longhorn default disk creation
+    - name: Label nodes for Longhorn default disk creation
+      ansible.builtin.command:
+        cmd: >-
+          {{ rke2_bin_dir | default('/var/lib/rancher/rke2/bin') }}/kubectl
+          --kubeconfig {{ rke2_data_dir | default('/var/lib/rancher/rke2') }}/server/cred/admin.kubeconfig
+          label node {{ item }} node.longhorn.io/create-default-disk=true --overwrite
+      loop: "{{ groups['rke2_cluster'] }}"
+      changed_when: true
+      tags:
+        - post-deploy
+
+    # Run verification checks
+    - name: Run cluster verification
+      ansible.builtin.include_role:
+        name: rke2
+        tasks_from: verify.yml
+      tags:
+        - verify
+        - coredns
+        - rke2
+
+    # Fetch flattened kubeconfig (embeds certs inline for local Mac access).
+    # RKE2's rke2.yaml uses file paths (/var/lib/rancher/rke2/server/tls/...)
+    # which don't exist on the operator's workstation. --flatten base64-encodes
+    # certs directly into the YAML so kubectl works remotely.
+    - name: Generate flattened kubeconfig on server
+      ansible.builtin.command:
+        cmd: >-
+          {{ rke2_bin_dir | default('/var/lib/rancher/rke2/bin') }}/kubectl
+          --kubeconfig {{ rke2_config_dir | default('/etc/rancher/rke2') }}/rke2.yaml
+          config view --flatten
+      register: _rke2_kubeconfig_flat
+      changed_when: false
+      tags:
+        - post-deploy
+
+    - name: Ensure ~/.kube directory exists on localhost
+      ansible.builtin.file:
+        path: ~/.kube
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      tags:
+        - post-deploy
+
+    - name: Write flattened kubeconfig to localhost
+      ansible.builtin.copy:
+        content: "{{ _rke2_kubeconfig_flat.stdout }}"
+        dest: ~/.kube/rke2-config
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      tags:
+        - post-deploy
+
+    - name: Update kubeconfig server address for external access
+      ansible.builtin.replace:
+        path: ~/.kube/rke2-config
+        regexp: 'https://127\.0\.0\.1:6443'
+        replace: "https://{{ rke2_init_node_ip }}:6443"
+      delegate_to: localhost
+      become: false
+      tags:
+        - post-deploy
+
+    # Write a tunnel-mode kubeconfig that keeps 127.0.0.1:6443 for use
+    # with SSH -L tunnels through the Proxmox jump host. The direct-mode
+    # config above has the actual server IP for when inter-VLAN routing works.
+    - name: Write tunnel-mode kubeconfig to localhost
+      ansible.builtin.copy:
+        content: "{{ _rke2_kubeconfig_flat.stdout }}"
+        dest: ~/.kube/rke2-config-tunnel
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      tags:
+        - post-deploy
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "RKE2 Cluster Deployment Complete"
+          - "=========================================="
+          - "Version: {{ rke2_version }}"
+          - "Profile: {{ rke2_profile }}"
+          - "CNI: {{ rke2_cni }}"
+          - "Servers: {{ groups['rke2_servers'] | join(', ') }}"
+          - "Agents: {{ groups['rke2_agents'] | join(', ') }}"
+          - ""
+          - "Kubeconfig (direct):  ~/.kube/rke2-config"
+          - "Kubeconfig (tunnel):  ~/.kube/rke2-config-tunnel"
+          - ""
+          - "Direct access (if inter-VLAN routing works):"
+          - "  export KUBECONFIG=~/.kube/rke2-config"
+          - "  kubectl get nodes"
+          - ""
+          - "Tunnel access (reliable, via Proxmox jump host):"
+          - "  ssh -L 6443:{{ rke2_init_node_ip }}:6443 -i ~/.ssh/id_ed25519_lab-01 -o IdentitiesOnly=yes admin@10.0.10.42 -N &"
+          - "  export KUBECONFIG=~/.kube/rke2-config-tunnel"
+          - "  kubectl get nodes"
+          - ""
+          - "STIG Controls:"
+          - "  - CIS profile: {{ rke2_profile }}"
+          - "  - Audit logging: enabled"
+          - "  - Secrets encryption: aescbc"
+          - "  - Pod Security Standards: restricted"
+          - "=========================================="
+      tags:
+        - verify

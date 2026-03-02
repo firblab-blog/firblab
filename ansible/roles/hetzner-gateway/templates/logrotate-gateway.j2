@@ -1,0 +1,37 @@
+# =============================================================================
+# Logrotate — FirbLab Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: logrotate-gateway.j2
+# =============================================================================
+
+/var/log/traefik/access.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    postrotate
+        docker kill --signal=USR1 traefik 2>/dev/null || true
+    endscript
+}
+
+/var/log/firblab-setup.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+}
+
+/var/log/cloud-init-output.log {
+    weekly
+    rotate 2
+    compress
+    delaycompress
+    missingok
+    notifempty
+}

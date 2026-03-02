@@ -1,0 +1,114 @@
+# =============================================================================
+# Scanopy Docker Compose — Network Topology Scanner
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+#
+# Architecture:
+#   - server: Web UI + API (bridge network, port {{ scanopy_server_port }} published)
+#   - daemon: ARP/L2/L3 scanner (host network, privileged for raw sockets)
+#   - postgres: Data persistence (bridge network, internal only)
+#
+# The daemon runs on host network for unrestricted scanning access.
+# It communicates with the server at http://127.0.0.1:{{ scanopy_server_port }}.
+# In DaemonPoll mode, the daemon polls the server — no inbound connections needed.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Data persistence
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: {{ scanopy_pg_image }}
+    container_name: scanopy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "{{ scanopy_db_name }}"
+      POSTGRES_USER: "{{ scanopy_db_user }}"
+      POSTGRES_PASSWORD: "{{ scanopy_db_password }}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ scanopy_db_user }} -d {{ scanopy_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - scanopy
+
+  # ---------------------------------------------------------------------------
+  # Scanopy Server — Web UI + API
+  # ---------------------------------------------------------------------------
+  server:
+    image: {{ scanopy_server_image }}
+    container_name: scanopy-server
+    restart: unless-stopped
+    ports:
+      - "{{ scanopy_server_port }}:{{ scanopy_server_port }}"
+    environment:
+      SCANOPY_DATABASE_URL: "postgresql://{{ scanopy_db_user }}:{{ scanopy_db_password }}@postgres:5432/{{ scanopy_db_name }}"
+      SCANOPY_SERVER_PORT: "{{ scanopy_server_port }}"
+      SCANOPY_PUBLIC_URL: "http://{{ ansible_host }}:{{ scanopy_server_port }}"
+      SCANOPY_LOG_LEVEL: "{{ scanopy_log_level }}"
+      SCANOPY_WEB_EXTERNAL_PATH: "{{ scanopy_web_external_path }}"
+      SCANOPY_DISABLE_REGISTRATION: "{{ scanopy_disable_registration | lower }}"
+    volumes:
+      - scanopy_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:{{ scanopy_server_port }}/api/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - scanopy
+
+  # ---------------------------------------------------------------------------
+  # Scanopy Daemon — Network Scanner
+  # ---------------------------------------------------------------------------
+  # Runs on host network with privileged access for:
+  #   - Raw socket ARP scanning (Layer 2 discovery)
+  #   - ICMP ping sweeps
+  #   - TCP/UDP port scanning
+  #   - Docker container discovery (via docker.sock)
+  #
+  # This is a deliberate security trade-off. The host is CIS L1 hardened
+  # and on an internal-only network. Privileged mode is inherent to how
+  # network scanners operate — they need raw socket access.
+  # ---------------------------------------------------------------------------
+  daemon:
+    image: {{ scanopy_daemon_image }}
+    container_name: scanopy-daemon
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      SCANOPY_SERVER_URL: "http://127.0.0.1:{{ scanopy_server_port }}"
+      SCANOPY_DAEMON_PORT: "{{ scanopy_daemon_port }}"
+      SCANOPY_BIND_ADDRESS: "0.0.0.0"
+      SCANOPY_NAME: "{{ scanopy_daemon_name }}"
+      SCANOPY_HEARTBEAT_INTERVAL: "{{ scanopy_heartbeat_interval }}"
+      SCANOPY_MODE: "{{ scanopy_daemon_mode }}"
+      SCANOPY_LOG_LEVEL: "{{ scanopy_log_level }}"
+{% if scanopy_daemon_network_id is defined and scanopy_daemon_network_id | length > 0 and scanopy_daemon_api_key is defined and scanopy_daemon_api_key | length > 0 %}
+      # Pre-configured daemon credentials (provisioned by Ansible via server API).
+      # These allow the daemon to self-register on startup without relying on
+      # the server's /api/initialize call (which only fires during onboarding).
+      SCANOPY_NETWORK_ID: "{{ scanopy_daemon_network_id }}"
+      SCANOPY_DAEMON_API_KEY: "{{ scanopy_daemon_api_key }}"
+{% endif %}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  postgres_data:
+  scanopy_data:
+
+networks:
+  scanopy:
+    driver: bridge

@@ -1,0 +1,384 @@
+---
+# =============================================================================
+# GitLab PBS Backup Restore Playbook
+# =============================================================================
+# Extracts a GitLab backup tar from a PBS snapshot of vm/3001, transfers it
+# to the new GitLab VM, and restores it.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/gitlab-pbs-restore.yml
+#
+# Optional overrides:
+#   -e pbs_snapshot=vm/3001/2026-03-01T06:00:03Z   # specific snapshot
+#   -e skip_extract=true                             # reuse existing /tmp/gitlab-restore
+#   -e skip_restore=true                             # extract only, don't restore
+#
+# Prerequisites:
+#   - GitLab CE installed and reconfigured on the target host
+#   - gitlab-secrets.json already restored on the target host
+#   - PBS host accessible via SSH
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Extract backup from PBS
+# ---------------------------------------------------------------------------
+- name: Extract GitLab backup from PBS snapshot
+  hosts: pbs
+  become: true
+  gather_facts: false
+  vars:
+    pbs_repo: "backup@pbs!pve-backup@localhost:backups"
+    pbs_snapshot: ""
+    pbs_mount: "/mnt/pbs-fuse"
+    disk_mount: "/mnt/gitlab-restore"
+    output_dir: "/tmp/gitlab-restore"
+    skip_extract: false
+    # The OS disk (scsi0) contains /var/opt/gitlab/backups/
+    pbs_archive: "drive-scsi0.img.fidx"
+    vault_addr: "https://10.0.10.10:8200"
+    vault_ca_cert: "{{ lookup('env', 'HOME') }}/.lab/tls/ca/ca.pem"
+
+  pre_tasks:
+    - name: Read PBS API token from Vault
+      ansible.builtin.shell:
+        cmd: >-
+          VAULT_ADDR="{{ vault_addr }}"
+          VAULT_CACERT="{{ vault_ca_cert }}"
+          vault kv get -mount=secret -format=json infra/pbs
+      delegate_to: localhost
+      become: false
+      register: pbs_vault_result
+      changed_when: false
+      # no_log: true  # DEBUG — re-enable after fixing
+
+    - name: Set PBS credential facts
+      ansible.builtin.set_fact:
+        pbs_token_name: "{{ (pbs_vault_result.stdout | from_json).data.data.api_token_id }}"
+        pbs_token_secret: "{{ (pbs_vault_result.stdout | from_json).data.data.api_token_secret }}"
+        pbs_fingerprint: "{{ (pbs_vault_result.stdout | from_json).data.data.fingerprint }}"
+      no_log: true
+
+  tasks:
+    - name: Skip extraction if requested
+      ansible.builtin.meta: end_play
+      when: skip_extract | bool
+
+    - name: Determine latest snapshot for vm/3001
+      ansible.builtin.shell:
+        cmd: >-
+          proxmox-backup-client list --repository "{{ pbs_repo }}"
+          --output-format json |
+          python3 -c "import sys,json;
+          snaps=[s for s in json.load(sys.stdin) if s.get('backup-id','').startswith('vm/3001')];
+          snaps.sort(key=lambda s: s.get('backup-time',''));
+          print(snaps[-1]['backup-id'] if snaps else '')"
+      environment:
+        PBS_PASSWORD: "{{ pbs_token_secret }}"
+        PBS_FINGERPRINT: "{{ pbs_fingerprint }}"
+      register: latest_snapshot
+      changed_when: false
+      no_log: true
+      when: pbs_snapshot == ""
+
+    - name: Fail if no snapshot found and none provided
+      ansible.builtin.fail:
+        msg: "No vm/3001 snapshots found in PBS. Provide one with -e pbs_snapshot=..."
+      when: pbs_snapshot == "" and (latest_snapshot.stdout | trim) == ""
+
+    - name: Set snapshot fact
+      ansible.builtin.set_fact:
+        restore_snapshot: "{{ pbs_snapshot if pbs_snapshot != '' else latest_snapshot.stdout | trim }}"
+
+    - name: Display snapshot to restore
+      ansible.builtin.debug:
+        msg: "Restoring from PBS snapshot: {{ restore_snapshot }}"
+
+    - name: Create working directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ pbs_mount }}"
+        - "{{ disk_mount }}"
+        - "{{ output_dir }}"
+
+    - name: Clean up any previous PBS mappings
+      ansible.builtin.shell: |
+        umount "{{ disk_mount }}" 2>/dev/null || true
+        proxmox-backup-client unmap 2>/dev/null || true
+      environment:
+        PBS_PASSWORD: "{{ pbs_token_secret }}"
+        PBS_FINGERPRINT: "{{ pbs_fingerprint }}"
+      changed_when: false
+
+    - name: Map PBS disk image
+      ansible.builtin.shell: |
+        proxmox-backup-client map "{{ restore_snapshot }}" \
+          "{{ pbs_archive }}" \
+          --repository "{{ pbs_repo }}" 2>&1
+      environment:
+        PBS_PASSWORD: "{{ pbs_token_secret }}"
+        PBS_FINGERPRINT: "{{ pbs_fingerprint }}"
+      register: map_result
+      changed_when: true
+
+    - name: Display map output
+      ansible.builtin.debug:
+        msg: "{{ map_result.stdout_lines }}"
+
+    - name: Extract device path from map output
+      ansible.builtin.shell: |
+        echo "{{ map_result.stdout }}" | grep -oP '/dev/\S+'
+      register: dev_from_output
+      changed_when: false
+      ignore_errors: true
+
+    - name: Fallback — find any PBS-mapped loop device
+      ansible.builtin.shell: "losetup -l -n | head -1 | awk '{print $1}'"
+      register: dev_from_losetup
+      changed_when: false
+      when: dev_from_output.rc != 0 or dev_from_output.stdout | trim == ""
+
+    - name: Set device fact
+      ansible.builtin.set_fact:
+        loop_dev: "{{ (dev_from_output.stdout | trim) if (dev_from_output.rc == 0 and dev_from_output.stdout | trim != '') else (dev_from_losetup.stdout | trim) }}"
+
+    - name: Fail if no mapped device found
+      ansible.builtin.fail:
+        msg: "Could not find PBS-mapped loop device. Map output was: {{ map_result.stdout }}"
+      when: loop_dev == ""
+
+    - name: List partitions on mapped device
+      ansible.builtin.shell: "lsblk {{ loop_dev }}"
+      register: partitions
+      changed_when: false
+
+    - name: Display partition layout
+      ansible.builtin.debug:
+        msg: "{{ partitions.stdout_lines }}"
+
+    - name: Try mounting root filesystem (partition scan)
+      ansible.builtin.shell: |
+        # Try p2 first (typical Ubuntu GPT: p1=EFI, p2=root)
+        for PART in "{{ loop_dev }}p2" "{{ loop_dev }}p1" "{{ loop_dev }}p3" "{{ loop_dev }}"; do
+          if [ -b "$PART" ] && mount -o ro "$PART" "{{ disk_mount }}" 2>/dev/null; then
+            echo "MOUNTED:$PART"
+            exit 0
+          fi
+        done
+        # Try LVM
+        pvscan --cache 2>/dev/null || true
+        VG=$(pvs --noheadings -o vg_name "{{ loop_dev }}"* 2>/dev/null | head -1 | tr -d ' ')
+        if [ -n "$VG" ]; then
+          vgchange -ay "$VG"
+          ROOT_LV=$(lvs --noheadings -o lv_path "$VG" 2>/dev/null | grep -E 'root|ubuntu' | head -1 | tr -d ' ')
+          if [ -n "$ROOT_LV" ] && mount -o ro "$ROOT_LV" "{{ disk_mount }}" 2>/dev/null; then
+            echo "MOUNTED:$ROOT_LV"
+            exit 0
+          fi
+        fi
+        echo "FAILED"
+        exit 1
+      register: mount_result
+      changed_when: "'MOUNTED' in mount_result.stdout"
+
+    - name: Display mounted partition
+      ansible.builtin.debug:
+        msg: "{{ mount_result.stdout }}"
+
+    - name: Find GitLab backup tars
+      ansible.builtin.find:
+        paths: "{{ disk_mount }}/var/opt/gitlab/backups"
+        patterns: "*_gitlab_backup.tar"
+      register: backup_tars
+
+    - name: Display found backups
+      ansible.builtin.debug:
+        msg: "Found {{ backup_tars.files | length }} backup(s): {{ backup_tars.files | map(attribute='path') | list }}"
+
+    - name: Fail if no backups found
+      ansible.builtin.fail:
+        msg: "No GitLab backup tars found in {{ disk_mount }}/var/opt/gitlab/backups/"
+      when: backup_tars.files | length == 0
+
+    - name: Copy most recent backup tar to output directory
+      ansible.builtin.shell: |
+        LATEST=$(ls -t "{{ disk_mount }}/var/opt/gitlab/backups/"*_gitlab_backup.tar | head -1)
+        BASENAME=$(basename "$LATEST")
+        cp "$LATEST" "{{ output_dir }}/$BASENAME"
+        echo "$BASENAME"
+      register: copied_backup
+      changed_when: true
+
+    - name: Copy gitlab-secrets.json if present
+      ansible.builtin.copy:
+        src: "{{ disk_mount }}/etc/gitlab/gitlab-secrets.json"
+        dest: "{{ output_dir }}/gitlab-secrets.json"
+        remote_src: true
+        mode: "0600"
+      ignore_errors: true
+
+    - name: Set backup filename fact
+      ansible.builtin.set_fact:
+        backup_filename: "{{ copied_backup.stdout | trim }}"
+
+    - name: Display extraction summary
+      ansible.builtin.debug:
+        msg: |
+          Extracted files to {{ output_dir }}:
+            Backup: {{ backup_filename }}
+          Ready for transfer to GitLab host.
+
+    # Cleanup NBD mapping
+    - name: Unmount disk
+      ansible.builtin.shell: "umount {{ disk_mount }} 2>/dev/null || true"
+      changed_when: false
+
+    - name: Unmap PBS disk image
+      ansible.builtin.command: proxmox-backup-client unmap
+      environment:
+        PBS_PASSWORD: "{{ pbs_token_secret }}"
+        PBS_FINGERPRINT: "{{ pbs_fingerprint }}"
+      changed_when: true
+      ignore_errors: true
+
+    - name: Remove mount directory
+      ansible.builtin.file:
+        path: "{{ disk_mount }}"
+        state: absent
+
+# ---------------------------------------------------------------------------
+# Play 2: Transfer backup from PBS to GitLab via controller
+# ---------------------------------------------------------------------------
+- name: Transfer backup to GitLab host
+  hosts: pbs
+  become: true
+  gather_facts: false
+  vars:
+    output_dir: "/tmp/gitlab-restore"
+    skip_restore: false
+
+  tasks:
+    - name: Skip if restore not requested
+      ansible.builtin.meta: end_play
+      when: skip_restore | bool
+
+    - name: Find the backup tar in output directory
+      ansible.builtin.find:
+        paths: "{{ output_dir }}"
+        patterns: "*_gitlab_backup.tar"
+      register: restore_tars
+
+    - name: Set backup file path
+      ansible.builtin.set_fact:
+        backup_tar_path: "{{ restore_tars.files | sort(attribute='mtime', reverse=true) | map(attribute='path') | first }}"
+        backup_tar_name: "{{ restore_tars.files | sort(attribute='mtime', reverse=true) | map(attribute='path') | first | basename }}"
+
+    - name: Fetch backup tar to controller
+      ansible.builtin.fetch:
+        src: "{{ backup_tar_path }}"
+        dest: "/tmp/gitlab-pbs-restore/"
+        flat: true
+
+# ---------------------------------------------------------------------------
+# Play 3: Restore backup on GitLab
+# ---------------------------------------------------------------------------
+- name: Restore GitLab from backup
+  hosts: gitlab
+  become: true
+  gather_facts: false
+  vars:
+    skip_restore: false
+    gitlab_backup_dir: "/var/opt/gitlab/backups"
+
+  tasks:
+    - name: Skip if restore not requested
+      ansible.builtin.meta: end_play
+      when: skip_restore | bool
+
+    - name: Find backup tar on controller
+      ansible.builtin.find:
+        paths: "/tmp/gitlab-pbs-restore"
+        patterns: "*_gitlab_backup.tar"
+      delegate_to: localhost
+      become: false
+      register: local_tars
+
+    - name: Set backup facts
+      ansible.builtin.set_fact:
+        local_tar_path: "{{ local_tars.files | sort(attribute='mtime', reverse=true) | map(attribute='path') | first }}"
+        backup_tar_name: "{{ local_tars.files | sort(attribute='mtime', reverse=true) | map(attribute='path') | first | basename }}"
+        # Extract BACKUP= identifier: everything before _gitlab_backup.tar
+        backup_id: "{{ (local_tars.files | sort(attribute='mtime', reverse=true) | map(attribute='path') | first | basename).replace('_gitlab_backup.tar', '') }}"
+
+    - name: Display restore plan
+      ansible.builtin.debug:
+        msg: |
+          Restoring GitLab backup:
+            File: {{ backup_tar_name }}
+            Backup ID: {{ backup_id }}
+            Target: {{ gitlab_backup_dir }}
+
+    - name: Upload backup tar to GitLab host
+      ansible.builtin.copy:
+        src: "{{ local_tar_path }}"
+        dest: "{{ gitlab_backup_dir }}/{{ backup_tar_name }}"
+        owner: git
+        group: git
+        mode: "0600"
+
+    - name: Stop GitLab puma
+      ansible.builtin.command: gitlab-ctl stop puma
+      changed_when: true
+
+    - name: Stop GitLab sidekiq
+      ansible.builtin.command: gitlab-ctl stop sidekiq
+      changed_when: true
+
+    - name: Restore GitLab backup
+      ansible.builtin.command: "gitlab-backup restore BACKUP={{ backup_id }} force=yes"
+      register: restore_result
+      timeout: 600
+
+    - name: Display restore output (last 20 lines)
+      ansible.builtin.debug:
+        msg: "{{ restore_result.stdout_lines[-20:] }}"
+
+    - name: Reconfigure GitLab
+      ansible.builtin.command: gitlab-ctl reconfigure
+      changed_when: true
+
+    - name: Restart GitLab
+      ansible.builtin.command: gitlab-ctl restart
+      changed_when: true
+
+    - name: Wait for GitLab to be healthy
+      ansible.builtin.uri:
+        url: "http://localhost/-/health"
+        status_code: 200
+      register: health
+      retries: 30
+      delay: 10
+      until: health.status == 200
+
+    - name: Run database integrity check
+      ansible.builtin.command: gitlab-rake gitlab:check SANITIZE=true
+      register: integrity_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display restore summary
+      ansible.builtin.debug:
+        msg: |
+          === GitLab Restore Complete ===
+          Backup: {{ backup_id }}
+          Health check: {{ 'PASSED' if health.status == 200 else 'FAILED' }}
+          Integrity check: {{ 'PASSED' if integrity_check.rc == 0 else 'WARNINGS (review output)' }}
+
+    - name: Clean up backup tar from controller
+      ansible.builtin.file:
+        path: "/tmp/gitlab-pbs-restore"
+        state: absent
+      delegate_to: localhost
+      become: false

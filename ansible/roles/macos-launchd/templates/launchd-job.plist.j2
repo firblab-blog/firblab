@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ item.label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+  {% for arg in item.program_arguments %}
+    <string>{{ arg }}</string>
+  {% endfor %}
+  </array>
+  {% if item.start_calendar_interval is defined %}
+  <key>StartCalendarInterval</key>
+  {% if item.start_calendar_interval is mapping %}
+  <dict>
+    {% for key, value in item.start_calendar_interval.items() %}
+    <key>{{ key }}</key>
+    <integer>{{ value }}</integer>
+    {% endfor %}
+  </dict>
+  {% else %}
+  <array>
+    {% for interval in item.start_calendar_interval %}
+    <dict>
+      {% for key, value in interval.items() %}
+      <key>{{ key }}</key>
+      <integer>{{ value }}</integer>
+      {% endfor %}
+    </dict>
+    {% endfor %}
+  </array>
+  {% endif %}
+  {% endif %}
+  {% if item.start_interval is defined %}
+  <key>StartInterval</key>
+  <integer>{{ item.start_interval }}</integer>
+  {% endif %}
+  <key>RunAtLoad</key>
+  <{{ 'true' if item.run_at_load | default(true) else 'false' }}/>
+  <key>KeepAlive</key>
+  <{{ 'true' if item.keep_alive | default(false) else 'false' }}/>
+  {% if item.environment_variables is defined and item.environment_variables | length > 0 %}
+  <key>EnvironmentVariables</key>
+  <dict>
+    {% for key, value in item.environment_variables.items() %}
+    <key>{{ key }}</key>
+    <string>{{ value }}</string>
+    {% endfor %}
+  </dict>
+  {% endif %}
+  {% if item.standard_out_path is defined %}
+  <key>StandardOutPath</key>
+  <string>{{ item.standard_out_path }}</string>
+  {% endif %}
+  {% if item.standard_error_path is defined %}
+  <key>StandardErrorPath</key>
+  <string>{{ item.standard_error_path }}</string>
+  {% endif %}
+  {% if item.working_directory is defined %}
+  <key>WorkingDirectory</key>
+  <string>{{ item.working_directory }}</string>
+  {% endif %}
+</dict>
+</plist>

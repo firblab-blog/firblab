@@ -1,0 +1,25 @@
+# Longhorn RecurringJobs — Automated local snapshots
+#
+# snapshot-6h:  Local snapshots every 6 hours, retain 12 (3 days).
+#               Fast restore for accidental deletions or corruption.
+#
+# S3 backup-daily: REMOVED — PVC sizes (SonarQube 35Gi + Prometheus 55Gi +
+#   Loki 20Gi + Grafana 5Gi) made S3 costs too high. Local snapshots provide
+#   sufficient RPO (6 hours). Application-level backups (Vault, GitLab, Ghost,
+#   Mealie) handle off-site via Hetzner S3.
+#
+# The snapshot job targets the "default" group, which includes all volumes
+# unless explicitly excluded.
+---
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: snapshot-6h
+  namespace: longhorn-system
+spec:
+  cron: "0 */6 * * *"
+  task: snapshot
+  retain: 12
+  concurrency: 2
+  groups:
+    - default

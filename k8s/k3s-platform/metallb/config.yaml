@@ -1,0 +1,30 @@
+# MetalLB L2 configuration for K3s RPi5 cluster (Services VLAN 20)
+# Provides LoadBalancer IP addresses for K3s cluster services.
+# Separate pool from RKE2 (.220-.250) to avoid conflicts.
+#
+# Prerequisites:
+#   helm repo add metallb https://metallb.github.io/metallb
+#   helm install metallb metallb/metallb -n metallb-system --create-namespace
+#   kubectl apply -f config.yaml
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: k3s-services-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    # Range on Services VLAN (10.0.20.0/24)
+    # .200-.219 reserved for K3s, .220-.250 for RKE2
+    - 10.0.20.200-10.0.20.219
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: k3s-services-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - k3s-services-pool
+  # No nodeSelectors — all K3s server nodes run workloads (taints removed).
+  # Unlike RKE2 which restricts VIPs to agent nodes only.

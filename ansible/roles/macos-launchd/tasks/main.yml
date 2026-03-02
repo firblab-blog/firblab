@@ -1,0 +1,45 @@
+---
+# =============================================================================
+# macOS LaunchDaemon Management
+# =============================================================================
+# Installs additional launchd jobs (LaunchDaemons) defined in group_vars
+# via the `launchd_jobs` list variable.
+#
+# Based on: lab-macmini/ansible/roles/mac.launchd
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Generic launchd jobs (defined via launchd_jobs variable)
+# ---------------------------------------------------------------------------
+
+- name: Validate launchd job definitions
+  ansible.builtin.assert:
+    that:
+      - item.label is defined
+      - item.program_arguments is defined
+      - item.program_arguments | length > 0
+    fail_msg: "Each launchd job must define a label and at least one program argument"
+  loop: "{{ launchd_jobs | default([]) }}"
+  loop_control:
+    label: "{{ item.label | default('undefined') }}"
+  when: launchd_jobs is defined and launchd_jobs | length > 0
+  tags:
+    - launchd
+
+- name: Install additional launchd jobs
+  ansible.builtin.template:
+    src: launchd-job.plist.j2
+    dest: "{{ item.dest | default('/Library/LaunchDaemons/' ~ item.label ~ '.plist') }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  loop: "{{ launchd_jobs | default([]) }}"
+  loop_control:
+    label: "{{ item.label }}"
+  become: true
+  notify:
+    - Unload launchd job
+    - Load launchd job
+  when: launchd_jobs is defined and launchd_jobs | length > 0
+  tags:
+    - launchd

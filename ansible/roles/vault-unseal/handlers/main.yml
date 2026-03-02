@@ -1,0 +1,40 @@
+---
+# =============================================================================
+# Vault Unseal Role — Handlers
+# =============================================================================
+
+# Platform-conditional restart
+- name: Restart vault-unseal
+  ansible.builtin.shell: |
+    if [ "$(uname)" = "Darwin" ]; then
+      launchctl kickstart -k system/{{ vault_unseal_launchd_label }}
+    else
+      systemctl restart vault-unseal
+    fi
+  changed_when: true
+
+- name: Wait for vault-unseal after restart
+  ansible.builtin.wait_for:
+    port: "{{ vault_unseal_port }}"
+    host: 127.0.0.1
+    delay: 2
+    timeout: 30
+  listen: "Restart vault-unseal"
+
+# Linux-only: systemd reload
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: ansible_os_family != "Darwin"
+
+# macOS-only: LaunchDaemon load/unload
+- name: Unload vault-unseal launch daemon
+  ansible.builtin.command: "launchctl bootout system/{{ vault_unseal_launchd_label }}"
+  become: true
+  changed_when: true
+  failed_when: false
+
+- name: Load vault-unseal launch daemon
+  ansible.builtin.command: "launchctl bootstrap system /Library/LaunchDaemons/{{ vault_unseal_launchd_label }}.plist"
+  become: true
+  changed_when: true

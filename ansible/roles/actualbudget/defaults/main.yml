@@ -1,0 +1,24 @@
+---
+# =============================================================================
+# Actual Budget Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Actual Budget image — pinned for reproducibility
+# https://github.com/actualbudget/actual-server/releases
+actualbudget_image: "actualbudget/actual-server:26.2.1"
+
+# Port exposed on the host (maps to container port 5006)
+actualbudget_port: 5006
+
+# Install directory
+actualbudget_install_dir: /opt/actualbudget
+
+# OpenID Connect (Authentik SSO)
+# Set these via playbook vars (read from Vault) — do not hardcode secrets.
+actualbudget_oidc_enabled: false
+actualbudget_oidc_discovery_url: ""
+actualbudget_oidc_client_id: ""
+actualbudget_oidc_client_secret: ""
+actualbudget_oidc_server_hostname: "https://actualbudget.home.example-lab.org"

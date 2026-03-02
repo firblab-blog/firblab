@@ -1,0 +1,35 @@
+# =============================================================================
+# Wazuh Indexer — OpenSearch Configuration (Single-Node)
+# =============================================================================
+# OpenSearch Security plugin is DISABLED for simplicity in the homelab.
+# External access is protected by Traefik + Authentik ForwardAuth.
+# Internal cluster traffic stays within the wazuh namespace.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wazuh-indexer-config
+  namespace: wazuh
+data:
+  opensearch.yml: |
+    # Cluster
+    cluster.name: "wazuh-cluster"
+    node.name: "wazuh-indexer-0"
+
+    # Network
+    network.host: "0.0.0.0"
+    http.port: 9200
+
+    # Single-node discovery (no cluster coordination needed)
+    discovery.type: single-node
+
+    # Paths
+    path.data: /var/lib/wazuh-indexer
+    path.logs: /var/log/wazuh-indexer
+
+    # Disable OpenSearch Security plugin — homelab internal only
+    # External TLS handled by Traefik. Access control by Authentik.
+    plugins.security.disabled: true
+
+    # Compatibility mode for Wazuh Indexer
+    compatibility.override_main_response_version: true

@@ -1,0 +1,259 @@
+---
+# =============================================================================
+# GitLab Runner Role - Installation and Registration
+# =============================================================================
+# Installs GitLab Runner from the official apt repository and registers
+# it with the GitLab instance using a glrt- authentication token.
+#
+# Docker installation is handled by the separate 'docker' role — invoke it
+# in the playbook BEFORE this role. Do NOT duplicate Docker setup here.
+#
+# Pattern follows: ansible/roles/gitlab/tasks/main.yml (GPG key, apt repo,
+# package install, configure, verify, cleanup).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+- name: Install GitLab Runner prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - apt-transport-https
+    state: present
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# GitLab Runner Repository
+# ---------------------------------------------------------------------------
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags:
+    - install
+
+- name: Download GitLab Runner GPG key
+  ansible.builtin.get_url:
+    url: "https://packages.gitlab.com/runner/gitlab-runner/gpgkey"
+    dest: /tmp/gitlab-runner-gpg-key
+    mode: "0644"
+    force: true
+  tags:
+    - install
+
+- name: Dearmor GitLab Runner GPG key into keyring
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/gitlab-runner.gpg /tmp/gitlab-runner-gpg-key
+  args:
+    creates: /etc/apt/keyrings/gitlab-runner.gpg
+  tags:
+    - install
+
+- name: Set GitLab Runner keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/gitlab-runner.gpg
+    mode: "0644"
+  tags:
+    - install
+
+- name: Add GitLab Runner apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/gitlab-runner.gpg]
+      https://packages.gitlab.com/runner/gitlab-runner/ubuntu/
+      {{ ansible_distribution_release }} main
+    state: present
+    filename: gitlab-runner
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install GitLab Runner
+# ---------------------------------------------------------------------------
+- name: Install gitlab-runner package
+  ansible.builtin.apt:
+    name: gitlab-runner
+    state: present
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+- name: Build Docker extra_hosts from internal DNS entries
+  ansible.builtin.set_fact:
+    gitlab_runner_docker_extra_hosts: >-
+      {{ gitlab_runner_docker_extra_hosts | default([]) +
+         entry.hostnames | map('regex_replace', '^(.*)$', '\1:' ~ entry.ip) | list }}
+  loop: "{{ internal_dns_entries | default([]) }}"
+  loop_control:
+    loop_var: entry
+    label: "{{ entry.ip }}"
+  tags:
+    - configure
+
+- name: Ensure GitLab Runner config directory exists
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - configure
+
+- name: Check if runner config already exists
+  ansible.builtin.stat:
+    path: "{{ gitlab_runner_config_path }}"
+  register: runner_config_stat
+  tags:
+    - configure
+
+- name: Template GitLab Runner global configuration
+  ansible.builtin.template:
+    src: config.toml.j2
+    dest: "{{ gitlab_runner_config_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  when: not runner_config_stat.stat.exists
+  notify: Restart gitlab-runner
+  tags:
+    - configure
+
+- name: Set config file permissions
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_config_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: runner_config_stat.stat.exists
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Runner Registration
+# ---------------------------------------------------------------------------
+# GitLab 16+ uses glrt- authentication tokens (new creation workflow).
+# Tags, description, locked, run-untagged, etc. are configured SERVER-SIDE
+# in the GitLab UI when creating the runner — NOT via CLI flags.
+# The register command only accepts: --url, --token, --executor, and
+# executor-specific options (--docker-image, --docker-volumes, etc.).
+# See: https://docs.gitlab.com/ci/runners/new_creation_workflow/
+
+- name: Check if a runner is already registered
+  ansible.builtin.command:
+    cmd: gitlab-runner list
+  register: runner_list_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - configure
+    - register
+
+- name: Update runner URL in existing config
+  ansible.builtin.lineinfile:
+    path: "{{ gitlab_runner_config_path }}"
+    regexp: '^\s*url\s*=\s*"'
+    line: '  url = "{{ gitlab_runner_url }}"'
+  when: runner_list_check.stderr is search('Executor')
+  notify: Restart gitlab-runner
+  tags:
+    - configure
+
+- name: Register runner with GitLab
+  ansible.builtin.command:
+    cmd: >-
+      gitlab-runner register
+      --non-interactive
+      --url "{{ gitlab_runner_url }}"
+      --token "{{ gitlab_runner_token }}"
+      --executor "{{ gitlab_runner_executor }}"
+      --docker-image "{{ gitlab_runner_docker_image }}"
+      {% if gitlab_runner_docker_privileged %}--docker-privileged{% endif %}
+      {% for vol in gitlab_runner_docker_volumes %}--docker-volumes "{{ vol }}" {% endfor %}
+  when:
+    - gitlab_runner_token is defined
+    - gitlab_runner_token | length > 0
+    - runner_list_check.stderr is not search('Executor')
+  notify: Restart gitlab-runner
+  tags:
+    - configure
+    - register
+
+# ---------------------------------------------------------------------------
+# Docker Extra Hosts (split-horizon DNS for executor containers)
+# ---------------------------------------------------------------------------
+# Docker containers don't inherit /etc/hosts from the host. Inject the
+# internal DNS entries as extra_hosts so containers can resolve FQDNs
+# like gitlab.home.example-lab.org → Traefik (10.0.10.17).
+# The register command doesn't support --docker-extra-hosts, so we
+# patch config.toml after registration.
+- name: Inject extra_hosts into runner Docker config
+  ansible.builtin.lineinfile:
+    path: "{{ gitlab_runner_config_path }}"
+    regexp: '^\s*extra_hosts\s*='
+    line: '    extra_hosts = {{ gitlab_runner_docker_extra_hosts | to_json }}'
+    insertafter: '^\s*network_mtu\s*='
+  when: gitlab_runner_docker_extra_hosts | default([]) | length > 0
+  notify: Restart gitlab-runner
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Enable and Start Service
+# ---------------------------------------------------------------------------
+- name: Enable and start gitlab-runner service
+  ansible.builtin.systemd:
+    name: gitlab-runner
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
+- name: Verify GitLab Runner service status
+  ansible.builtin.command:
+    cmd: gitlab-runner status
+  register: runner_status
+  changed_when: false
+  tags:
+    - verify
+
+- name: List registered runners
+  ansible.builtin.command:
+    cmd: gitlab-runner list
+  register: runner_list_final
+  changed_when: false
+  tags:
+    - verify
+
+- name: Display runner info
+  ansible.builtin.debug:
+    msg:
+      - "Service: {{ runner_status.stdout | default(runner_status.stderr) }}"
+      - "Runners: {{ runner_list_final.stderr_lines | default([]) }}"
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Remove temporary GPG key file
+  ansible.builtin.file:
+    path: /tmp/gitlab-runner-gpg-key
+    state: absent
+  tags:
+    - install
+    - cleanup

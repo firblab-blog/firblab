@@ -1,0 +1,109 @@
+# =============================================================================
+# Wazuh Manager — StatefulSet (Standalone Mode)
+# =============================================================================
+# Single manager handling agent enrollment (1515), event collection (1514),
+# and REST API (55000). Forwards alerts to wazuh-indexer via Filebeat.
+#
+# Agent enrollment password is mounted from the ESO-managed Secret.
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-manager
+  namespace: wazuh
+  labels:
+    app: wazuh-manager
+spec:
+  replicas: 1
+  serviceName: wazuh-manager
+  selector:
+    matchLabels:
+      app: wazuh-manager
+  template:
+    metadata:
+      labels:
+        app: wazuh-manager
+    spec:
+      # Schedule on agent nodes (server nodes only have 4GB)
+      nodeSelector:
+        node-role.kubernetes.io/agent: "true"
+      initContainers:
+        # Write the agent enrollment password to authd.pass
+        - name: setup-authd-pass
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              cp /config-in/ossec.conf /config-out/ossec.conf
+              cat /secrets/agent_enrollment_password > /config-out/authd.pass
+              chmod 640 /config-out/authd.pass
+          volumeMounts:
+            - name: manager-config
+              mountPath: /config-in
+            - name: manager-config-merged
+              mountPath: /config-out
+            - name: wazuh-credentials
+              mountPath: /secrets
+      containers:
+        - name: wazuh-manager
+          image: wazuh/wazuh-manager:4.14.3
+          ports:
+            - containerPort: 1514
+              name: events
+              protocol: TCP
+            - containerPort: 1515
+              name: enrollment
+              protocol: TCP
+            - containerPort: 55000
+              name: api
+              protocol: TCP
+          env:
+            - name: INDEXER_URL
+              value: "http://wazuh-indexer:9200"
+            - name: FILEBEAT_SSL_VERIFICATION_MODE
+              value: "none"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          volumeMounts:
+            - name: wazuh-manager-data
+              mountPath: /var/ossec/data
+            - name: manager-config-merged
+              mountPath: /var/ossec/etc/ossec.conf
+              subPath: ossec.conf
+            - name: manager-config-merged
+              mountPath: /var/ossec/etc/authd.pass
+              subPath: authd.pass
+          livenessProbe:
+            tcpSocket:
+              port: 1514
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 1514
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: manager-config
+          configMap:
+            name: wazuh-manager-config
+        - name: manager-config-merged
+          emptyDir: {}
+        - name: wazuh-credentials
+          secret:
+            secretName: wazuh-credentials
+  volumeClaimTemplates:
+    - metadata:
+        name: wazuh-manager-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 2Gi

@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Plex Role Handlers
+# =============================================================================
+
+- name: Restart plex
+  ansible.builtin.systemd:
+    name: plexmediaserver
+    state: restarted

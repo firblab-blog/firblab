@@ -1,0 +1,45 @@
+---
+# =============================================================================
+# TrueNAS Role — Main Tasks
+# =============================================================================
+# Orchestrates TrueNAS SCALE configuration via arensb.truenas collection.
+# Each sub-task file is independently taggable for granular runs:
+#   ansible-playbook truenas-deploy.yml --tags services
+#   ansible-playbook truenas-deploy.yml --tags nfs
+#   ansible-playbook truenas-deploy.yml --tags smb
+#   ansible-playbook truenas-deploy.yml --tags snapshots
+#   ansible-playbook truenas-deploy.yml --tags smart
+#   ansible-playbook truenas-deploy.yml --tags scrubs
+# =============================================================================
+
+- name: Configure TrueNAS services
+  ansible.builtin.include_tasks: services.yml
+  tags:
+    - services
+
+- name: Configure NFS shares
+  ansible.builtin.include_tasks: shares-nfs.yml
+  tags:
+    - nfs
+    - shares
+
+- name: Configure SMB shares
+  ansible.builtin.include_tasks: shares-smb.yml
+  tags:
+    - smb
+    - shares
+
+- name: Configure snapshot tasks
+  ansible.builtin.include_tasks: snapshots.yml
+  tags:
+    - snapshots
+
+- name: Configure SMART tests
+  ansible.builtin.include_tasks: smart.yml
+  tags:
+    - smart
+
+- name: Configure scrub tasks
+  ansible.builtin.include_tasks: scrubs.yml
+  tags:
+    - scrubs

@@ -1,0 +1,74 @@
+---
+# =============================================================================
+# Scanopy Role - Default Variables
+# =============================================================================
+# Network topology scanner with distributed daemon architecture.
+# Rust backend, Svelte UI. Server manages data/UI, daemon performs
+# Layer 2/3 scanning (ARP, ICMP, port scanning).
+#
+# Images: ghcr.io/scanopy/scanopy/{server,daemon}
+# Requires: PostgreSQL 17
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Scanopy Application
+# ---------------------------------------------------------------------------
+scanopy_server_image: "ghcr.io/scanopy/scanopy/server:v0.14.5"
+scanopy_daemon_image: "ghcr.io/scanopy/scanopy/daemon:v0.14.5"
+scanopy_server_port: 60072
+scanopy_daemon_port: 60073
+scanopy_base_path: /opt/scanopy
+scanopy_log_level: info
+
+# ---------------------------------------------------------------------------
+# Web UI
+# ---------------------------------------------------------------------------
+# Path to static UI assets inside the container. Set to enable the Web UI.
+# The official Docker image bundles the Svelte UI at /app/static.
+scanopy_web_external_path: "/app/static"
+# Disable open registration after initial admin account is created.
+# Set to false to allow additional users to self-register.
+scanopy_disable_registration: true
+
+# ---------------------------------------------------------------------------
+# PostgreSQL
+# ---------------------------------------------------------------------------
+scanopy_pg_image: "postgres:17-alpine"
+scanopy_db_name: scanopy
+scanopy_db_user: postgres
+
+# ---------------------------------------------------------------------------
+# Daemon Configuration
+# ---------------------------------------------------------------------------
+# Daemon name shown in Scanopy UI (identifies this scanner instance)
+scanopy_daemon_name: "{{ inventory_hostname }}"
+# Heartbeat interval in seconds
+scanopy_heartbeat_interval: 30
+# Daemon polling mode
+scanopy_daemon_mode: daemon_poll
+
+# ---------------------------------------------------------------------------
+# Initial Admin Account (set by deploy playbook via Vault)
+# ---------------------------------------------------------------------------
+# scanopy_admin_email: admin@example-lab.local
+# scanopy_admin_password: <generated and stored in Vault>
+
+# ---------------------------------------------------------------------------
+# Organization / Network (first-run onboarding)
+# ---------------------------------------------------------------------------
+scanopy_org_name: "FirbLab"
+scanopy_network_name: "FirbLab Network"
+
+# ---------------------------------------------------------------------------
+# NetBox Sync (Scanopy → NetBox daily cron)
+# ---------------------------------------------------------------------------
+# Enable/disable automated Scanopy → NetBox sync.
+# Requires scanopy_netbox_sync_url and scanopy_netbox_sync_token to be set
+# (typically from Vault in the deploy playbook pre_tasks).
+scanopy_netbox_sync_enabled: false
+# Schedule (cron)
+scanopy_netbox_sync_cron_hour: "5"
+scanopy_netbox_sync_cron_minute: "0"
+# NetBox connection (set by playbook from Vault)
+# scanopy_netbox_sync_url: http://10.0.20.14:8080
+# scanopy_netbox_sync_token: <from secret/services/netbox api_token>

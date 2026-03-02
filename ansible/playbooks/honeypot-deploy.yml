@@ -1,0 +1,184 @@
+---
+# =============================================================================
+# Honeypot Deployment Playbook
+# =============================================================================
+# Deploys the multi-protocol honeypot deception system on a dedicated Hetzner
+# server (lab-honeypot). Services: OpenCanary, Cowrie, Dionaea, Endlessh,
+# and Grafana Alloy (log shipping to Loki via WireGuard tunnel).
+#
+# Also migrates real SSH to port 2222 (port 22 → Cowrie honeypot).
+#
+# Prerequisites:
+#   - Honeypot server provisioned by Terraform Layer 06
+#   - Terraform Layer 06 applied with honeypot firewall rules:
+#     - Port 2222: WG+Home only (real SSH)
+#     - Ports 21-23, 445, 3306, 3389, 5060, 5900, 6379, 8080, 8443: public
+#   - SSH access already on port 2222 (ansible_port: 2222 in inventory)
+#   - Docker installed (via cloud-init bootstrap)
+#   - WireGuard peer config at /etc/wireguard/wg0.conf (for Alloy → Loki)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/honeypot-deploy.yml
+#
+# Tags:
+#   --tags ssh        — SSH port migration only
+#   --tags wireguard  — WireGuard client setup only
+#   --tags configure  — Config files + docker-compose only
+#   --tags deploy     — Build + pull + start containers
+#   --tags verify     — Health checks only
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Resolve honeypot IP from Vault
+# ---------------------------------------------------------------------------
+# Terraform Layer 06 writes server IPs to secret/infra/hetzner/server_ips.
+# This play reads the live IP so deploys always target the correct server,
+# even if hosts.yml is stale after a server rebuild.
+# Requires: VAULT_ADDR, VAULT_TOKEN, VAULT_CACERT in shell environment.
+- name: Resolve honeypot IP from Vault
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Read honeypot server IP from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner/server_ips
+      register: vault_server_ips
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set honeypot IP fact
+      ansible.builtin.set_fact:
+        honeypot_ip: "{{ (vault_server_ips.stdout | from_json).data.data.honeypot_ip }}"
+      tags: [always]
+
+    - name: Display resolved IP
+      ansible.builtin.debug:
+        msg: "Honeypot IP from Vault: {{ honeypot_ip }}"
+      tags: [always]
+
+# ---------------------------------------------------------------------------
+# Play 2: Deploy honeypot services
+# ---------------------------------------------------------------------------
+- name: Deploy honeypot deception system on dedicated Hetzner server
+  hosts: lab-honeypot
+  become: true
+  gather_facts: true
+  serial: 1
+  vars:
+    # Override ansible_host with the live IP from Vault (Play 1)
+    ansible_host: "{{ hostvars['localhost']['honeypot_ip'] }}"
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags: [always]
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags: [always]
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying honeypot system on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }}, ssh_port={{ ansible_port }})
+      tags: [always]
+
+  roles:
+    - role: honeypot
+      tags: [honeypot]
+
+  post_tasks:
+    - name: Verify Cowrie is accepting SSH connections on port 22
+      ansible.builtin.wait_for:
+        port: 22
+        host: 127.0.0.1
+        timeout: 30
+      tags: [verify]
+
+    - name: Check Cowrie container is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{%raw%}{{.State.Status}}{%endraw%}' cowrie"
+      register: cowrie_status
+      changed_when: false
+      failed_when: "'running' not in cowrie_status.stdout"
+      tags: [verify]
+
+    - name: Check OpenCanary is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{%raw%}{{.State.Status}}{%endraw%}' opencanary"
+      register: opencanary_status
+      changed_when: false
+      failed_when: "'running' not in opencanary_status.stdout"
+      tags: [verify]
+
+    - name: Check Dionaea is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{%raw%}{{.State.Status}}{%endraw%}' dionaea"
+      register: dionaea_status
+      changed_when: false
+      failed_when: "'running' not in dionaea_status.stdout"
+      when: honeypot_dionaea_enabled | default(true)
+      tags: [verify]
+
+    - name: Check Endlessh is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{%raw%}{{.State.Status}}{%endraw%}' endlessh"
+      register: endlessh_status
+      changed_when: false
+      failed_when: "'running' not in endlessh_status.stdout"
+      when: honeypot_endlessh_enabled | default(true)
+      tags: [verify]
+
+    - name: Check Alloy is running
+      ansible.builtin.command:
+        cmd: "docker inspect --format '{%raw%}{{.State.Status}}{%endraw%}' alloy"
+      register: alloy_status
+      changed_when: false
+      failed_when: "'running' not in alloy_status.stdout"
+      tags: [verify]
+
+    - name: Get all container status
+      ansible.builtin.command:
+        cmd: docker ps --format "table {%raw%}{{.Names}}\t{{.Status}}\t{{.Ports}}{%endraw%}"
+      register: all_containers
+      changed_when: false
+      tags: [verify]
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Honeypot Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "SSH: port {{ honeypot_real_ssh_port }} (real) / port 22 (Cowrie honeypot)"
+          - ""
+          - "Services:"
+          - "  OpenCanary: FTP(21) MySQL(3306) RDP(3389) VNC(5900) Redis(6379)"
+          - "  Cowrie:     SSH(22) Telnet(23) — interactive honeypot"
+          - "  Dionaea:    SMB(445) SIP(5060) HTTP(8080) HTTPS(8443) — malware capture"
+          - "  Endlessh:   SSH tarpit({{ honeypot_endlessh_host_port | default(2223) }})"
+          - "  Alloy:      → {{ honeypot_alloy_loki_url }}/loki/api/v1/push"
+          - ""
+          - "Logs:"
+          - "  OpenCanary: /opt/firblab/honeypot/opencanary/logs/opencanary.json"
+          - "  Cowrie:     /opt/firblab/honeypot/cowrie/log/cowrie.json"
+          - "  Dionaea:    /opt/firblab/honeypot/dionaea/log/dionaea.json"
+          - ""
+          - "Malware Capture:"
+          - "  Cowrie DL:      /opt/firblab/honeypot/cowrie/dl/ (7-day cleanup)"
+          - "  Dionaea Bins:   /opt/firblab/honeypot/dionaea/binaries/ (30-day cleanup)"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/firblab/honeypot/docker-compose.yml ps"
+          - "  docker compose -f /opt/firblab/honeypot/docker-compose.yml logs -f"
+          - ""
+          - "Running containers:"
+          - "{{ all_containers.stdout }}"
+          - "=========================================="
+      tags: [verify]

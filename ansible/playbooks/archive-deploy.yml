@@ -1,0 +1,341 @@
+---
+# =============================================================================
+# Archive Appliance Deployment Playbook
+# =============================================================================
+# Deploys the prepper-grade offline knowledge base stack on a dedicated
+# ZimaBlade 7700 bare-metal device. Docker Compose with 8 services:
+# Kiwix Serve, ArchiveBox, BookStack, Stirling PDF, Wallabag, FileBrowser,
+# TileServer GL (offline maps), Calibre-Web (ebook library).
+#
+# Hardware:
+#   ZimaBlade 7700: Intel E3950, 16GB DDR3L, 32GB eMMC
+#   Storage: 2TB USB SSD (/mnt/data) + PS4 HDD (/mnt/cold) + NFS (optional)
+#
+# Prerequisites:
+#   - Ubuntu 24.04 installed on ZimaBlade eMMC
+#   - 2TB USB SSD mounted at /mnt/data, PS4 HDD at /mnt/cold (fstab)
+#   - SSH key generated: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_archive
+#   - Vault secrets seeded by Layer 02 (services/archive)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/archive-deploy.yml
+#
+#   # With NFS enabled:
+#   ansible-playbook ... -e archive_nfs_enabled=true
+#
+# Tags:
+#   ansible-playbook ... --tags common       # Only baseline system config
+#   ansible-playbook ... --tags hardening    # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker       # Only Docker installation
+#   ansible-playbook ... --tags archive      # Only archive services
+#   ansible-playbook ... --tags backup       # Only backup automation
+#   ansible-playbook ... --tags verify       # Only health checks
+# =============================================================================
+
+- name: Deploy archive appliance
+  hosts: archive
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying archive appliance on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Verify storage mounts (USB SSD + SATA HDD)
+    # -----------------------------------------------------------------
+    - name: Check USB SSD mount (/mnt/data)
+      ansible.builtin.stat:
+        path: /mnt/data
+      register: data_mount
+      tags: [archive]
+
+    - name: Verify /mnt/data is a mount point
+      ansible.builtin.command:
+        cmd: mountpoint -q /mnt/data
+      register: data_mountpoint
+      changed_when: false
+      failed_when: false
+      tags: [archive]
+
+    - name: Warn if /mnt/data is not mounted
+      ansible.builtin.debug:
+        msg: "WARNING: /mnt/data is NOT a mount point. USB SSD may not be connected. Docker data-root and all service data will fail."
+      when: data_mountpoint.rc != 0
+      tags: [archive]
+
+    - name: Check SATA HDD mount (/mnt/cold)
+      ansible.builtin.command:
+        cmd: mountpoint -q /mnt/cold
+      register: cold_mountpoint
+      changed_when: false
+      failed_when: false
+      tags: [archive]
+
+    - name: Warn if /mnt/cold is not mounted
+      ansible.builtin.debug:
+        msg: "WARNING: /mnt/cold is NOT a mount point. PS4 HDD may not be connected. Cold storage directories will use local filesystem."
+      when: cold_mountpoint.rc != 0
+      tags: [archive]
+
+    # -----------------------------------------------------------------
+    # Archive secrets from Vault (BookStack + Wallabag DB passwords)
+    # -----------------------------------------------------------------
+    - name: Read archive secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/archive
+      register: vault_archive_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [archive]
+
+    - name: Set archive secrets from Vault
+      ansible.builtin.set_fact:
+        archive_bookstack_app_key: "{{ (vault_archive_read.stdout | from_json).data.data.bookstack_app_key }}"
+        archive_bookstack_db_password: "{{ (vault_archive_read.stdout | from_json).data.data.bookstack_db_password }}"
+        archive_bookstack_db_root_password: "{{ (vault_archive_read.stdout | from_json).data.data.bookstack_db_root_password }}"
+        archive_wallabag_db_password: "{{ (vault_archive_read.stdout | from_json).data.data.wallabag_db_password }}"
+        archive_wallabag_db_root_password: "{{ (vault_archive_read.stdout | from_json).data.data.wallabag_db_root_password }}"
+      when: vault_archive_read.rc is defined and vault_archive_read.rc == 0
+      no_log: true
+      tags: [archive]
+
+    - name: Warn if Vault secrets not available
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Could not read Vault secrets (services/archive).
+          BookStack will fail without APP_KEY and DB passwords. Wallabag needs DB passwords.
+          Run: terraform apply -target=vault_kv_secret_v2.archive in Layer 02
+      when: vault_archive_read.rc is not defined or vault_archive_read.rc != 0
+      tags: [archive]
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (Hetzner S3 + age key)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+  vars:
+    # Backup configuration (daily, age-encrypted to Hetzner S3)
+    backup_enabled: true
+    backup_cron_hour: "3"
+    backup_cron_minute: "30"
+    backup_services:
+      - name: archive
+        compose_path: /opt/archive
+        paths:
+          - /mnt/data/bookstack
+          - /mnt/data/archivebox
+          - /mnt/data/wallabag
+          - /mnt/data/filebrowser
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS Level 1 hardening (AIDE, AppArmor, auditd, kernel params)
+    # Full bare-metal device — not an LXC container, so hardening is applicable
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Archive services (Docker Compose: 8 services + 2 MariaDBs)
+    - role: archive
+      tags:
+        - archive
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+  post_tasks:
+    # -----------------------------------------------------------------
+    # ArchiveBox initialization (required on first run)
+    # -----------------------------------------------------------------
+    - name: Initialize ArchiveBox (first run only)
+      ansible.builtin.command:
+        cmd: docker compose exec --user=archivebox archivebox archivebox init --setup
+        chdir: "{{ archive_install_dir | default('/opt/archive') }}"
+      register: archivebox_init
+      changed_when: "'Initialized' in archivebox_init.stdout"
+      failed_when: false
+      when: archive_archivebox_enabled | default(true) | bool
+      tags:
+        - archive
+
+    # -----------------------------------------------------------------
+    # Wallabag initialization (required on first run)
+    # -----------------------------------------------------------------
+    # Wallabag 2.6.x has a bug where `wallabag:install` fails at Step 3
+    # (admin user creation) due to a removed `display_thumbnails` column
+    # still referenced in fixture data. Workaround:
+    #   1. Run wallabag:install (creates schema, fails on admin user — expected)
+    #   2. Create admin user via fos:user:create (idempotent — duplicate key = already exists)
+    #   3. Ensure admin user has superadmin role
+    - name: Check if Wallabag schema exists
+      ansible.builtin.command:
+        cmd: >
+          docker compose exec -T wallabag
+          /var/www/wallabag/bin/console doctrine:query:sql --env=prod
+          "SELECT COUNT(*) FROM wallabag_user"
+        chdir: "{{ archive_install_dir | default('/opt/archive') }}"
+      register: wallabag_schema_check
+      changed_when: false
+      failed_when: false
+      when: archive_wallabag_enabled | default(true) | bool
+      tags:
+        - archive
+
+    - name: Initialize Wallabag database schema (first run only)
+      ansible.builtin.command:
+        cmd: >
+          docker compose exec -T wallabag
+          /var/www/wallabag/bin/console wallabag:install --env=prod --no-interaction
+        chdir: "{{ archive_install_dir | default('/opt/archive') }}"
+      register: wallabag_install
+      # wallabag:install exits non-zero due to display_thumbnails bug — expected.
+      # Schema creation (Step 2) succeeds before the admin user step (Step 3) fails.
+      failed_when: false
+      changed_when: "'Database successfully setup' in wallabag_install.stdout"
+      when:
+        - archive_wallabag_enabled | default(true) | bool
+        - wallabag_schema_check.rc != 0
+      tags:
+        - archive
+
+    - name: Create Wallabag admin user (idempotent)
+      ansible.builtin.command:
+        cmd: >
+          docker compose exec -T wallabag
+          /var/www/wallabag/bin/console fos:user:create --env=prod
+          --super-admin wallabag wallabag@example-lab.org wallabag
+        chdir: "{{ archive_install_dir | default('/opt/archive') }}"
+      register: wallabag_user_create
+      # Duplicate key = user already exists = success (idempotent)
+      failed_when:
+        - wallabag_user_create.rc != 0
+        - "'Duplicate entry' not in wallabag_user_create.stderr"
+      changed_when: wallabag_user_create.rc == 0
+      when:
+        - archive_wallabag_enabled | default(true) | bool
+        - wallabag_schema_check.rc != 0
+      tags:
+        - archive
+
+    # -----------------------------------------------------------------
+    # Deployment summary
+    # -----------------------------------------------------------------
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Archive Appliance Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Hardware: ZimaBlade 7700 (bare-metal)"
+          - ""
+          - "Services:"
+          - "  FileBrowser:   http://{{ ansible_host }}:{{ archive_filebrowser_port | default(8080) }}  →  https://archive.home.example-lab.org"
+          - "  Kiwix Serve:   http://{{ ansible_host }}:{{ archive_kiwix_port | default(8081) }}  →  https://kiwix.home.example-lab.org"
+          - "  ArchiveBox:    http://{{ ansible_host }}:{{ archive_archivebox_port | default(8082) }}  →  https://archivebox.home.example-lab.org"
+          - "  BookStack:     http://{{ ansible_host }}:{{ archive_bookstack_port | default(8083) }}  →  https://bookstack.home.example-lab.org"
+          - "  Stirling PDF:  http://{{ ansible_host }}:{{ archive_stirlingpdf_port | default(8084) }}  →  https://stirlingpdf.home.example-lab.org"
+          - "  Wallabag:      http://{{ ansible_host }}:{{ archive_wallabag_port | default(8085) }}  →  https://wallabag.home.example-lab.org"
+          - "  TileServer GL: http://{{ ansible_host }}:{{ archive_tileservergl_port | default(8086) }}  →  https://maps.home.example-lab.org"
+          - "  Calibre-Web:   http://{{ ansible_host }}:{{ archive_calibreweb_port | default(8087) }}  →  https://calibreweb.home.example-lab.org"
+          - ""
+          - "Storage:"
+          - "  USB SSD:  /mnt/data (2TB — hot storage)"
+          - "  SATA HDD: /mnt/cold (PS4 HDD — cold storage)"
+          - "  NFS:      {{ 'ENABLED — ' + archive_mount_point | default('/mnt/archive') if archive_nfs_enabled | default(false) | bool else 'DISABLED (pass -e archive_nfs_enabled=true)' }}"
+          - ""
+          - "ZIM Content:"
+          - "  Sync:     sudo /opt/archive/scripts/zim-sync.sh"
+          - "  Dry-run:  sudo /opt/archive/scripts/zim-sync.sh --check"
+          - "  Status:   sudo /opt/archive/scripts/zim-sync.sh --status"
+          - "  Cron:     Monthly (1st at 2 AM) — auto-discovers + downloads latest versions"
+          - ""
+          - "Map Tiles (OpenFreeMap planet, ~90 GB):"
+          - "  Download: sudo /opt/archive/scripts/map-download.sh"
+          - "  Check:    sudo /opt/archive/scripts/map-download.sh --check"
+          - "  Status:   sudo /opt/archive/scripts/map-download.sh --status"
+          - "  After download: add to archive_tileservergl_datasets + re-run --tags archive"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/archive/docker-compose.yml ps"
+          - "  docker compose -f /opt/archive/docker-compose.yml logs -f"
+          - ""
+          - "Default logins (change immediately!):"
+          - "  BookStack:  admin@admin.com / password"
+          - "  Wallabag:   wallabag / wallabag"
+          - "=========================================="
+      tags:
+        - verify

@@ -1,0 +1,46 @@
+---
+# =============================================================================
+# Automatic Security Updates — Debian/Ubuntu
+# =============================================================================
+# Ensures all Debian/Ubuntu hosts get daily security patches.
+
+- name: Install unattended-upgrades
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+  tags:
+    - packages
+    - updates
+
+- name: Enable automatic security updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - updates
+
+- name: Configure unattended-upgrades for security-only
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+          "${distro_id}:${distro_codename}-security";
+      };
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Mail "root";
+      Unattended-Upgrade::MailReport "on-change";
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - updates

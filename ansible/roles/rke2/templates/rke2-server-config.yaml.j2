@@ -1,0 +1,59 @@
+# RKE2 Server Configuration — STIG/CIS Hardened
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# DISA STIG: https://ncp.nist.gov/checklist/1040
+
+# CIS Hardening Profile — auto-applies CIS Kubernetes Benchmark controls
+profile: "{{ rke2_profile }}"
+
+{% if inventory_hostname == rke2_init_node %}
+# First server: initialize new cluster
+cluster-init: true
+{% else %}
+# Additional server: join existing cluster
+server: {{ rke2_server_url }}
+{% endif %}
+
+token-file: {{ rke2_config_dir }}/cluster-token
+write-kubeconfig-mode: "0600"
+
+# TLS SANs for API server certificate
+tls-san:
+{% for san in rke2_tls_san %}
+  - "{{ san }}"
+{% endfor %}
+
+# Networking
+cni: {{ rke2_cni }}
+cluster-cidr: "{{ rke2_cluster_cidr }}"
+service-cidr: "{{ rke2_service_cidr }}"
+cluster-dns: "{{ rke2_cluster_dns }}"
+
+# Disable built-in components we replace with custom installs
+{% if rke2_disable %}
+disable:
+{% for component in rke2_disable %}
+  - {{ component }}
+{% endfor %}
+{% endif %}
+
+# STIG: API server hardening (additive to profile: cis)
+{% if rke2_kube_apiserver_args %}
+kube-apiserver-arg:
+{% for arg in rke2_kube_apiserver_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}
+
+{% if rke2_kube_controller_manager_args %}
+kube-controller-manager-arg:
+{% for arg in rke2_kube_controller_manager_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}
+
+{% if rke2_kubelet_args %}
+kubelet-arg:
+{% for arg in rke2_kubelet_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}

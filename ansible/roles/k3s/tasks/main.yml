@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# K3s Role - Main Entry Point
+# =============================================================================
+# Orchestrates K3s installation in stages:
+#   1. Prerequisites (all nodes)    — sysctl, kernel modules, packages, users
+#   2. Hardening configs (all)      — audit policy, encryption config, CIS sysctl
+#   3. Install server (servers)     — K3s server binary + config + start
+#   4. Install agent (agents)       — K3s agent binary + config + start
+#   5. Verify (all)                 — Health checks
+#
+# The deploy playbook controls execution order (serial plays).
+# This role is invoked with tags to run the appropriate stage.
+# =============================================================================
+
+- name: Run prerequisites
+  ansible.builtin.include_tasks: prerequisites.yml
+  tags:
+    - prerequisites
+    - k3s
+
+- name: Run CIS hardening configuration
+  ansible.builtin.include_tasks: hardening.yml
+  tags:
+    - hardening
+    - k3s
+
+- name: Install K3s server
+  ansible.builtin.include_tasks: install-server.yml
+  when: k3s_role == "server"
+  tags:
+    - install
+    - configure
+    - coredns
+    - k3s
+
+- name: Install K3s agent
+  ansible.builtin.include_tasks: install-agent.yml
+  when: k3s_role == "agent"
+  tags:
+    - install
+    - k3s
+
+- name: Run verification checks
+  ansible.builtin.include_tasks: verify.yml
+  tags:
+    - verify
+    - coredns
+    - k3s

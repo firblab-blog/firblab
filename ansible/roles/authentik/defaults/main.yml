@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# Authentik Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Authentik application — image:tag format for Renovate Pattern A auto-detection
+authentik_image: "ghcr.io/goauthentik/server:2025.12.4"
+authentik_port: 9000
+authentik_install_dir: /opt/authentik
+
+# PostgreSQL
+authentik_pg_image: "postgres:16-alpine"
+
+# Logging
+authentik_log_level: info

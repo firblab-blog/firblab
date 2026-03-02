@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# Common Role Handlers
+# =============================================================================
+
+- name: Restart sshd
+  ansible.builtin.systemd:
+    name: "{{ ssh_service_name }}"
+    state: restarted
+
+- name: Restart chrony
+  ansible.builtin.systemd:
+    name: "{{ chrony_service_name }}"
+    state: restarted
+
+- name: Restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted
+
+- name: Reload ufw
+  community.general.ufw:
+    state: reloaded
+
+- name: Reload firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    state: reloaded
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart node_exporter
+  ansible.builtin.systemd:
+    name: node_exporter
+    state: restarted
+    daemon_reload: true
+
+- name: Restart promtail
+  ansible.builtin.systemd:
+    name: promtail
+    state: restarted
+    daemon_reload: true

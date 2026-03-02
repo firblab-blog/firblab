@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# Vault Unseal — Linux Service (systemd)
+# =============================================================================
+# Sets up the unseal vault as a systemd service.
+# Extracted from the original vault-unseal/tasks/main.yml.
+# =============================================================================
+
+- name: Template vault-unseal systemd service
+  ansible.builtin.template:
+    src: vault-unseal.service.j2
+    dest: /etc/systemd/system/vault-unseal.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart vault-unseal
+  tags:
+    - service
+
+- name: Enable vault-unseal service
+  ansible.builtin.systemd:
+    name: vault-unseal
+    enabled: true
+    daemon_reload: true
+  tags:
+    - service
+
+- name: Start vault-unseal service
+  ansible.builtin.systemd:
+    name: vault-unseal
+    state: started
+  tags:
+    - service

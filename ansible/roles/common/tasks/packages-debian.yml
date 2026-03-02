@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# Package Management — Debian/Ubuntu
+# =============================================================================
+
+# Guard: wait for any running apt/dpkg process (cloud-init, unattended-upgrades)
+# to release the lock before we start installing packages. Polls every 5s,
+# times out after 5 minutes.
+- name: Wait for apt/dpkg lock to be released
+  ansible.builtin.shell: |
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+      echo "Waiting for apt/dpkg lock... ($(date +%T))"
+      sleep 5
+    done
+  register: _apt_lock_wait
+  changed_when: false
+  timeout: 300
+  tags:
+    - packages
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - packages
+
+- name: Install base packages (Debian)
+  ansible.builtin.apt:
+    name: "{{ common_packages_shared + common_packages_debian }}"
+    state: present
+  tags:
+    - packages
+
+- name: Remove unnecessary packages (Debian)
+  ansible.builtin.apt:
+    name:
+      - telnet
+      - rsh-client
+    state: absent
+    purge: true
+  tags:
+    - packages
+    - hardening

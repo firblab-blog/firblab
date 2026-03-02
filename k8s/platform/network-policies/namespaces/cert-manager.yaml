@@ -1,0 +1,153 @@
+# =============================================================================
+# NetworkPolicies — cert-manager namespace
+# =============================================================================
+# cert-manager needs:
+#   Ingress: Prometheus (metrics port 9402)
+#   Egress: DNS, K8s API (for Certificate CRDs), Vault (PKI issuer, 8200),
+#           internet (ACME/Let's Encrypt + Cloudflare DNS-01 challenge)
+# =============================================================================
+
+# --- Default deny -----------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+# --- Ingress: K8s API server webhook calls (ValidatingWebhookConfiguration) -
+# cert-manager deploys ValidatingWebhookConfiguration + MutatingWebhookConfiguration
+# for Certificate, CertificateRequest, Issuer, and ClusterIssuer resources.
+# kube-proxy MASQUERADE rewrites the source to the sending node's flannel.1 IP
+# (10.42.x.0) — same mechanism confirmed via tcpdump on the Loki NodePort.
+# Without this rule, admission webhook calls are dropped by default-deny-ingress.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-ingress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.42.0.0/16   # Flannel pod CIDR: kube-proxy MASQUERADE source
+
+# --- Ingress from Prometheus ------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-ingress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9402
+
+# --- Egress: DNS ------------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+# --- Egress: K8s API --------------------------------------------------------
+# Canal DNAT: kube-proxy rewrites ClusterIP (10.43.0.1:443) to node IP:6443
+# before Calico filter rules fire. Target the node CIDR + real port.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.0/24   # RKE2 node CIDR (post-DNAT destination)
+      ports:
+        - port: 6443                  # kube-apiserver port (post-DNAT)
+
+# --- Egress: Vault (PKI issuer) ---------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-vault-egress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.10/32
+      ports:
+        - port: 8200
+
+# --- Egress: Internet (ACME + Cloudflare DNS-01) ----------------------------
+# Let's Encrypt (acme-v02.api.letsencrypt.org) + Cloudflare API (api.cloudflare.com)
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internet-egress
+  namespace: cert-manager
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 192.168.0.0/16
+              - 172.16.0.0/12
+      ports:
+        - port: 443

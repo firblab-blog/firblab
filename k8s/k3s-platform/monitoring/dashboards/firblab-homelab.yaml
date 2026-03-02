@@ -1,0 +1,941 @@
+---
+# Firblab Homelab Overview Dashboard
+# Loaded automatically by the Grafana sidecar (grafana_dashboard: "1").
+# Queries all node_exporter targets configured in the prometheus additionalScrapeConfigs
+# and the kube-prometheus-stack built-in DaemonSet for RKE2 nodes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: firblab-homelab-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    grafana_folder: "Infrastructure"
+data:
+  firblab-homelab.json: |
+    {
+      "title": "Firblab Homelab",
+      "uid": "firblab-homelab",
+      "description": "Live inventory — bare metal, VMs, LXCs, and services with CPU / RAM / Disk / Uptime at a glance",
+      "tags": ["firblab", "homelab", "infrastructure"],
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "graphTooltip": 1,
+      "editable": true,
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "links": [],
+      "annotations": { "list": [] },
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "label": "Prometheus",
+            "query": "prometheus",
+            "refresh": 1,
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "current": {}
+          }
+        ]
+      },
+      "panels": [
+
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Hosts Online",
+          "description": "node_exporter targets currently reachable",
+          "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 1 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "count(up{job=~\"node-exporter.*\"} == 1)",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Hosts Off / Unreachable",
+          "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "noValue": "0",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 2 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "count(up{job=~\"node-exporter.*\"} == 0) or vector(0)",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Avg CPU",
+          "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 60 },
+                { "color": "red", "value": 85 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "100 - avg(rate(node_cpu_seconds_total{mode=\"idle\",job=~\"node-exporter.*\"}[5m])) * 100",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Avg RAM",
+          "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "area",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 75 },
+                { "color": "red", "value": 90 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "avg((1 - node_memory_MemAvailable_bytes{job=~\"node-exporter.*\"} / node_memory_MemTotal_bytes{job=~\"node-exporter.*\"}) * 100)",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "High CPU Hosts",
+          "description": "Hosts with CPU > 80%",
+          "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "0",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 3 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "count(100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=~\"node-exporter.*\"}[5m]))*100 > 80) or vector(0)",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "High RAM Hosts",
+          "description": "Hosts with RAM > 90%",
+          "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "textMode": "auto"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "0",
+              "color": { "mode": "thresholds" },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 3 }
+              ]}
+            },
+            "overrides": []
+          },
+          "targets": [{
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "expr": "count((1 - node_memory_MemAvailable_bytes{job=~\"node-exporter.*\"}/node_memory_MemTotal_bytes{job=~\"node-exporter.*\"})*100 > 90) or vector(0)",
+            "instant": true,
+            "refId": "A"
+          }]
+        },
+
+        {
+          "id": 10,
+          "type": "row",
+          "title": "Proxmox Hypervisors",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 4, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 11,
+          "type": "table",
+          "title": "Proxmox Hypervisors — lab-01..04",
+          "description": "Management VLAN 10 · Proxmox VE · node_exporter-proxmox",
+          "gridPos": { "x": 0, "y": 5, "w": 24, "h": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Host", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "CPU %" },
+                "properties": [
+                  { "id": "unit", "value": "percent" },
+                  { "id": "min", "value": 0 },
+                  { "id": "max", "value": 100 },
+                  { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                  ]}}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "RAM %" },
+                "properties": [
+                  { "id": "unit", "value": "percent" },
+                  { "id": "min", "value": 0 },
+                  { "id": "max", "value": 100 },
+                  { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                  ]}}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "RAM Used" },
+                "properties": [{ "id": "unit", "value": "bytes" }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "RAM Total" },
+                "properties": [{ "id": "unit", "value": "bytes" }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "Disk %" },
+                "properties": [
+                  { "id": "unit", "value": "percent" },
+                  { "id": "min", "value": 0 },
+                  { "id": "max", "value": 100 },
+                  { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                  ]}}
+                ]
+              },
+              {
+                "matcher": { "id": "byName", "options": "Uptime" },
+                "properties": [{ "id": "unit", "value": "s" }]
+              }
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true, "vlan": true, "group": true },
+                "renameByName": {
+                  "instance": "Host", "role": "Role",
+                  "Value #A": "Status", "Value #B": "CPU %",
+                  "Value #C": "RAM %", "Value #D": "RAM Total",
+                  "Value #E": "RAM Used", "Value #F": "Disk %",
+                  "Value #G": "Uptime"
+                },
+                "indexByName": {
+                  "instance": 0, "role": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8
+                }
+              }
+            }
+          ],
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "up{job=\"node-exporter-proxmox\"}",
+              "format": "table", "instant": true, "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node-exporter-proxmox\"}[5m]))*100",
+              "format": "table", "instant": true, "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{job=\"node-exporter-proxmox\"} / node_memory_MemTotal_bytes{job=\"node-exporter-proxmox\"}) * 100)",
+              "format": "table", "instant": true, "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-proxmox\"})",
+              "format": "table", "instant": true, "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-proxmox\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-proxmox\"})",
+              "format": "table", "instant": true, "refId": "E"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)((1 - node_filesystem_avail_bytes{job=\"node-exporter-proxmox\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"} / node_filesystem_size_bytes{job=\"node-exporter-proxmox\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}) * 100)",
+              "format": "table", "instant": true, "refId": "F"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(time() - node_boot_time_seconds{job=\"node-exporter-proxmox\"})",
+              "format": "table", "instant": true, "refId": "G"
+            }
+          ]
+        },
+
+        {
+          "id": 20,
+          "type": "row",
+          "title": "Vault Cluster",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 21,
+          "type": "table",
+          "title": "Vault Cluster — vault-2 (Security VLAN 50) · vault-3 (RPi5, Mgmt VLAN 10)",
+          "description": "vault-1 (Mac Mini M4, macOS) excluded — no node_exporter on Darwin. Vault HA status: vault-1 is leader.",
+          "gridPos": { "x": 0, "y": 15, "w": 24, "h": 7 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Host", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              { "matcher": { "id": "byName", "options": "CPU %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM Used" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "RAM Total" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "Disk %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }] }
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true, "vlan": true, "group": true },
+                "renameByName": {
+                  "instance": "Host", "role": "Role",
+                  "Value #A": "Status", "Value #B": "CPU %",
+                  "Value #C": "RAM %", "Value #D": "RAM Total",
+                  "Value #E": "RAM Used", "Value #F": "Disk %",
+                  "Value #G": "Uptime"
+                },
+                "indexByName": {
+                  "instance": 0, "role": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8
+                }
+              }
+            }
+          ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "up{job=\"node-exporter-vault\"}", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node-exporter-vault\"}[5m]))*100", "format": "table", "instant": true, "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{job=\"node-exporter-vault\"}/node_memory_MemTotal_bytes{job=\"node-exporter-vault\"})*100)", "format": "table", "instant": true, "refId": "C" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-vault\"})", "format": "table", "instant": true, "refId": "D" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-vault\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-vault\"})", "format": "table", "instant": true, "refId": "E" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_filesystem_avail_bytes{job=\"node-exporter-vault\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}/node_filesystem_size_bytes{job=\"node-exporter-vault\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"})*100)", "format": "table", "instant": true, "refId": "F" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(time() - node_boot_time_seconds{job=\"node-exporter-vault\"})", "format": "table", "instant": true, "refId": "G" }
+          ]
+        },
+
+        {
+          "id": 30,
+          "type": "row",
+          "title": "Core Infrastructure",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 22, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 31,
+          "type": "table",
+          "title": "Core Infrastructure — GitLab · GitLab Runner · Authentik · PBS · Traefik",
+          "description": "Management VLAN 10 · VMs and LXCs on lab-02/04",
+          "gridPos": { "x": 0, "y": 23, "w": 24, "h": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Host", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              { "matcher": { "id": "byName", "options": "CPU %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM Used" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "RAM Total" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "Disk %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }] }
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true, "vlan": true, "group": true },
+                "renameByName": {
+                  "instance": "Host", "role": "Role",
+                  "Value #A": "Status", "Value #B": "CPU %",
+                  "Value #C": "RAM %", "Value #D": "RAM Total",
+                  "Value #E": "RAM Used", "Value #F": "Disk %",
+                  "Value #G": "Uptime"
+                },
+                "indexByName": {
+                  "instance": 0, "role": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8
+                }
+              }
+            }
+          ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "up{job=\"node-exporter-core-infra\"}", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node-exporter-core-infra\"}[5m]))*100", "format": "table", "instant": true, "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{job=\"node-exporter-core-infra\"}/node_memory_MemTotal_bytes{job=\"node-exporter-core-infra\"})*100)", "format": "table", "instant": true, "refId": "C" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-core-infra\"})", "format": "table", "instant": true, "refId": "D" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-core-infra\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-core-infra\"})", "format": "table", "instant": true, "refId": "E" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_filesystem_avail_bytes{job=\"node-exporter-core-infra\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}/node_filesystem_size_bytes{job=\"node-exporter-core-infra\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"})*100)", "format": "table", "instant": true, "refId": "F" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(time() - node_boot_time_seconds{job=\"node-exporter-core-infra\"})", "format": "table", "instant": true, "refId": "G" }
+          ]
+        },
+
+        {
+          "id": 40,
+          "type": "row",
+          "title": "Standalone Services",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 41,
+          "type": "table",
+          "title": "Standalone Services — Ghost · Roundcube · FoundryVTT · Mealie · NetBox · PatchMon · ActualBudget · AI GPU · Vaultwarden · Archive",
+          "description": "Services VLAN 20 · VMs and LXCs on lab-03/04",
+          "gridPos": { "x": 0, "y": 33, "w": 24, "h": 12 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Host", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              { "matcher": { "id": "byName", "options": "CPU %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM Used" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "RAM Total" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "Disk %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }] }
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true, "vlan": true, "group": true },
+                "renameByName": {
+                  "instance": "Host", "role": "Role",
+                  "Value #A": "Status", "Value #B": "CPU %",
+                  "Value #C": "RAM %", "Value #D": "RAM Total",
+                  "Value #E": "RAM Used", "Value #F": "Disk %",
+                  "Value #G": "Uptime"
+                },
+                "indexByName": {
+                  "instance": 0, "role": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8
+                }
+              }
+            }
+          ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "up{job=\"node-exporter-services\"}", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node-exporter-services\"}[5m]))*100", "format": "table", "instant": true, "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{job=\"node-exporter-services\"}/node_memory_MemTotal_bytes{job=\"node-exporter-services\"})*100)", "format": "table", "instant": true, "refId": "C" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-services\"})", "format": "table", "instant": true, "refId": "D" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-services\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-services\"})", "format": "table", "instant": true, "refId": "E" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_filesystem_avail_bytes{job=\"node-exporter-services\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}/node_filesystem_size_bytes{job=\"node-exporter-services\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"})*100)", "format": "table", "instant": true, "refId": "F" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(time() - node_boot_time_seconds{job=\"node-exporter-services\"})", "format": "table", "instant": true, "refId": "G" }
+          ]
+        },
+
+        {
+          "id": 50,
+          "type": "row",
+          "title": "RKE2 Cluster",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 45, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 51,
+          "type": "table",
+          "title": "RKE2 Cluster — 3 servers · 3 agents (Services VLAN 20, lab-01)",
+          "description": "Metrics from kube-prometheus-stack node_exporter DaemonSet. Instances are node IPs:9100.",
+          "gridPos": { "x": 0, "y": 46, "w": 24, "h": 9 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Node IP", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              { "matcher": { "id": "byName", "options": "CPU %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM Used" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "RAM Total" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "Disk %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }] },
+              { "matcher": { "id": "byName", "options": "Pods" }, "properties": [
+                { "id": "custom.cellOptions", "value": { "type": "auto" } }
+              ]}
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true },
+                "renameByName": {
+                  "instance": "Node IP",
+                  "node": "Node Name",
+                  "Value #A": "Status",
+                  "Value #B": "CPU %",
+                  "Value #C": "RAM %",
+                  "Value #D": "RAM Total",
+                  "Value #E": "RAM Used",
+                  "Value #F": "Disk %",
+                  "Value #G": "Uptime",
+                  "Value #H": "Pods"
+                },
+                "indexByName": {
+                  "instance": 0, "node": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8, "Value #H": 9
+                }
+              }
+            }
+          ],
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "up{job=~\".*node-exporter.*\",instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"}",
+              "format": "table", "instant": true, "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"}[5m]))*100",
+              "format": "table", "instant": true, "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"}/node_memory_MemTotal_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"})*100)",
+              "format": "table", "instant": true, "refId": "C"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(node_memory_MemTotal_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"})",
+              "format": "table", "instant": true, "refId": "D"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(node_memory_MemTotal_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"} - node_memory_MemAvailable_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"})",
+              "format": "table", "instant": true, "refId": "E"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)((1 - node_filesystem_avail_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}/node_filesystem_size_bytes{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"})*100)",
+              "format": "table", "instant": true, "refId": "F"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "max by(instance)(time() - node_boot_time_seconds{instance=~\"192\\.168\\.20\\.(4[0-2]|5[0-2]):9100\"})",
+              "format": "table", "instant": true, "refId": "G"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "count by(node) (kube_pod_info{node=~\"rke2.*\"})",
+              "format": "table", "instant": true, "refId": "H"
+            }
+          ]
+        },
+
+        {
+          "id": 60,
+          "type": "row",
+          "title": "Bare Metal",
+          "collapsed": false,
+          "gridPos": { "x": 0, "y": 55, "w": 24, "h": 1 },
+          "panels": []
+        },
+
+        {
+          "id": 61,
+          "type": "table",
+          "title": "Bare Metal — lab-08 (Default LAN · RPi4 · NUT UPS master)",
+          "description": "Raspberry Pi 4, Default LAN (10.0.4.20) · NUT UPS master for closet rack",
+          "gridPos": { "x": 0, "y": 56, "w": 24, "h": 6 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "options": {
+            "sortBy": [{ "displayName": "Host", "desc": false }],
+            "footer": { "show": false },
+            "showHeader": true,
+            "cellHeight": "sm"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "custom": { "align": "left", "cellOptions": { "type": "auto" }, "inspect": false }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "Status" },
+                "properties": [
+                  { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+                  { "id": "custom.width", "value": 90 },
+                  { "id": "mappings", "value": [
+                    { "type": "value", "options": { "1": { "text": "Online", "color": "green", "index": 0 } } },
+                    { "type": "value", "options": { "0": { "text": "Offline", "color": "red", "index": 1 } } }
+                  ]},
+                  { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                    { "color": "red", "value": null }, { "color": "green", "value": 1 }
+                  ]}}
+                ]
+              },
+              { "matcher": { "id": "byName", "options": "CPU %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "RAM Used" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "RAM Total" }, "properties": [{ "id": "unit", "value": "bytes" }] },
+              { "matcher": { "id": "byName", "options": "Disk %" }, "properties": [
+                { "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 },
+                { "id": "custom.cellOptions", "value": { "type": "gradient-gauge", "mode": "gradient" } },
+                { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                  { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 }
+                ]}}
+              ]},
+              { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }] }
+            ]
+          },
+          "transformations": [
+            { "id": "merge", "options": {} },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": { "Time": true, "__name__": true, "job": true, "vlan": true, "group": true },
+                "renameByName": {
+                  "instance": "Host", "role": "Role",
+                  "Value #A": "Status", "Value #B": "CPU %",
+                  "Value #C": "RAM %", "Value #D": "RAM Total",
+                  "Value #E": "RAM Used", "Value #F": "Disk %",
+                  "Value #G": "Uptime"
+                },
+                "indexByName": {
+                  "instance": 0, "role": 1, "Value #A": 2, "Value #B": 3,
+                  "Value #C": 4, "Value #E": 5, "Value #D": 6, "Value #F": 7, "Value #G": 8
+                }
+              }
+            }
+          ],
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "up{job=\"node-exporter-bare-metal\"}", "format": "table", "instant": true, "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node-exporter-bare-metal\"}[5m]))*100", "format": "table", "instant": true, "refId": "B" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_memory_MemAvailable_bytes{job=\"node-exporter-bare-metal\"}/node_memory_MemTotal_bytes{job=\"node-exporter-bare-metal\"})*100)", "format": "table", "instant": true, "refId": "C" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-bare-metal\"})", "format": "table", "instant": true, "refId": "D" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(node_memory_MemTotal_bytes{job=\"node-exporter-bare-metal\"} - node_memory_MemAvailable_bytes{job=\"node-exporter-bare-metal\"})", "format": "table", "instant": true, "refId": "E" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)((1 - node_filesystem_avail_bytes{job=\"node-exporter-bare-metal\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"}/node_filesystem_size_bytes{job=\"node-exporter-bare-metal\",mountpoint=\"/\",fstype!~\"tmpfs|ramfs|overlay\"})*100)", "format": "table", "instant": true, "refId": "F" },
+            { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "max by(instance)(time() - node_boot_time_seconds{job=\"node-exporter-bare-metal\"})", "format": "table", "instant": true, "refId": "G" }
+          ]
+        }
+
+      ]
+    }

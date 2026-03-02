@@ -1,0 +1,25 @@
+# =============================================================================
+# Traefik Default Security Headers Middleware
+# =============================================================================
+# Applied to all HTTPS traffic. Implements OWASP security headers.
+# =============================================================================
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: default-headers
+  namespace: traefik
+spec:
+  headers:
+    browserXssFilter: true
+    contentTypeNosniff: true
+    frameDeny: false
+    stsIncludeSubdomains: true
+    stsPreload: true
+    stsSeconds: 31536000
+    customFrameOptionsValue: "SAMEORIGIN"
+    customResponseHeaders:
+      X-Robots-Tag: "noindex,nofollow,nosnippet"
+      server: ""  # Hide server header
+      # Cache-Control intentionally NOT overridden — backends set their own
+      # caching policy. Grafana uses content-hashed filenames for cache busting;
+      # forcing no-cache breaks asset loading on resource-constrained nodes.

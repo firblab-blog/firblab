@@ -1,0 +1,137 @@
+---
+# =============================================================================
+# Ghost Role - Blog Platform via Docker Compose
+# =============================================================================
+# Deploys Ghost CMS with MySQL backend using Docker Compose in an LXC
+# container. Expects the docker role to be applied first.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Ghost directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: /opt/ghost
+    - path: /opt/ghost/data
+    - path: /opt/ghost/config
+    - path: /opt/ghost/mysql
+      mode: "0750"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Environment File
+# ---------------------------------------------------------------------------
+- name: Template Ghost environment file
+  ansible.builtin.template:
+    src: ghost-env.j2
+    dest: /opt/ghost/config/ghost.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart ghost
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Ghost Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/ghost/docker-compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart ghost
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER Ghost
+# containers are running, killing them. The Ghost restart handler then runs
+# "docker compose restart" on nothing.
+- name: Flush handlers before starting Ghost containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Ghost container images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: /opt/ghost
+  register: ghost_pull_result
+  changed_when: "'Pull complete' in ghost_pull_result.stdout or 'Downloaded' in ghost_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Ghost containers
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: /opt/ghost
+  register: ghost_up_result
+  changed_when: "'Started' in ghost_up_result.stderr or 'Creating' in ghost_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Ghost to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ghost_port | default('2368') }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: ghost_health
+  retries: 15
+  delay: 10
+  until: ghost_health.status is defined and ghost_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Ghost never became accessible
+  ansible.builtin.fail:
+    msg: "Ghost failed to respond after 150 seconds. Last status: {{ ghost_health.status | default('connection refused') }}"
+  when: ghost_health.status is not defined or ghost_health.status not in [200, 301, 302]
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Recovery Content Restore (optional)
+# ---------------------------------------------------------------------------
+# Syncs images from the ghost-recovery directory into Ghost's content
+# directory. Set ghost_recovery_path on the Ansible controller to enable.
+# After sync, import the JSON export via Ghost Admin → Settings → Labs.
+- name: Sync recovery images to Ghost content directory
+  ansible.posix.synchronize:
+    src: "{{ ghost_recovery_path }}/images/"
+    dest: /opt/ghost/data/images/
+    archive: true
+    recursive: true
+  when: ghost_recovery_path is defined and ghost_recovery_path | length > 0
+  tags:
+    - recovery
+    - deploy
+
+- name: Copy Ghost JSON export for import
+  ansible.builtin.copy:
+    src: "{{ ghost_recovery_json }}"
+    dest: /opt/ghost/data/ghost-import.json
+    owner: root
+    group: root
+    mode: "0644"
+  when: ghost_recovery_json is defined and ghost_recovery_json | length > 0
+  tags:
+    - recovery
+    - deploy

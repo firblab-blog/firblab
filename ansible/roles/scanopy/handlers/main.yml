@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Scanopy Handlers
+# =============================================================================
+
+- name: Restart scanopy
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ scanopy_base_path }}"

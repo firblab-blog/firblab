@@ -1,0 +1,18 @@
+# Wazuh Dashboard — ClusterIP Service
+# Traefik routes external traffic here via Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+  labels:
+    app: wazuh-dashboard
+spec:
+  type: ClusterIP
+  selector:
+    app: wazuh-dashboard
+  ports:
+    - name: http
+      port: 5601
+      targetPort: 5601
+      protocol: TCP

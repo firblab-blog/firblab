@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# Uptime Kuma Role — Handlers
+# =============================================================================
+
+- name: Restart uptime-kuma
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ uptime_kuma_install_dir }}"
+  changed_when: true

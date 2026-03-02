@@ -1,0 +1,30 @@
+# =============================================================================
+# Traefik Standalone Reverse Proxy — Docker Compose
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# =============================================================================
+
+services:
+  traefik:
+    image: {{ traefik_image }}
+    container_name: traefik
+    restart: unless-stopped
+    # Host networking — ports bind directly to the LXC network stack.
+    # Avoids the UFW + Docker iptables FORWARD chain conflict (Docker
+    # bridge NAT uses FORWARD, but UFW's DEFAULT_FORWARD_POLICY=DROP
+    # blocks it). With host mode, traffic hits the INPUT chain where
+    # UFW rules work correctly.
+    network_mode: host
+    environment:
+      CF_DNS_API_TOKEN: "{{ traefik_cloudflare_api_token }}"
+    volumes:
+      - {{ traefik_install_dir }}/config/traefik.yml:/etc/traefik/traefik.yml:ro
+      - {{ traefik_install_dir }}/config/dynamic:/etc/traefik/dynamic:ro
+      - {{ traefik_install_dir }}/config/acme:/etc/traefik/acme
+      - {{ traefik_install_dir }}/logs:/var/log/traefik
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

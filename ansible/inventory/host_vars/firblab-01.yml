@@ -1,0 +1,47 @@
+---
+# =============================================================================
+# lab-01 Host Variables
+# =============================================================================
+# Host-specific overrides for the main compute node (i9-12900K, 64GB RAM).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ZFS Mirror Storage Registration
+# ---------------------------------------------------------------------------
+# hdd-mirror-0 is used for cold storage only (Restic backups, ISOs,
+# templates). HDDs are too slow for VM boot disks.
+#
+# Proxmox 'zfspool' type only supports images/rootdir (block storage).
+# We don't want VM images on slow HDDs, so skip zfspool registration
+# entirely and register the ZFS mount point as directory storage instead.
+# This gives us file-based content types (backup, iso, vztmpl, snippets)
+# with ZFS checksumming and compression underneath.
+
+# Skip zfspool registration (no VM images on slow HDDs)
+proxmox_zfs_mirror_content: ""
+
+# Register ZFS mount point as dir storage for file-based content
+proxmox_zfs_mirror_dir_content: "backup,iso,vztmpl,snippets"
+
+# ---------------------------------------------------------------------------
+# Network Interface Override — Mellanox CX4121C (dual SFP28)
+# ---------------------------------------------------------------------------
+# PCIe bus 0a:00.0/0a:00.1 — MT27710 ConnectX-4 Lx
+#
+# enp10s0f0np0 (Port 1) → switch-04 SFP+ 1 / port 9 (Proxmox Trunk, 10G DAC)
+#   STATUS: Active. vmbr0 management bridge.
+#
+# enp10s0f1np1 (Port 2) → TrueNAS Mellanox Port (point-to-point, 10G DAC)
+#   STATUS: Active. vmbr1 storage bridge, 10.10.10.1/30.
+# ---------------------------------------------------------------------------
+
+# Management bridge — Mellanox CX4121C Port 1, 10G DAC to switch-04 SFP+ 1
+proxmox_mgmt_bridge_ports: "enp10s0f0np0"
+# Force 10G — INTELLINET 508438 DAC has broken EEPROM (no 10G compliance codes),
+# auto-negotiation falls back to 1GbE without this override
+proxmox_mgmt_ethtool_speed: 10000
+
+# Storage bridge — Mellanox CX4121C Port 2, direct DAC to TrueNAS
+proxmox_storage_bridge_ports: "enp10s0f1np1"
+proxmox_storage_ip: "10.10.10.1/30"
+proxmox_storage_mtu: 9000

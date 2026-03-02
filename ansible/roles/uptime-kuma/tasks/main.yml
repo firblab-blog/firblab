@@ -1,0 +1,93 @@
+---
+# =============================================================================
+# Uptime Kuma Role - Service Health Monitor via Docker Compose
+# =============================================================================
+# Deploys Uptime Kuma using Docker Compose in an LXC container. Expects the
+# docker role to be applied first.
+#
+# Stack: Single container (louislam/uptime-kuma), SQLite backend.
+# Data is stored in a bind mount at uptime_kuma_data_dir for easy backup.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Uptime Kuma directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ uptime_kuma_install_dir }}"
+    - "{{ uptime_kuma_data_dir }}"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Uptime Kuma Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ uptime_kuma_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart uptime-kuma
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER containers
+# are running, killing them.
+- name: Flush handlers before starting Uptime Kuma containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Uptime Kuma container image
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ uptime_kuma_install_dir }}"
+  register: uptime_kuma_pull_result
+  changed_when: "'Pull complete' in uptime_kuma_pull_result.stdout or 'Downloaded' in uptime_kuma_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Uptime Kuma container
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ uptime_kuma_install_dir }}"
+  register: uptime_kuma_up_result
+  changed_when: "'Started' in uptime_kuma_up_result.stderr or 'Creating' in uptime_kuma_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Uptime Kuma to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ uptime_kuma_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: uptime_kuma_health
+  retries: 15
+  delay: 10
+  until: uptime_kuma_health.status is defined and uptime_kuma_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Uptime Kuma never became accessible
+  ansible.builtin.fail:
+    msg: "Uptime Kuma failed to respond after 150 seconds. Last status: {{ uptime_kuma_health.status | default('connection refused') }}"
+  when: uptime_kuma_health.status is not defined or uptime_kuma_health.status not in [200, 301, 302]
+  tags:
+    - verify

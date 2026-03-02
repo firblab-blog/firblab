@@ -1,0 +1,229 @@
+---
+# =============================================================================
+# FoundryVTT Role - Virtual Tabletop Installation
+# =============================================================================
+# Installs FoundryVTT from a pre-placed archive or download URL, sets up
+# Node.js runtime via NodeSource, and configures a systemd service.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# User and Directories
+# ---------------------------------------------------------------------------
+- name: Create foundryvtt group
+  ansible.builtin.group:
+    name: foundryvtt
+    system: true
+    state: present
+  tags:
+    - install
+
+- name: Create foundryvtt user
+  ansible.builtin.user:
+    name: foundryvtt
+    group: foundryvtt
+    system: true
+    shell: /usr/sbin/nologin
+    home: /opt/foundryvtt
+    create_home: false
+    comment: "FoundryVTT service account"
+  tags:
+    - install
+
+- name: Create FoundryVTT directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: foundryvtt
+    group: foundryvtt
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: /opt/foundryvtt
+    - path: /opt/foundryvtt/data
+    - path: /opt/foundryvtt/config
+    - path: /opt/foundryvtt/app
+  tags:
+    - install
+    - directories
+
+# ---------------------------------------------------------------------------
+# Node.js Installation (via NodeSource)
+# ---------------------------------------------------------------------------
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags:
+    - install
+
+- name: Download NodeSource GPG key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /tmp/nodesource-gpg-key
+    mode: "0644"
+    force: true
+  tags:
+    - install
+
+- name: Dearmor NodeSource GPG key into keyring
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg /tmp/nodesource-gpg-key
+  args:
+    creates: /etc/apt/keyrings/nodesource.gpg
+  tags:
+    - install
+
+- name: Set NodeSource keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/nodesource.gpg
+    mode: "0644"
+  tags:
+    - install
+
+- name: Add NodeSource apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/nodesource.gpg]
+      https://deb.nodesource.com/node_{{ foundryvtt_node_major | default('20') }}.x
+      nodistro main
+    state: present
+    filename: nodesource
+    update_cache: true
+  tags:
+    - install
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# FoundryVTT Application
+# ---------------------------------------------------------------------------
+# Supports two installation methods:
+#   1. Local ZIP (preferred): set foundryvtt_zip_path to a local file on the
+#      Ansible controller. The ZIP is copied and extracted on the target.
+#   2. Download URL (fallback): set foundryvtt_download_url to a timed URL
+#      from foundryvtt.com. Note: timed URLs may be IP-restricted and fail
+#      when downloaded from the target VM.
+# Both are skipped if FoundryVTT is already installed.
+- name: Check if FoundryVTT is already extracted
+  ansible.builtin.stat:
+    path: /opt/foundryvtt/app/resources/app/main.js
+  register: foundryvtt_app
+  tags:
+    - install
+
+- name: Copy and extract FoundryVTT from local ZIP
+  ansible.builtin.unarchive:
+    src: "{{ foundryvtt_zip_path }}"
+    dest: /opt/foundryvtt/app
+    owner: foundryvtt
+    group: foundryvtt
+  when:
+    - not foundryvtt_app.stat.exists
+    - foundryvtt_zip_path is defined
+  notify: Restart foundryvtt
+  tags:
+    - install
+
+- name: Download FoundryVTT archive (fallback)
+  ansible.builtin.get_url:
+    url: "{{ foundryvtt_download_url }}"
+    dest: /tmp/foundryvtt.zip
+    mode: "0644"
+  when:
+    - not foundryvtt_app.stat.exists
+    - foundryvtt_zip_path is not defined
+    - foundryvtt_download_url is defined
+  tags:
+    - install
+
+- name: Extract downloaded FoundryVTT archive
+  ansible.builtin.unarchive:
+    src: /tmp/foundryvtt.zip
+    dest: /opt/foundryvtt/app
+    remote_src: true
+    owner: foundryvtt
+    group: foundryvtt
+  when:
+    - not foundryvtt_app.stat.exists
+    - foundryvtt_zip_path is not defined
+    - foundryvtt_download_url is defined
+  notify: Restart foundryvtt
+  tags:
+    - install
+
+- name: Fail if no FoundryVTT source provided
+  ansible.builtin.fail:
+    msg: >
+      FoundryVTT is not installed and no source was provided. Set either:
+        -e foundryvtt_zip_path=/path/to/FoundryVTT-Linux-*.zip (local file)
+        -e foundryvtt_download_url=https://... (timed URL)
+  when:
+    - not foundryvtt_app.stat.exists
+    - foundryvtt_zip_path is not defined
+    - foundryvtt_download_url is not defined
+  tags:
+    - install
+
+- name: Set FoundryVTT application ownership
+  ansible.builtin.file:
+    path: /opt/foundryvtt
+    state: directory
+    owner: foundryvtt
+    group: foundryvtt
+    recurse: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
+- name: Configure UFW for FoundryVTT
+  community.general.ufw:
+    rule: allow
+    port: "{{ foundryvtt_port | default('30000') }}"
+    proto: tcp
+    comment: "FoundryVTT application"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Systemd Service
+# ---------------------------------------------------------------------------
+- name: Template FoundryVTT systemd service
+  ansible.builtin.template:
+    src: foundryvtt.service.j2
+    dest: /etc/systemd/system/foundryvtt.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart foundryvtt
+  tags:
+    - service
+
+- name: Enable and start FoundryVTT service
+  ansible.builtin.systemd:
+    name: foundryvtt
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Remove temporary files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/foundryvtt.zip
+    - /tmp/nodesource-gpg-key
+  tags:
+    - install
+    - cleanup

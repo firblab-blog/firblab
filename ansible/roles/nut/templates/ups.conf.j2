@@ -1,0 +1,13 @@
+# =============================================================================
+# UPS Device Configuration — /etc/nut/ups.conf
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# =============================================================================
+
+[{{ nut_ups_name }}]
+    driver = {{ nut_ups_driver }}
+    port = {{ nut_ups_port }}
+    desc = "{{ nut_ups_desc }}"
+    vendorid = {{ nut_ups_vendorid }}
+    productid = {{ nut_ups_productid }}

@@ -1,0 +1,50 @@
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# =============================================================================
+# Backrest — Restic Backup Monitoring UI
+# =============================================================================
+# Read-only web UI for browsing restic backup repositories, verifying
+# snapshot health, and restoring files. No backup orchestration — cron
+# scripts on each service host handle that.
+#
+# Accessible via Traefik reverse proxy at https://backrest.home.example-lab.org
+# Protected by Authentik ForwardAuth + Backrest's own bcrypt authentication.
+# =============================================================================
+
+[Unit]
+Description=Backrest - Restic Backup Monitoring UI
+Documentation=https://github.com/garethgeorge/backrest
+After=network.target restic-rest-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ backrest_user }}
+Group={{ backrest_group }}
+
+# Backrest uses BACKREST_PORT for address:port binding
+Environment=BACKREST_PORT={{ backrest_listen }}
+Environment=BACKREST_CONFIG={{ backrest_config_file }}
+Environment=BACKREST_DATA={{ backrest_data_dir }}
+Environment=XDG_CACHE_HOME={{ backrest_cache_dir }}
+
+ExecStart={{ backrest_binary }}
+
+# ---------------------------------------------------------------------------
+# Security Hardening
+# ---------------------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Backrest needs write access to its data/cache dirs, config dir
+# (creates .bak files next to config.json during migration/startup),
+# and restic repos (for integrity checks and potential restores).
+ReadWritePaths={{ backrest_data_dir }} {{ backrest_cache_dir }} {{ backrest_config_dir }} {{ restic_server_data_dir | default('/mnt/restic') }}
+
+# Restart on failure with backoff
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

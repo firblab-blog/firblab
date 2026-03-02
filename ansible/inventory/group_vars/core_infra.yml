@@ -1,0 +1,68 @@
+---
+# =============================================================================
+# Core Infrastructure Configuration
+# =============================================================================
+# Group variables for core-infra services on Management VLAN 10:
+#   - GitLab CE     : Source control + CI/CD — lab-02
+#   - GitLab Runner : CI/CD runner            — lab-02
+#   - Authentik     : SSO/IDP (port 9000)     — lab-04
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# GitLab CE Configuration
+# ---------------------------------------------------------------------------
+gitlab_edition: "gitlab-ce"
+gitlab_external_url: "https://gitlab.home.example-lab.org"
+gitlab_ssl_enabled: false
+gitlab_timezone: "{{ timezone }}"
+gitlab_puma_workers: 4
+gitlab_prometheus_enabled: true
+gitlab_backup_keep_time: 604800
+gitlab_backup_path: "/var/opt/gitlab/backups"
+gitlab_git_data_dir: "/mnt/gitlab-data/git-data"
+gitlab_ssh_port: 22
+
+# ---------------------------------------------------------------------------
+# GitLab Kubernetes Agent Server (KAS)
+# ---------------------------------------------------------------------------
+# KAS enables agent-based K8s integration. Agents in the RKE2 cluster
+# connect via WebSocket through the standalone Traefik proxy.
+gitlab_kas_enabled: true
+gitlab_kas_external_url: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# Ports needed by core-infra services. Extra ports on hosts that don't run
+# a given service are harmless UFW no-ops.
+# SSH (22) is already handled by the common role's base firewall rules.
+core_infra_firewall_ports:
+  - { port: "80", proto: tcp, comment: "GitLab HTTP" }
+  - { port: "443", proto: tcp, comment: "GitLab HTTPS" }
+  - { port: "9000", proto: tcp, comment: "Authentik identity provider" }
+
+core_infra_firewall_sources:
+  - "{{ management_network }}"
+  - "{{ lan_network }}"
+  - "{{ services_network }}"      # VLAN 20 — RKE2 cluster (ArgoCD, runners)
+  - "{{ iot_network }}"            # VLAN 60 — Home Assistant Git Pull
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ core_infra_firewall_ports }}"
+firewall_additional_sources: "{{ core_infra_firewall_sources }}"
+
+# ---------------------------------------------------------------------------
+# GitLab Runner Configuration
+# ---------------------------------------------------------------------------
+gitlab_runner_url: "https://gitlab.home.example-lab.org"
+gitlab_runner_concurrent: 2
+
+# Docker users (consumed by docker role — adds admin to docker group)
+docker_users:
+  - admin
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "core-infra"
+monitoring_promtail_docker_logs: true   # Ship Docker container logs to Loki

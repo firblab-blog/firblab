@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Roundcube Role Handlers
+# =============================================================================
+
+- name: Restart roundcube
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ roundcube_data_dir }}"

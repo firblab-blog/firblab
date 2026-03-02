@@ -1,0 +1,29 @@
+---
+# =============================================================================
+# TrueNAS — NFS Share Configuration
+# =============================================================================
+# Manages NFS exports. Security fix: restricts networks (probe found shares
+# with empty networks[] = world-accessible).
+#
+# Uses arensb.truenas.sharing_nfs module (wraps midclt call sharing.nfs.*).
+# Module params: name (alias: comment), path, networks, hosts, maproot_user,
+#   maproot_group, mapall_user, mapall_group, enabled, readonly (alias: ro),
+#   alldirs, quiet, state.
+# =============================================================================
+
+- name: "Configure NFS share {{ item.path }}"
+  arensb.truenas.sharing_nfs:
+    path: "{{ item.path }}"
+    name: "{{ item.comment | default(omit) }}"
+    networks: "{{ item.networks | default([]) }}"
+    hosts: "{{ item.hosts | default([]) }}"
+    maproot_user: "{{ item.maproot_user | default(omit) }}"
+    maproot_group: "{{ item.maproot_group | default(omit) }}"
+    mapall_user: "{{ item.mapall_user | default(omit) }}"
+    mapall_group: "{{ item.mapall_group | default(omit) }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    readonly: "{{ item.readonly | default(false) }}"
+    state: present
+  loop: "{{ truenas_nfs_shares }}"
+  loop_control:
+    label: "{{ item.path }}"

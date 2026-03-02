@@ -1,0 +1,465 @@
+---
+# =============================================================================
+# K3s RPi5 Cluster Node Bootstrap Playbook
+# =============================================================================
+# ⚠️  SUPERSEDED by k3s-rpi-nvme-setup.yml for the primary deployment path.
+# The NVMe setup playbook handles admin user, hostname, and static IP via
+# cloud-init on the NVMe system-boot partition — eliminating the need for
+# Play 2 of this playbook. Hardening is handled by k3s-deploy.yml Play 1.
+#
+# This playbook is kept for reference and as a fallback if you need to
+# bootstrap a node that already has Ubuntu on NVMe (skip NVMe flash).
+# =============================================================================
+#
+# Three-phase bootstrap for RPi5 bare-metal nodes running Ubuntu 24.04 Server
+# ARM64 (booted from NVMe). Adapted from archive-bootstrap.yml for Services
+# VLAN 20 targets.
+#
+# Play 1 - Diagnostic Pre-Flight (READ-ONLY):
+#   Detects wired interface, verifies link/carrier, detects network manager,
+#   displays all interface info. Makes ZERO changes.
+#
+# Play 2 - Setup + Static IP:
+#   Creates admin user, sets hostname, configures static IP via netplan,
+#   locks admin user. SSH drops on IP change — expected.
+#   NOTE: the switch port must already be on VLAN 20 (Services) via
+#   Terraform Layer 00 BEFORE running Play 2.
+#
+# Play 3 - System Hardening (as admin at new static IP):
+#   Applies common baseline and CIS L1 hardening via reusable roles.
+#
+# After running this playbook for all 3 nodes, run k3s-deploy.yml.
+#
+# Prerequisites:
+#   1. Ubuntu 24.04 Server ARM64 installed on NVMe (via RPi OS Lite SD
+#      bootstrap — see plan for EEPROM + NVMe setup steps)
+#   2. SSH key generated:
+#      ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_lab-05
+#   3. SSH key copied to the RPi5 (cloud-init or manual ssh-copy-id)
+#   4. Switch port assigned to VLAN 20 (Services) via Terraform Layer 00
+#      BEFORE running Play 2
+#
+# Usage:
+#   # Diagnostic only (read-only, safe to run anytime):
+#   ansible-playbook playbooks/k3s-rpi-bootstrap.yml --tags diagnostic \
+#     -e 'wifi_ip=10.0.4.XX target_hostname=k3s-server-1 target_ip=10.0.20.60 ssh_key_name=lab-05'
+#
+#   # Full bootstrap (all 3 plays):
+#   ansible-playbook playbooks/k3s-rpi-bootstrap.yml --tags full_bootstrap \
+#     -e 'wifi_ip=10.0.4.XX target_hostname=k3s-server-1 target_ip=10.0.20.60 ssh_key_name=lab-05' -K
+#
+# Run once per RPi5, changing wifi_ip/target_hostname/target_ip/ssh_key_name:
+#   k3s-server-1 (lab-05): target_ip=10.0.20.60, ssh_key_name=lab-05
+#   k3s-server-2 (lab-06): target_ip=10.0.20.61, ssh_key_name=lab-06
+#   k3s-server-3 (lab-07): target_ip=10.0.20.62, ssh_key_name=lab-07
+# =============================================================================
+
+# =========================================================================
+# Play 1: Diagnostic Pre-Flight (READ-ONLY)
+# =========================================================================
+# Makes ZERO changes. Detects wired interface, verifies link, detects
+# network manager, displays state for operator review.
+# Run standalone with: --tags diagnostic
+# =========================================================================
+- name: "K3s RPi5 Bootstrap (Play 1/3: Diagnostic Pre-Flight)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [diagnostic, always]
+
+  vars:
+    wifi_ip: "{{ wifi_ip }}"
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+
+  tasks:
+    - name: Add RPi5 host dynamically (WiFi DHCP address)
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ wifi_ip }}"
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        groups: k3s_bootstrap
+
+    - name: Delegate diagnostic tasks to RPi5
+      block:
+        - name: Gather system facts (unprivileged)
+          ansible.builtin.setup:
+            gather_subset:
+              - "!hardware"
+              - network
+              - distribution
+
+        - name: Detect wired Ethernet interface name
+          ansible.builtin.shell: |
+            for iface in /sys/class/net/*; do
+              name=$(basename "$iface")
+              [ "$name" = "lo" ] && continue
+              [ -d "$iface/wireless" ] && continue
+              [ -e "$iface/device" ] || continue
+              [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+              echo "$name"
+              exit 0
+            done
+            echo "NONE"
+            exit 1
+          register: wired_detect
+          changed_when: false
+          failed_when: false
+
+        - name: Fail if no wired Ethernet interface detected
+          ansible.builtin.fail:
+            msg: |
+              ================================================================
+              ERROR: No wired Ethernet interface detected on {{ target_hostname }}.
+              ================================================================
+              Checked /sys/class/net/ for type=1 (Ethernet), non-wireless,
+              hardware-backed interfaces. Found none.
+
+              Possible causes:
+                - Ethernet cable not plugged in
+                - NIC not recognized by Ubuntu
+                - Missing driver
+
+              Diagnostic commands (run on console):
+                ls -la /sys/class/net/
+                ip link show
+                dmesg | grep -i eth
+              ================================================================
+          when: wired_detect.rc != 0
+
+        - name: Set wired interface fact
+          ansible.builtin.set_fact:
+            wired_iface: "{{ wired_detect.stdout | trim }}"
+          when: wired_detect.rc == 0
+
+        - name: Check wired interface carrier (link state)
+          ansible.builtin.slurp:
+            src: "/sys/class/net/{{ wired_iface }}/carrier"
+          register: carrier_check
+          failed_when: false
+
+        - name: Fail if wired interface has no link
+          ansible.builtin.fail:
+            msg: |
+              ================================================================
+              ERROR: Wired interface '{{ wired_iface }}' has no link (no carrier).
+              ================================================================
+              The interface exists but there is no active Ethernet link.
+
+              Possible causes:
+                - Ethernet cable not plugged in or loose
+                - Switch port is down or disabled
+                - Cable fault
+
+              Check:
+                1. Physical cable connection at switch port
+                2. Switch port LED status
+                3. UniFi switch port status in Terraform
+              ================================================================
+          when: >
+            carrier_check.failed or
+            (carrier_check.content | default('') | b64decode | trim) != '1'
+
+        - name: Wired link confirmed UP
+          ansible.builtin.debug:
+            msg: "Interface '{{ wired_iface }}' has active carrier (link UP)"
+
+        - name: Check if netplan is available
+          ansible.builtin.command: which netplan
+          register: netplan_check
+          changed_when: false
+          failed_when: false
+
+        - name: Gather all interface information
+          ansible.builtin.command: ip addr show
+          register: ip_addr_output
+          changed_when: false
+
+        - name: Display all interface information
+          ansible.builtin.debug:
+            msg: "{{ ip_addr_output.stdout_lines }}"
+
+        - name: Diagnostic summary
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              Diagnostic Pre-Flight PASSED
+              ================================================================
+              Wired interface:    {{ wired_iface }}
+              Link state:         UP (carrier detected)
+              Network manager:    {{ 'netplan' if netplan_check.rc == 0 else 'unknown' }}
+              Current WiFi IP:    {{ wifi_ip }}
+              Target static IP:   {{ target_ip }}/24
+              Target hostname:    {{ target_hostname }}
+              Target VLAN:        20 (Services)
+              Gateway:            10.0.20.1
+              OS:                 {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+
+              IMPORTANT: Ensure the RPi5's switch port is assigned to
+              VLAN 20 (Services) via Terraform Layer 00 BEFORE proceeding
+              with Play 2, or the host will become unreachable after the
+              static IP change.
+              ================================================================
+
+      delegate_to: "{{ target_hostname }}"
+
+# =========================================================================
+# Play 2: Setup + Static IP Assignment
+# =========================================================================
+# Creates admin user, sets hostname, configures static IP via netplan
+# (Ubuntu 24.04), disables WiFi, locks admin user. SSH drops — expected.
+#
+# PREREQUISITE: Switch port must be on VLAN 20 before running this play.
+# =========================================================================
+- name: "K3s RPi5 Bootstrap (Play 2/3: Setup + Static IP)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [never, full_bootstrap]
+
+  vars:
+    wifi_ip: "{{ wifi_ip }}"
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+    target_cidr: 24
+    target_gateway: 10.0.20.1
+    dns_1: 10.0.20.1
+    dns_2: 1.1.1.1
+    admin_user: admin
+
+  tasks:
+    - name: Add RPi5 host dynamically (WiFi DHCP address)
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ wifi_ip }}"
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        ansible_become: true
+        groups: k3s_bootstrap
+
+    - name: Delegate setup tasks to RPi5
+      block:
+        - name: Gather facts
+          ansible.builtin.setup:
+
+        # Re-detect wired interface
+        - name: Detect wired Ethernet interface
+          ansible.builtin.shell: |
+            for iface in /sys/class/net/*; do
+              name=$(basename "$iface")
+              [ "$name" = "lo" ] && continue
+              [ -d "$iface/wireless" ] && continue
+              [ -e "$iface/device" ] || continue
+              [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+              echo "$name"
+              exit 0
+            done
+            exit 1
+          register: wired_detect
+          changed_when: false
+
+        - name: Set wired interface fact
+          ansible.builtin.set_fact:
+            wired_iface: "{{ wired_detect.stdout | trim }}"
+
+        # -------------------------------------------------------------------
+        # Hostname
+        # -------------------------------------------------------------------
+        - name: Set hostname to {{ target_hostname }}
+          ansible.builtin.hostname:
+            name: "{{ target_hostname }}"
+
+        - name: Update /etc/hosts with new hostname
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '^127\.0\.1\.1'
+            line: "127.0.1.1 {{ target_hostname }}"
+            state: present
+
+        # -------------------------------------------------------------------
+        # Admin User Setup
+        # -------------------------------------------------------------------
+        - name: Create admin user with sudo privileges
+          ansible.builtin.user:
+            name: "{{ admin_user }}"
+            groups: sudo
+            append: true
+            shell: /bin/bash
+            create_home: true
+            state: present
+
+        - name: Set up SSH authorized key for admin user
+          ansible.posix.authorized_key:
+            user: "{{ admin_user }}"
+            key: "{{ lookup('file', '~/.ssh/id_ed25519_' + ssh_key_name + '.pub') }}"
+            state: present
+            exclusive: false
+
+        - name: Grant admin user passwordless sudo
+          ansible.builtin.copy:
+            dest: "/etc/sudoers.d/{{ admin_user }}"
+            content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+            owner: root
+            group: root
+            mode: "0440"
+            validate: "visudo -cf %s"
+
+        # -------------------------------------------------------------------
+        # Static IP Configuration (netplan — Ubuntu 24.04)
+        # -------------------------------------------------------------------
+        - name: Deploy static IP netplan configuration
+          ansible.builtin.copy:
+            dest: "/etc/netplan/99-k3s-static.yaml"
+            content: |
+              # Managed by Ansible — k3s-rpi-bootstrap.yml
+              # Static IP for {{ target_hostname }} on Services VLAN 20
+              network:
+                version: 2
+                renderer: networkd
+                ethernets:
+                  {{ wired_iface }}:
+                    dhcp4: false
+                    addresses:
+                      - {{ target_ip }}/{{ target_cidr }}
+                    routes:
+                      - to: default
+                        via: {{ target_gateway }}
+                    nameservers:
+                      addresses:
+                        - {{ dns_1 }}
+                        - {{ dns_2 }}
+            owner: root
+            group: root
+            mode: "0600"
+          register: netplan_config
+
+        - name: Remove default netplan configs (DHCP, WiFi)
+          ansible.builtin.shell: |
+            find /etc/netplan/ -name '*.yaml' -not -name '99-k3s-static.yaml' -delete
+          when: netplan_config.changed
+          changed_when: true
+
+        # -------------------------------------------------------------------
+        # Disable WiFi (wired-only after bootstrap)
+        # -------------------------------------------------------------------
+        - name: Disable WiFi interface
+          ansible.builtin.shell: |
+            if [ -d /sys/class/net/wlan0 ]; then
+              ip link set wlan0 down 2>/dev/null || true
+              rfkill block wifi 2>/dev/null || true
+            fi
+          changed_when: false
+          failed_when: false
+
+        # -------------------------------------------------------------------
+        # Lock Installer User (admin)
+        # -------------------------------------------------------------------
+        - name: Remove admin sudoers entry (if any)
+          ansible.builtin.file:
+            path: /etc/sudoers.d/admin
+            state: absent
+
+        - name: Remove admin from sudo group
+          ansible.builtin.user:
+            name: admin
+            groups: ""
+            append: false
+
+        - name: Lock admin user password
+          ansible.builtin.user:
+            name: admin
+            password_lock: true
+
+        # -------------------------------------------------------------------
+        # Apply Network Config (SSH will drop — EXPECTED)
+        # -------------------------------------------------------------------
+        - name: Flush handlers before network change
+          ansible.builtin.meta: flush_handlers
+
+        - name: Apply netplan config (SSH will drop — expected)
+          ansible.builtin.shell: |
+            nohup bash -c 'sleep 2 && netplan apply' &>/dev/null &
+          async: 0
+          poll: 0
+          changed_when: true
+
+      delegate_to: "{{ target_hostname }}"
+      become: true
+
+# =========================================================================
+# Play 3: System Hardening (as admin at new static IP)
+# =========================================================================
+# Connects as the newly-created admin user at the static IP on VLAN 20.
+# Applies the full common baseline and CIS L1 hardening.
+# =========================================================================
+- name: "K3s RPi5 Bootstrap (Play 3/3: Hardening)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [never, full_bootstrap]
+
+  vars:
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+
+  tasks:
+    - name: Add RPi5 host at new static IP
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ target_ip }}"
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        ansible_become: true
+        groups: k3s_bootstrap
+
+    - name: Delegate hardening tasks to RPi5
+      block:
+        - name: Wait for host to come up at new IP ({{ target_ip }})
+          ansible.builtin.wait_for_connection:
+            delay: 10
+            timeout: 120
+
+        - name: Gather facts from host at new IP
+          ansible.builtin.setup:
+
+        - name: Verify admin user connectivity
+          ansible.builtin.ping:
+
+        - name: Apply common baseline role
+          ansible.builtin.include_role:
+            name: common
+
+        - name: Apply CIS L1 hardening role
+          ansible.builtin.include_role:
+            name: hardening
+
+        - name: Display bootstrap summary
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              {{ target_hostname }} Bootstrap Complete!
+              ================================================================
+              Hostname:   {{ ansible_hostname }}
+              IP:         {{ ansible_default_ipv4.address | default(target_ip) }}
+              VLAN:       20 (Services)
+              OS:         {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+              User:       admin (admin locked)
+              Roles:      common + hardening applied
+
+              Next steps:
+                1. Verify SSH:
+                   ssh -i ~/.ssh/id_ed25519_{{ ssh_key_name }} -o IdentitiesOnly=yes admin@{{ target_ip }}
+
+                2. Repeat for remaining RPi5 nodes, then deploy K3s:
+                   ansible-playbook playbooks/k3s-deploy.yml
+              ================================================================
+
+      delegate_to: "{{ target_hostname }}"
+      become: true

@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# Traefik Standalone Reverse Proxy Deployment Playbook
+# =============================================================================
+# Deploys Traefik v3 as a Docker Compose service on an LXC container
+# (Management VLAN 10). Provides TLS termination for ALL non-K8s services
+# via Let's Encrypt DNS-01 (Cloudflare).
+#
+# Prerequisites:
+#   - Traefik LXC provisioned by Terraform Layer 05
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - Cloudflare API token in Vault (secret/infra/cloudflare)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/traefik-proxy-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags traefik     # Only Traefik app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+# =============================================================================
+
+- name: Deploy Traefik standalone reverse proxy
+  hosts: traefik_proxy
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Read Cloudflare API token from Vault
+    # -----------------------------------------------------------------
+    - name: Read Cloudflare API token from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/cloudflare
+      register: vault_cloudflare_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: traefik_cloudflare_api_token is not defined or traefik_cloudflare_api_token == ""
+      tags:
+        - always
+
+    - name: Set Cloudflare token from Vault
+      ansible.builtin.set_fact:
+        traefik_cloudflare_api_token: "{{ (vault_cloudflare_read.stdout | from_json).data.data.api_token }}"
+      when:
+        - traefik_cloudflare_api_token is not defined or traefik_cloudflare_api_token == ""
+        - vault_cloudflare_read.rc is defined
+        - vault_cloudflare_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate Cloudflare token is available
+      ansible.builtin.assert:
+        that:
+          - traefik_cloudflare_api_token is defined
+          - traefik_cloudflare_api_token | length > 0
+        fail_msg: >
+          Cloudflare API token not available. Ensure Vault has the secret:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret infra/cloudflare
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Traefik reverse proxy on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # No hardening role — LXC shares host kernel (sysctl, auditd, AppArmor meaningless)
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Traefik (Docker Compose: Traefik v3 with ACME DNS-01)
+    - role: traefik-standalone
+      tags:
+        - traefik
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Traefik Reverse Proxy Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Dashboard: http://{{ ansible_host }}:{{ traefik_dashboard_port | default(8888) }}/ (localhost-only)"
+          - ""
+          - "Proxied services:"
+          - "  https://gitlab.home.example-lab.org    -> GitLab (native OIDC)"
+          - "  https://auth.home.example-lab.org      -> Authentik SSO"
+          - "  https://pbs.home.example-lab.org       -> PBS (ForwardAuth)"
+          - "  https://ghost.home.example-lab.org     -> Ghost (ForwardAuth)"
+          - "  https://mail.home.example-lab.org      -> Roundcube (ForwardAuth)"
+          - "  https://foundryvtt.home.example-lab.org -> FoundryVTT (ForwardAuth)"
+          - "  https://mealie.home.example-lab.org    -> Mealie (native OIDC)"
+          - "  https://netbox.home.example-lab.org    -> NetBox (native OIDC)"
+          - "  https://patchmon.home.example-lab.org  -> PatchMon (native OIDC)"
+          - "  https://actualbudget.home.example-lab.org -> Actual Budget (ForwardAuth)"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ traefik_install_dir | default('/opt/traefik') }}/docker-compose.yml ps"
+          - "  docker compose -f {{ traefik_install_dir | default('/opt/traefik') }}/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

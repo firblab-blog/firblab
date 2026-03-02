@@ -1,0 +1,197 @@
+# =============================================================================
+# NetworkPolicies — argocd namespace
+# =============================================================================
+# ArgoCD needs:
+#   Ingress: Traefik (UI), Prometheus (metrics)
+#   Egress: DNS, K8s API, GitLab (repo sync), Authentik (OIDC token validation)
+#   Egress: internal (argocd-server ↔ repo-server ↔ app-controller ↔ redis)
+#   Egress: repo-server → internet:443 (Helm chart index fetches)
+# =============================================================================
+
+# --- Default deny -----------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+# --- Internal ArgoCD component communication --------------------------------
+# argocd-server ↔ repo-server (8081), app-controller (8082), redis (6379),
+# dex-server (5556), applicationset-controller (7000)
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-argocd-internal
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+
+# --- Ingress from Traefik (ArgoCD UI) ---------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-ingress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+
+# --- Ingress from Prometheus scrape -----------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-ingress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+
+# --- Egress: DNS ------------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+# --- Egress: K8s API server -------------------------------------------------
+# Canal (kube-proxy iptables mode) applies DNAT in nat/OUTPUT BEFORE Calico
+# evaluates filter/OUTPUT. By the time Calico sees the packet, the destination
+# has been rewritten from the kubernetes ClusterIP (10.43.0.1:443) to the
+# actual control-plane node IP:6443. Targeting 10.43.0.0/16:443 never matches.
+# Must target the node CIDR on the real API server port (6443).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.0/24   # RKE2 node CIDR (post-DNAT destination)
+      ports:
+        - port: 6443                  # kube-apiserver port (post-DNAT)
+
+# --- Egress: GitLab (repo-server git clone) ---------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gitlab-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.50/32
+      ports:
+        - port: 443
+        - port: 80
+
+# --- Egress: Authentik (OIDC issuer via Traefik proxy) ----------------------
+# ArgoCD server validates OIDC tokens against Authentik. The OIDC issuer URL
+# (auth.home.example-lab.org) resolves to the standalone Traefik proxy
+# (10.0.10.17), which terminates TLS and forwards to Authentik
+# (10.0.10.16:9000). Both IPs required for OIDC discovery + token exchange.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-authentik-egress
+  namespace: argocd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.16/32
+        - ipBlock:
+            cidr: 10.0.10.17/32
+      ports:
+        - port: 443
+        - port: 9000
+        - port: 9443
+
+# --- Egress: External Helm chart repositories (repo-server only) ------------
+# argocd-repo-server fetches Helm chart indexes from external registries
+# (charts.jetstack.io, prometheus-community.github.io, metallb.github.io,
+# charts.external-secrets.io, etc.). Without this, manifest generation fails
+# when the cache expires, cascading to sync errors across all Helm-based apps.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-helm-repos-egress
+  namespace: argocd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-repo-server
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 443

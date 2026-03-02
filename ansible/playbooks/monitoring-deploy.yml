@@ -1,0 +1,87 @@
+---
+# =============================================================================
+# Monitoring Deployment Playbook
+# =============================================================================
+# Installs node_exporter and Promtail on all off-cluster Linux hosts.
+# CI: SSH key fetch uses retry logic (scripts/ci-setup-ssh.sh)
+# Both agents are added to the common role and controlled by group_vars:
+#
+#   monitoring_node_exporter_enabled: true/false
+#   monitoring_promtail_enabled: true/false
+#   monitoring_promtail_docker_logs: true/false
+#   monitoring_host_group: <label for Prometheus / Loki>
+#
+# Groups where monitoring is DISABLED:
+#   - rke2_cluster    → kube-prometheus-stack DaemonSet handles this
+#   - macos_hosts     → Darwin excluded via :!darwin_hosts in hosts pattern
+#   - hetzner         → can't reach internal Loki NodePort (different network)
+#
+# Groups requiring special consideration:
+#   - proxmox_nodes   → UFW skipped (proxmox_skip_ufw: true). Ensure the PVE
+#                       host firewall allows TCP/9100 from 10.0.20.0/24.
+#   - vault_cluster   → vault-2 (Security VLAN 50) needs the new UniFi zone
+#                       policy services_to_security_monitoring (Layer 00).
+#   - dmz_services    → Promtail disabled (dmz→services TCP/31100 blocked).
+#   - rpi             → includes lab-rpi (=vault-3, run twice; idempotent)
+#                       and lab-08 (bare-metal RPi4, Default LAN).
+#
+# Usage:
+#   # Deploy to ALL eligible hosts (runs only monitoring-tagged tasks):
+#   ansible-playbook playbooks/monitoring-deploy.yml
+#
+#   # Target a specific group:
+#   ansible-playbook playbooks/monitoring-deploy.yml --limit proxmox_nodes
+#
+#   # Re-run on failure without full role:
+#   ansible-playbook playbooks/monitoring-deploy.yml --tags node-exporter
+#   ansible-playbook playbooks/monitoring-deploy.yml --tags promtail
+#
+# Prerequisites:
+#   - Vault is unsealed and reachable at https://10.0.10.10:8200
+#   - Loki is running: NodePort 31100 on 10.0.20.40
+#   - Export VAULT_ADDR and VAULT_TOKEN, or use standard Ansible Vault
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Off-cluster Linux hosts
+# ---------------------------------------------------------------------------
+- name: Deploy monitoring agents (node_exporter + Promtail)
+  hosts: >-
+    proxmox_nodes:
+    vault_cluster:
+    core_infra:
+    standalone_services:
+    archive_appliance:
+    pbs_server:
+    traefik_proxy:
+    dmz_services:
+    rpi:!darwin_hosts
+  become: true
+  gather_facts: true
+  tags: [monitoring]
+
+  roles:
+    - role: common
+      tags: [monitoring]
+
+  vars:
+    # Limit role execution to only the monitoring sub-tasks.
+    # The common role's main.yml uses tags on include_tasks so we only
+    # run the node-exporter and promtail tasks when --tags monitoring
+    # is specified. The role's shared defaults (timezone, etc.) are still
+    # resolved, but no packages/SSH hardening/etc. are changed.
+    _monitoring_only: true
+
+# ---------------------------------------------------------------------------
+# RKE2 cluster nodes — SKIP (kube-prometheus-stack DaemonSet is authoritative)
+# ---------------------------------------------------------------------------
+- name: Monitoring agents skipped on RKE2 nodes
+  hosts: rke2_cluster
+  gather_facts: false
+  tasks:
+    - name: Assert monitoring disabled on RKE2 nodes
+      ansible.builtin.debug:
+        msg: >-
+          Skipping monitoring agent install on {{ inventory_hostname }}.
+          kube-prometheus-stack node_exporter DaemonSet manages these hosts.
+      tags: [monitoring]

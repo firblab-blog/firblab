@@ -1,0 +1,70 @@
+# =============================================================================
+# ArgoCD Image Updater — Helm Values
+# =============================================================================
+# Watches container registries for new image tags matching configured policies.
+# Uses Git write-back mode to commit tag updates to the repo, preserving GitOps.
+#
+# Registry access: Docker Hub and ghcr.io (public, no auth needed)
+# Git write-back: Uses deploy token from Vault (ExternalSecret)
+# =============================================================================
+
+# -- Resource limits (lightweight controller) --
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# -- Logging --
+config:
+  logLevel: info
+
+  # -- Registry configuration --
+  # Public registries only — no auth needed for reading public image tags
+  registries:
+    - name: Docker Hub
+      api_url: https://registry-1.docker.io
+      prefix: docker.io
+      default: true
+      ping: true
+    - name: GitHub Container Registry
+      api_url: https://ghcr.io
+      prefix: ghcr.io
+      ping: false
+
+  # -- Git write-back configuration --
+  # Image updater commits tag changes to Git instead of using ArgoCD parameter
+  # overrides. This preserves GitOps — the repo stays the source of truth.
+  gitCommitUser: "argocd-image-updater"
+  gitCommitMail: "image-updater@example-lab.local"
+  gitCommitMessageTemplate: |
+    chore(images): update {{.AppName}} image {{.ImageName}} to {{.NewTag}}
+
+    Updated by ArgoCD Image Updater.
+    Old tag: {{.OldTag}}
+    New tag: {{.NewTag}}
+
+# -- ArgoCD integration --
+# Uses the same ArgoCD server the controller is deployed alongside
+config.argocd:
+  serverAddress: "argocd-server.argocd.svc.cluster.local"
+  insecure: true
+  plaintext: true
+
+# -- Security context --
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+# -- Pod scheduling --
+# Prefer server nodes (lighter load) but don't require it
+nodeSelector: {}
+tolerations: []

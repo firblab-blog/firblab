@@ -1,0 +1,16 @@
+# RKE2 Agent Configuration — STIG/CIS Hardened
+# Managed by Ansible — DO NOT EDIT MANUALLY
+
+# CIS Hardening Profile
+profile: "{{ rke2_profile }}"
+
+# Join the cluster via the registration endpoint
+server: {{ rke2_server_url }}
+token-file: {{ rke2_config_dir }}/cluster-token
+
+{% if rke2_kubelet_args %}
+kubelet-arg:
+{% for arg in rke2_kubelet_args %}
+  - "{{ arg }}"
+{% endfor %}
+{% endif %}

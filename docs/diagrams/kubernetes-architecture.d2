@@ -1,0 +1,108 @@
+# FirbLab Kubernetes Architecture
+# RKE2 cluster on Services VLAN 20, managed by ArgoCD GitOps
+# Source of truth: docs/CURRENT-STATE.md, k8s/argocd/
+# Rendered automatically by CI pipeline (ci-templates/d2-ci.yml)
+
+direction: down
+
+# --- Cluster Nodes ---
+cluster: "RKE2 Cluster (Services VLAN 20)" {
+  style.fill: "#e3f2fd"
+
+  servers: "Control Plane (4 CPU / 6 GB each)" {
+    style.fill: "#bbdefb"
+    s1: "rke2-server-1\n10.0.20.40\n(init node)"
+    s2: "rke2-server-2\n10.0.20.41"
+    s3: "rke2-server-3\n10.0.20.42"
+  }
+
+  agents: "Worker Nodes (4 CPU / 10 GB each)" {
+    style.fill: "#c8e6c9"
+    a1: "rke2-agent-1\n10.0.20.50"
+    a2: "rke2-agent-2\n10.0.20.51"
+    a3: "rke2-agent-3\n10.0.20.52"
+  }
+
+  servers.s1 -> agents.a1: kubelet
+  servers.s1 -> agents.a2: kubelet
+  servers.s1 -> agents.a3: kubelet
+}
+
+# --- ArgoCD App-of-Apps ---
+argocd: "ArgoCD GitOps" {
+  style.fill: "#fff3e0"
+
+  root: "root\n(app-of-apps)" {
+    shape: hexagon
+    style.fill: "#ff9800"
+  }
+
+  wave0: "Wave 0 — Platform Helm Charts" {
+    style.fill: "#fff8e1"
+    metallb: MetalLB
+    traefik: Traefik
+    cert-manager: cert-manager
+    eso: "External Secrets"
+    gatekeeper: Gatekeeper
+    longhorn: Longhorn
+    prometheus: "Prometheus\n(kube-prometheus-stack)"
+    loki: "Loki\n(loki-stack)"
+    trivy: "Trivy Operator"
+    kured: "kured\n(Reboot Daemon)"
+    gitlab-agent: "GitLab Agent"
+    image-updater: "ArgoCD Image Updater"
+  }
+
+  wave1: "Wave 1 — Post-Install Config" {
+    style.fill: "#f1f8e9"
+    metallb-cfg: metallb-config
+    cert-mgr-cfg: cert-manager-config
+    eso-cfg: external-secrets-config
+    traefik-cfg: traefik-config
+    longhorn-cfg: longhorn-config
+    gk-policies: gatekeeper-policies
+    argocd-cfg: argocd-config
+    dashboards: monitoring-dashboards
+    netpol: network-policies
+  }
+
+  wave2: "Wave 2 — Workloads" {
+    style.fill: "#e8eaf6"
+    sonarqube: SonarQube
+    headlamp: Headlamp
+  }
+
+  root -> wave0: "sync wave 0"
+  root -> wave1: "sync wave 1"
+  root -> wave2: "sync wave 2"
+}
+
+# --- External Integrations ---
+gitlab: "GitLab CE\n10.0.10.50" {
+  shape: rectangle
+  style.fill: "#f3e5f5"
+}
+
+vault: "Vault Cluster\nvault-1 (10.10) / vault-2 (50.2) / vault-3 (10.13)" {
+  shape: rectangle
+  style.fill: "#fff9c4"
+}
+
+metallb-pool: "MetalLB L2 Pool\n10.0.20.220-.250" {
+  shape: cylinder
+  style.fill: "#e0f2f1"
+}
+
+# --- Connections ---
+argocd.root -> gitlab: "watches firblab.git\nk8s/argocd/apps/"
+argocd.wave1.eso-cfg -> vault: "ClusterSecretStore\nVault KV v2"
+argocd.wave0.metallb -> metallb-pool: "L2 advertisement"
+cluster -> argocd: "runs in argocd namespace"
+
+# --- Ingress path ---
+hetzner: "Hetzner Gateway" {
+  shape: cloud
+  label: "lab-gateway\nTraefik + WireGuard"
+}
+
+hetzner -> argocd.wave0.traefik: "WireGuard tunnel\n-> MetalLB VIP .220"

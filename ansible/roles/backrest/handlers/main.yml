@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# Backrest — Handlers
+# =============================================================================
+
+- name: restart backrest
+  ansible.builtin.systemd:
+    name: backrest
+    state: restarted
+    daemon_reload: true

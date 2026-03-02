@@ -1,0 +1,71 @@
+---
+# =============================================================================
+# NUT Role - Default Variables
+# =============================================================================
+# Network UPS Tools — monitors UPS devices and orchestrates safe shutdowns.
+#
+# Supports two modes:
+#   netserver:  Local USB UPS, serves status to remote NUT clients on port 3493.
+#               Installs nut-server + nut-client, configures UPS driver, upsd, upsmon (master).
+#   netclient:  No local UPS. Monitors a remote NUT server for coordinated shutdown.
+#               Installs nut-client only, configures upsmon (secondary).
+#
+# UPS communication (netserver only): USB HID via usbhid-ups driver (libusb,
+# NOT usb-storage). CIS hardening's USB storage disable does NOT conflict with NUT.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# NUT Mode
+# ---------------------------------------------------------------------------
+# netserver:  serve UPS data to remote NUT clients on port 3493
+# netclient:  monitor a remote NUT server (no local UPS)
+# standalone: local UPS only (no network serving)
+nut_mode: netserver
+
+# ---------------------------------------------------------------------------
+# UPS Device (netserver only — ignored in netclient mode)
+# ---------------------------------------------------------------------------
+nut_ups_name: ups
+nut_ups_driver: usbhid-ups
+nut_ups_port: auto
+nut_ups_desc: "CyberPower PR1500LCDRT2U"
+nut_ups_vendorid: "0764"
+nut_ups_productid: "0601"
+
+# ---------------------------------------------------------------------------
+# upsd Network Configuration (netserver only)
+# ---------------------------------------------------------------------------
+nut_upsd_listen_address: "0.0.0.0"
+nut_upsd_listen_port: 3493
+nut_upsd_maxage: 15
+
+# ---------------------------------------------------------------------------
+# Authentication Users
+# ---------------------------------------------------------------------------
+# Passwords are set via the deploy playbook from Vault secrets.
+# netserver: nut_monitor_password AND nut_admin_password must be defined.
+# netclient: nut_monitor_password must be defined (same password as server).
+nut_monitor_user: upsmon
+nut_admin_user: admin
+
+# ---------------------------------------------------------------------------
+# Netclient Configuration (netclient mode only)
+# ---------------------------------------------------------------------------
+# IP/hostname of the NUT netserver to monitor.
+nut_server_host: ""
+# UPS name on the remote server (matches [ups_name] in server's ups.conf).
+nut_server_ups_name: "ups"
+
+# ---------------------------------------------------------------------------
+# upsmon Configuration
+# ---------------------------------------------------------------------------
+nut_shutdown_command: "/sbin/shutdown -h +0"
+nut_powerdown_flag: /etc/killpower
+nut_poll_freq: 5
+nut_poll_freq_alert: 1
+nut_deadtime: 15
+nut_finaldelay: 5
+nut_min_supplies: 1
+# HOSTSYNC: seconds to wait for secondary clients to disconnect before FSD.
+# Only meaningful on the master. Set higher if many clients need time to shut down.
+nut_hostsync: 15

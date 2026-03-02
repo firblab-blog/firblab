@@ -1,0 +1,66 @@
+---
+# =============================================================================
+# Proxmox Network Configuration Update (Day-2)
+# =============================================================================
+# Deploys /etc/network/interfaces on already-bootstrapped Proxmox nodes.
+# The bootstrap playbook (proxmox-bootstrap.yml) Play 1 connects as root,
+# which is permanently locked after initial setup. This playbook provides
+# a safe day-2 path to update network configuration using the admin user.
+#
+# Uses the same proxmox-interfaces.j2 template as the bootstrap playbook.
+# Supports vmbr0 (management bridge) and optional vmbr1 (storage bridge).
+#
+# Usage:
+#   ansible-playbook playbooks/proxmox-network-update.yml --limit lab-01
+#   ansible-playbook playbooks/proxmox-network-update.yml --limit lab-01 --check --diff
+#
+# WARNING: Changing proxmox_mgmt_bridge_ports to a NIC that doesn't exist
+# or isn't cabled will kill network access — requiring physical console or
+# cluster node shell recovery. Always verify NIC names on the host first
+# with 'ip link show'.
+# =============================================================================
+
+- name: "Update Proxmox network configuration (day-2)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  tags: [network]
+
+  vars:
+    proxmox_mgmt_interface: vmbr0
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Preflight: Verify NICs exist before touching /etc/network/interfaces
+    # -----------------------------------------------------------------
+    - name: "PREFLIGHT: Verify management NIC {{ proxmox_mgmt_bridge_ports }} exists"
+      ansible.builtin.command: "ip link show {{ proxmox_mgmt_bridge_ports }}"
+      register: mgmt_nic_check
+      changed_when: false
+      failed_when: mgmt_nic_check.rc != 0
+
+    - name: "PREFLIGHT: Verify storage NIC {{ proxmox_storage_bridge_ports }} exists"
+      ansible.builtin.command: "ip link show {{ proxmox_storage_bridge_ports }}"
+      register: storage_nic_check
+      changed_when: false
+      failed_when: storage_nic_check.rc != 0
+      when: proxmox_storage_bridge_ports is defined
+
+    # -----------------------------------------------------------------
+    # Deploy network configuration
+    # -----------------------------------------------------------------
+    - name: Template /etc/network/interfaces
+      ansible.builtin.template:
+        src: proxmox-interfaces.j2
+        dest: /etc/network/interfaces
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: interfaces_result
+
+    - name: Apply network changes via ifreload
+      ansible.builtin.command: ifreload -a
+      changed_when: true
+      when: interfaces_result.changed

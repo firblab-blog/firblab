@@ -1,0 +1,83 @@
+---
+# =============================================================================
+# Restic Binary Update
+# =============================================================================
+# Lightweight playbook to update the Restic binary on all backup-enabled hosts.
+# CI: SSH key fetch uses retry logic (scripts/ci-setup-ssh.sh)
+# Unlike the full service deploy playbooks (which run the restic-backup role
+# with Vault secrets), this only downloads and installs the binary itself.
+#
+# Triggered by CI when ansible/roles/restic-backup/defaults/main.yml changes
+# (i.e., when Renovate bumps restic_version).
+#
+# No Vault access needed — only downloads from GitHub releases.
+# =============================================================================
+
+- name: Update Restic binary on all backup-enabled hosts
+  hosts: ghost:roundcube:mealie:vaultwarden:actualbudget:patchmon:gitlab:gitlab_runner:authentik:foundryvtt
+  become: true
+  gather_facts: true
+
+  vars:
+    # Import version from the role defaults (single source of truth)
+    restic_version: "{{ lookup('file', '../roles/restic-backup/defaults/main.yml') | from_yaml | json_query('restic_version') }}"
+    restic_binary: "/usr/local/bin/restic"
+
+  tasks:
+    - name: Check current Restic version
+      ansible.builtin.command:
+        cmd: "{{ restic_binary }} version"
+      register: restic_current
+      changed_when: false
+      failed_when: false
+      tags: [install]
+
+    - name: Determine if update is needed
+      ansible.builtin.set_fact:
+        restic_needs_update: >-
+          {{ restic_current.rc != 0 or restic_version not in (restic_current.stdout | default('')) }}
+      tags: [install]
+
+    - name: Determine system architecture
+      ansible.builtin.set_fact:
+        restic_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+      when: restic_needs_update | bool
+      tags: [install]
+
+    - name: Download Restic {{ restic_version }}
+      ansible.builtin.get_url:
+        url: "https://github.com/restic/restic/releases/download/v{{ restic_version }}/restic_{{ restic_version }}_linux_{{ restic_arch }}.bz2"
+        dest: "/tmp/restic-{{ restic_version }}.bz2"
+        mode: "0644"
+      when: restic_needs_update | bool
+      tags: [install]
+
+    - name: Install bzip2 (if needed)
+      ansible.builtin.apt:
+        name: bzip2
+        state: present
+      when: restic_needs_update | bool
+      tags: [install]
+
+    - name: Extract and install Restic binary
+      ansible.builtin.shell:
+        cmd: >-
+          bunzip2 -f /tmp/restic-{{ restic_version }}.bz2 &&
+          mv /tmp/restic-{{ restic_version }} {{ restic_binary }} &&
+          chmod 755 {{ restic_binary }}
+      when: restic_needs_update | bool
+      tags: [install]
+
+    - name: Verify Restic version
+      ansible.builtin.command:
+        cmd: "{{ restic_binary }} version"
+      register: restic_verify
+      changed_when: false
+      tags: [verify]
+
+    - name: Report update status
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: Restic {{ restic_version }}
+          {{ '(updated)' if restic_needs_update | bool else '(already current)' }}
+      tags: [verify]

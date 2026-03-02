@@ -1,0 +1,59 @@
+---
+# =============================================================================
+# GitLab Runner Role - Default Variables
+# =============================================================================
+# Override in group_vars/core_infra.yml or via extra-vars.
+#
+# Runner registration requires a glrt- token (GitLab 16+). The token is
+# pulled from Vault at secret/services/gitlab/runner by the playbook.
+# Manual override is still supported via extra-vars:
+#   -e 'gitlab_runner_token=glrt-xxxxx'
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# GitLab Connection
+# ---------------------------------------------------------------------------
+# URL of the GitLab instance this runner connects to.
+gitlab_runner_url: "https://gitlab.home.example-lab.org"
+
+# Runner authentication token (glrt- prefix, from GitLab UI/API).
+# REQUIRED at runtime — pulled from Vault by gitlab-runner-deploy.yml.
+# Vault path: secret/services/gitlab/runner (key: token)
+# Do NOT hardcode tokens in group_vars or defaults.
+# gitlab_runner_token: ""
+
+# ---------------------------------------------------------------------------
+# Runner Identity
+# ---------------------------------------------------------------------------
+gitlab_runner_description: "firblab-runner-docker"
+gitlab_runner_tags: "docker,linux,firblab"
+
+# ---------------------------------------------------------------------------
+# Executor Configuration
+# ---------------------------------------------------------------------------
+gitlab_runner_executor: "docker"
+gitlab_runner_docker_image: "alpine:latest"
+gitlab_runner_docker_privileged: false
+gitlab_runner_docker_volumes:
+  - "/cache"
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+# Maximum number of concurrent jobs across all runners on this host.
+gitlab_runner_concurrent: 2
+
+# ---------------------------------------------------------------------------
+# Docker Extra Hosts (DNS overrides for executor containers)
+# ---------------------------------------------------------------------------
+# Docker containers don't inherit /etc/hosts from the host. This list
+# injects split-horizon DNS entries so containers can resolve internal
+# FQDNs (e.g., gitlab.home.example-lab.org → Traefik reverse proxy).
+# Format: ["hostname:ip", ...]
+# Computed by a set_fact task in tasks/main.yml from internal_dns_entries.
+gitlab_runner_docker_extra_hosts: []
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+gitlab_runner_config_path: "/etc/gitlab-runner/config.toml"

@@ -1,0 +1,21 @@
+# =============================================================================
+# NetBox Plugin Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# =============================================================================
+
+PLUGINS = [
+    'netbox_topology_views',
+{% if netbox_proxmox_importer_enabled %}
+    'netbox_proxmox_import',
+{% endif %}
+]
+
+PLUGINS_CONFIG = {
+{% if netbox_proxmox_importer_enabled %}
+    'netbox_proxmox_import': {
+        'debug': False,
+        'sync_interval': 300,
+    },
+{% endif %}
+}

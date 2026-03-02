@@ -1,0 +1,18 @@
+# =============================================================================
+# GitLab Runner Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }} ({{ ansible_default_ipv4.address | default(ansible_host) }})
+#
+# Global settings only. The [[runners]] section is created by
+# 'gitlab-runner register' and then patched by Ansible to add
+# Docker executor settings (extra_hosts, etc.) that the register
+# command doesn't support.
+# =============================================================================
+
+concurrent = {{ gitlab_runner_concurrent }}
+check_interval = 0
+shutdown_timeout = 0
+
+[session_server]
+  session_timeout = 1800

@@ -1,0 +1,16 @@
+---
+# =============================================================================
+# TrueNAS — Service Management
+# =============================================================================
+# Ensures services are in the desired state (started/stopped, enabled/disabled).
+# Uses arensb.truenas.service module (wraps midclt call service.update).
+# =============================================================================
+
+- name: "Ensure service {{ item.name }} is {{ item.state }} (enabled={{ item.enabled }})"
+  arensb.truenas.service:
+    name: "{{ item.name }}"
+    state: "{{ item.state }}"
+    enabled: "{{ item.enabled }}"
+  loop: "{{ truenas_services }}"
+  loop_control:
+    label: "{{ item.name }}"

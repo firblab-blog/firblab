@@ -1,0 +1,22 @@
+# =============================================================================
+# ArgoCD Command Parameters — Server Configuration
+# =============================================================================
+# Controls ArgoCD server runtime behavior. The argocd-cmd-params-cm ConfigMap
+# is read by ArgoCD components at startup.
+#
+# server.insecure: Disables ArgoCD's built-in HTTP→HTTPS redirect.
+# Required when a reverse proxy (Traefik) terminates TLS in front of
+# ArgoCD. Without this, ArgoCD detects the incoming connection as HTTP
+# and redirects to HTTPS, creating an infinite redirect loop.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cmd-params-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  server.insecure: "true"

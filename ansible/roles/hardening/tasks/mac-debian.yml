@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# Mandatory Access Control — Debian/Ubuntu (AppArmor)
+# =============================================================================
+
+- name: Ensure AppArmor is enabled and started
+  ansible.builtin.systemd:
+    name: apparmor
+    enabled: true
+    state: started
+  tags:
+    - apparmor
+    - security

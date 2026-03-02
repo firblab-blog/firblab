@@ -1,0 +1,60 @@
+# =============================================================================
+# UniFi Provider Gap-Filling Playbook
+# =============================================================================
+# Manages UniFi controller settings that the Terraform provider cannot handle.
+# Runs locally — no SSH to network gear. Hits the UniFi REST API directly.
+#
+# Triggered by Terraform Layer 00 via terraform_data + local-exec, or
+# can be run standalone for debugging/verification.
+#
+# Prerequisites:
+#   - UniFi controller reachable from this host
+#   - API key (from Vault or -e flag)
+#
+# Usage (standalone):
+#   # With Vault (reads API key automatically):
+#   ansible-playbook playbooks/unifi-config.yml
+#
+#   # With explicit API key:
+#   ansible-playbook playbooks/unifi-config.yml \
+#     -e unifi_api_key="<key>" \
+#     -e '{"unifi_stp_priorities": {"52:54:00:11:22:01": 8192}}'
+#
+#   # From Terraform (Layer 00 ansible.tf):
+#   Automatically called by terraform apply with config passed via extra-vars.
+# =============================================================================
+---
+
+- name: Configure UniFi provider gaps
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  pre_tasks:
+    - name: Read UniFi API key from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/unifi
+      register: vault_unifi_read
+      changed_when: false
+      no_log: true
+      when: unifi_api_key | default('') | length == 0
+      ignore_errors: true
+
+    - name: Set API key from Vault
+      ansible.builtin.set_fact:
+        unifi_api_key: "{{ (vault_unifi_read.stdout | from_json).data.data.api_key }}"
+      no_log: true
+      when:
+        - unifi_api_key | default('') | length == 0
+        - vault_unifi_read is not failed
+
+    - name: Fail if no API key available
+      ansible.builtin.fail:
+        msg: >-
+          No UniFi API key available. Either set VAULT_ADDR/VAULT_TOKEN env vars
+          for Vault auto-lookup, or pass -e unifi_api_key="<key>" explicitly.
+      when: unifi_api_key | default('') | length == 0
+
+  roles:
+    - unifi-config

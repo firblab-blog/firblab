@@ -1,0 +1,20 @@
+---
+# =============================================================================
+# TrueNAS Role — Handlers
+# =============================================================================
+# Service restart handlers. The arensb.truenas.service module handles state
+# directly, so these are only needed if a task explicitly notifies them
+# (e.g., after config changes that require a service bounce).
+# =============================================================================
+
+- name: Restart NFS service
+  arensb.truenas.service:
+    name: nfs
+    state: started
+    enabled: true
+
+- name: Restart SMB service
+  arensb.truenas.service:
+    name: cifs
+    state: started
+    enabled: true

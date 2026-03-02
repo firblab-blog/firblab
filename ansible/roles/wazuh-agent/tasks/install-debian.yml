@@ -1,0 +1,86 @@
+---
+# =============================================================================
+# Wazuh Agent Installation — Debian/Ubuntu
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Repository Setup
+# ---------------------------------------------------------------------------
+- name: Install Wazuh repository prerequisites (Debian)
+  ansible.builtin.apt:
+    name:
+      - curl
+      - apt-transport-https
+      - gnupg
+    state: present
+    update_cache: true
+  tags:
+    - install
+
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags:
+    - install
+
+- name: Download Wazuh GPG key
+  ansible.builtin.get_url:
+    url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+    dest: /tmp/wazuh-gpg-key
+    mode: "0644"
+    force: true
+  tags:
+    - install
+
+- name: Dearmor Wazuh GPG key into keyring
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/wazuh.gpg /tmp/wazuh-gpg-key
+  args:
+    creates: /etc/apt/keyrings/wazuh.gpg
+  tags:
+    - install
+
+- name: Set Wazuh keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/wazuh.gpg
+    mode: "0644"
+  tags:
+    - install
+
+- name: Add Wazuh apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/wazuh.gpg]
+      https://packages.wazuh.com/4.x/apt/ stable main
+    state: present
+    filename: wazuh
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install Wazuh Agent
+# ---------------------------------------------------------------------------
+- name: Install wazuh-agent package (Debian)
+  ansible.builtin.apt:
+    name: wazuh-agent
+    state: present
+  environment:
+    WAZUH_MANAGER: "{{ wazuh_manager_address }}"
+    WAZUH_AGENT_NAME: "{{ inventory_hostname }}"
+    WAZUH_REGISTRATION_PASSWORD: "{{ wazuh_registration_password | default('') }}"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Remove temporary GPG key file
+  ansible.builtin.file:
+    path: /tmp/wazuh-gpg-key
+    state: absent
+  tags:
+    - install
+    - cleanup

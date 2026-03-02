@@ -1,0 +1,61 @@
+# ExternalSecret: Alertmanager config with Gotify webhook token from Vault
+# Syncs Vault path secret/k8s/alertmanager → K8s Secret alertmanager-config
+# in the monitoring namespace. The Secret contains the full alertmanager.yaml
+# config with the token interpolated, consumed via alertmanagerSpec.configSecret.
+#
+# Vault path: secret/k8s/alertmanager
+# Required key: secret (the Gotify app token)
+#
+# To populate:
+#   vault kv put secret/k8s/alertmanager secret=<gotify-app-token>
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: alertmanager-gotify
+  namespace: monitoring
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: alertmanager-config
+    creationPolicy: Owner
+    template:
+      data:
+        alertmanager.yaml: |
+          global:
+            resolve_timeout: 5m
+          route:
+            group_by:
+              - alertname
+              - namespace
+            group_wait: 30s
+            group_interval: 5m
+            repeat_interval: 12h
+            receiver: gotify
+            routes:
+              - matchers:
+                  - name: severity
+                    value: critical
+                receiver: gotify
+                repeat_interval: 1h
+              - matchers:
+                  - name: alertname
+                    value: Watchdog
+                receiver: "null"
+          receivers:
+            - name: "null"
+            - name: gotify
+              webhook_configs:
+                - url: "http://10.8.0.1:8080/message?token={{ .token }}"
+                  send_resolved: true
+                  http_config:
+                    tls_config:
+                      insecure_skip_verify: false
+  data:
+    - secretKey: token
+      remoteRef:
+        key: secret/k8s/alertmanager
+        property: secret

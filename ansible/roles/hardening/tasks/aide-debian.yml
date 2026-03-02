@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# AIDE (Advanced Intrusion Detection) — Debian/Ubuntu
+# =============================================================================
+
+- name: Check if AIDE database exists
+  ansible.builtin.stat:
+    path: /var/lib/aide/aide.db
+  register: aide_db
+  tags:
+    - aide
+    - security
+
+- name: Initialize AIDE database (Debian)
+  ansible.builtin.command:
+    cmd: aideinit
+  when: not aide_db.stat.exists
+  register: aide_init_result
+  changed_when: aide_init_result.rc == 0
+  tags:
+    - aide
+    - security
+
+- name: Move new AIDE database into place
+  ansible.builtin.copy:
+    src: /var/lib/aide/aide.db.new
+    dest: /var/lib/aide/aide.db
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when: not aide_db.stat.exists
+  tags:
+    - aide
+    - security

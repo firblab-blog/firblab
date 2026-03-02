@@ -1,0 +1,246 @@
+---
+# =============================================================================
+# proxmox-disks — Directory Storage Configuration
+# =============================================================================
+# Creates a GPT-partitioned, ext4-formatted directory storage pool on an HDD
+# and registers it as a Proxmox storage pool. Used for backups, ISOs,
+# container templates, and bulk VM storage.
+#
+# Expected variable: current_disk (dict from discover.yml)
+#   { name: "/dev/sdc", pool_name: "hdd-data-0", ... }
+#
+# Full lifecycle (all idempotent):
+#   1. Create GPT partition table + single partition
+#   2. Detect partition device name (/dev/sdb1 vs /dev/nvme0n1p1)
+#   3. Format as ext4 (or configured filesystem)
+#   4. Create mount point
+#   5. Add fstab entry with UUID (persistent across reboots)
+#   6. Mount the filesystem
+#   7. Register as Proxmox storage pool
+#
+# Directory storage supports ALL Proxmox content types (images, backups,
+# ISOs, snippets, templates).
+#
+# NOTE: All shell tasks export PATH to include /usr/sbin where Proxmox/LVM
+# admin tools live. Ansible's become + shell may not inherit the login PATH.
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Step 1: Create GPT partition table and single partition
+# -------------------------------------------------------------------------
+- name: "Dir | Check if {{ current_disk.name }} has a partition table"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      lsblk -npo NAME {{ current_disk.name }} 2>/dev/null | wc -l
+    executable: /bin/bash
+  register: part_check
+  changed_when: false
+  tags: [proxmox-disks, dir]
+
+# Only partition if the disk has no child devices (just the disk itself = 1 line)
+- name: "Dir | Create GPT partition table on {{ current_disk.name }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      parted -s {{ current_disk.name }} mklabel gpt mkpart primary {{ proxmox_dir_filesystem }} 0% 100%
+      # Wait for kernel to register the new partition
+      partprobe {{ current_disk.name }}
+      udevadm settle
+      # Give the kernel a moment to create the device node
+      sleep 1
+    executable: /bin/bash
+  when: part_check.stdout | trim | int <= 1
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 2: Determine partition device name
+# -------------------------------------------------------------------------
+- name: "Dir | Detect partition device name"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      # NVMe uses p1 suffix, SATA/SAS uses 1 suffix
+      if [[ "{{ current_disk.name }}" == /dev/nvme* ]]; then
+        PART="{{ current_disk.name }}p1"
+      else
+        PART="{{ current_disk.name }}1"
+      fi
+      # Verify the partition device actually exists
+      if [ ! -b "$PART" ]; then
+        echo "ERROR: Partition device $PART does not exist" >&2
+        exit 1
+      fi
+      echo "$PART"
+    executable: /bin/bash
+  register: partition_device
+  changed_when: false
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 3: Format filesystem
+# -------------------------------------------------------------------------
+# Use blkid -s TYPE to check for an actual FILESYSTEM (ext4, xfs, etc.),
+# NOT just any signature. After wipe + parted, the partition has a GPT
+# partition entry but no filesystem — blkid -s TYPE returns empty/error
+# in that case, which correctly triggers formatting.
+- name: "Dir | Check if {{ partition_device.stdout | trim }} has a filesystem"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      # Use -p to probe device directly (bypass blkid cache, which goes stale
+      # on large disks after wipe/format). -s TYPE returns only filesystem type.
+      # Returns rc=2 if no filesystem found, rc=0 with output if found.
+      FS_TYPE=$(blkid -p -o value -s TYPE {{ partition_device.stdout | trim }} 2>/dev/null || true)
+      if [ -n "$FS_TYPE" ]; then
+        echo "$FS_TYPE"
+      else
+        echo ""
+      fi
+    executable: /bin/bash
+  register: fs_check
+  changed_when: false
+  failed_when: false
+  tags: [proxmox-disks, dir]
+
+- name: "Dir | Format {{ partition_device.stdout | trim }} as {{ proxmox_dir_filesystem }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      mkfs.{{ proxmox_dir_filesystem }} -L {{ current_disk.pool_name }} {{ partition_device.stdout | trim }}
+    executable: /bin/bash
+  when: fs_check.stdout | trim == ""
+  tags: [proxmox-disks, dir]
+
+# Refresh block device cache after formatting so blkid can find the UUID.
+# Large disks (10TB+) are especially prone to stale cache after mkfs.
+- name: "Dir | Refresh block device cache after format"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      partprobe {{ current_disk.name }}
+      udevadm settle --timeout=10
+    executable: /bin/bash
+  when: fs_check.stdout | trim == ""
+  changed_when: false
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 4: Create mount point
+# -------------------------------------------------------------------------
+- name: "Dir | Create mount point {{ proxmox_dir_mount_base }}/{{ current_disk.pool_name }}"
+  ansible.builtin.file:
+    path: "{{ proxmox_dir_mount_base }}/{{ current_disk.pool_name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 5: Get UUID for fstab entry (stable across reboots)
+# -------------------------------------------------------------------------
+- name: "Dir | Get UUID of {{ partition_device.stdout | trim }}"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      # Use -p to probe device directly (bypass stale blkid cache).
+      # The cache is unreliable after mkfs on large (10TB+) disks.
+      UUID=$(blkid -p -o value -s UUID {{ partition_device.stdout | trim }})
+      if [ -z "$UUID" ]; then
+        echo "ERROR: No UUID found for {{ partition_device.stdout | trim }}. Was it formatted?" >&2
+        exit 1
+      fi
+      echo "$UUID"
+    executable: /bin/bash
+  register: part_uuid
+  changed_when: false
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 6: Mount via fstab (persistent across reboots)
+# -------------------------------------------------------------------------
+# ansible.posix.mount with state=mounted does THREE things:
+#   1. Adds/updates the fstab entry (UUID-based, survives reboots)
+#   2. Creates the mount point if it doesn't exist
+#   3. Mounts the filesystem if not already mounted
+- name: "Dir | Add fstab entry and mount {{ current_disk.pool_name }}"
+  ansible.posix.mount:
+    path: "{{ proxmox_dir_mount_base }}/{{ current_disk.pool_name }}"
+    src: "UUID={{ part_uuid.stdout | trim }}"
+    fstype: "{{ proxmox_dir_filesystem }}"
+    opts: "{{ proxmox_dir_mount_opts }}"
+    state: mounted
+    # fstab entry: dump=0, pass=2 (non-root filesystem check order)
+    dump: "0"
+    passno: "2"
+  tags: [proxmox-disks, dir]
+
+# -------------------------------------------------------------------------
+# Step 7: Register in Proxmox
+# -------------------------------------------------------------------------
+- name: "Dir | Check if Proxmox storage '{{ current_disk.pool_name }}' exists"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvesm status 2>/dev/null | grep -qP '^\s*{{ current_disk.pool_name }}\s' \
+        && echo "exists" || echo "absent"
+    executable: /bin/bash
+  register: pvesm_check
+  changed_when: false
+  tags: [proxmox-disks, dir]
+
+- name: "Dir | Register '{{ current_disk.pool_name }}' as Proxmox directory storage"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      pvesm add dir {{ current_disk.pool_name }} \
+        --path {{ proxmox_dir_mount_base }}/{{ current_disk.pool_name }} \
+        --content {{ proxmox_dir_content }} \
+        --nodes {{ inventory_hostname }}
+    executable: /bin/bash
+  when: pvesm_check.stdout | trim == "absent"
+  tags: [proxmox-disks, dir]
+
+# If the pool already exists (created by another node in a cluster), ensure
+# this node is in the 'nodes' list so it can access its own local storage.
+- name: "Dir | Ensure {{ inventory_hostname }} is in nodes list for '{{ current_disk.pool_name }}'"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      CURRENT_NODES=$(pvesh get /storage/{{ current_disk.pool_name }} --output-format json 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('nodes',''))" 2>/dev/null || echo "")
+      if [ -z "$CURRENT_NODES" ]; then
+        pvesm set {{ current_disk.pool_name }} --nodes {{ inventory_hostname }}
+        echo "changed: set nodes to {{ inventory_hostname }}"
+      elif echo "$CURRENT_NODES" | grep -q '{{ inventory_hostname }}'; then
+        echo "ok: {{ inventory_hostname }} already in nodes list ($CURRENT_NODES)"
+      else
+        pvesm set {{ current_disk.pool_name }} --nodes "${CURRENT_NODES},{{ inventory_hostname }}"
+        echo "changed: added {{ inventory_hostname }} to nodes list (was: $CURRENT_NODES)"
+      fi
+    executable: /bin/bash
+  register: nodes_update
+  changed_when: "'changed:' in nodes_update.stdout"
+  when: pvesm_check.stdout | trim == "exists"
+  tags: [proxmox-disks, dir]
+
+- name: "Dir | Storage '{{ current_disk.pool_name }}' configured successfully"
+  ansible.builtin.debug:
+    msg: >-
+      Directory storage '{{ current_disk.pool_name }}' created on
+      {{ current_disk.name }} ({{ current_disk.size_human }}).
+      Partition: {{ partition_device.stdout | trim }}
+      UUID: {{ part_uuid.stdout | trim }}
+      Mounted at: {{ proxmox_dir_mount_base }}/{{ current_disk.pool_name }}
+      fstab entry: YES (UUID-based, persistent)
+      Content types: {{ proxmox_dir_content }}
+  tags: [proxmox-disks, dir]

@@ -1,0 +1,223 @@
+---
+# =============================================================================
+# FoundryVTT Deployment Playbook
+# =============================================================================
+# Deploys FoundryVTT virtual tabletop on a VM (not LXC). Installs Node.js,
+# extracts the FoundryVTT application, and configures a systemd service.
+#
+# Prerequisites:
+#   - FoundryVTT VM provisioned by Terraform Layer 05 (cloned from Packer template)
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - FoundryVTT download URL (timed URL from foundryvtt.com account)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/foundryvtt-deploy.yml \
+#     -e "foundryvtt_download_url=https://releases.foundryvtt.com/releases/..."
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags install     # Only FoundryVTT installation
+#   ansible-playbook ... --tags service     # Only systemd service config
+#   ansible-playbook ... --tags verify      # Only health checks
+#   ansible-playbook ... --tags backup      # Only backup automation
+# =============================================================================
+
+- name: Deploy FoundryVTT virtual tabletop
+  hosts: foundryvtt
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying FoundryVTT on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    # FoundryVTT configuration
+    foundryvtt_port: 30000
+    foundryvtt_node_major: 22
+
+    # Download URL — MUST be provided via -e flag (timed URL from foundryvtt.com)
+    # foundryvtt_download_url: "https://releases.foundryvtt.com/releases/..."
+
+    # Backup configuration (S3 off-site for campaign data)
+    # FoundryVTT is a systemd service (not Docker) — uses systemd_service field
+    backup_enabled: true
+    backup_cron_hour: "5"
+    backup_cron_minute: "0"
+    backup_services:
+      - name: foundryvtt
+        systemd_service: foundryvtt
+        paths:
+          - /opt/foundryvtt/data
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    # CRITICAL: Active campaign data — irreplaceable player progress
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: foundryvtt
+        stop_systemd: foundryvtt
+        paths:
+          - /opt/foundryvtt/data
+        tags: ["foundryvtt", "campaigns"]
+        cron_hour: "1"
+        cron_minute: "40"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (auditd, AIDE, sysctl, SSH hardening, file perms)
+    # Applied because FoundryVTT is a VM with its own kernel — unlike LXC
+    # containers where these controls are meaningless.
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+    # FoundryVTT (Node.js, systemd service, UFW rule)
+    - role: foundryvtt
+      tags:
+        - foundryvtt
+        - install
+        - service
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for FoundryVTT to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ foundryvtt_port }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: foundryvtt_health
+      retries: 15
+      delay: 10
+      until: foundryvtt_health.status is defined and foundryvtt_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if FoundryVTT never became accessible
+      ansible.builtin.fail:
+        msg: "FoundryVTT failed to respond after 150 seconds. Last status: {{ foundryvtt_health.status | default('connection refused') }}"
+      when: foundryvtt_health.status is not defined or foundryvtt_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "FoundryVTT Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ foundryvtt_port }}/"
+          - "Port: {{ foundryvtt_port }}"
+          - ""
+          - "Management:"
+          - "  sudo systemctl status foundryvtt"
+          - "  sudo journalctl -u foundryvtt -f"
+          - ""
+          - "Data: /opt/foundryvtt/data"
+          - "App: /opt/foundryvtt/app"
+          - "=========================================="
+      tags:
+        - verify

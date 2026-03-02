@@ -1,0 +1,40 @@
+---
+# =============================================================================
+# DMZ Services Configuration
+# =============================================================================
+# Group variables for DMZ services on VLAN 30 (10.0.30.0/24).
+# Currently only the WireGuard gateway LXC (lab-03).
+#
+# WireGuard LXC is a lightweight tunnel endpoint — no Docker, no
+# application ports. It NAT/masquerades tunnel traffic toward the
+# Services VLAN (20) so homelab services see source IP 10.0.30.2.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# WireGuard only needs its tunnel port open. The tunnel itself is
+# outbound from the LXC to Hetzner (port 51820 on the remote end),
+# so no inbound WireGuard port is needed — the LXC is the client.
+# SSH is handled by the common role's base firewall rules.
+
+dmz_services_firewall_ports: []
+
+dmz_services_firewall_sources:
+  - "{{ management_network }}"
+  - "{{ lan_network }}"
+  - "{{ dmz_network }}"           # VLAN 30 — intra-VLAN
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ dmz_services_firewall_ports }}"
+firewall_additional_sources: "{{ dmz_services_firewall_sources }}"
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+# node_exporter IS enabled — Prometheus (Services VLAN) can reach DMZ via
+# the unrestricted services_to_dmz zone policy.
+# Promtail is DISABLED — the return path (dmz_to_services TCP/31100) may be
+# blocked. Enable once a dmz_to_services_monitoring zone policy is added.
+monitoring_host_group: "dmz"
+monitoring_promtail_enabled: false

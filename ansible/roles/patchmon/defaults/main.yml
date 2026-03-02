@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# PatchMon Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# PatchMon images — pinned for reproducibility
+# https://github.com/PatchMon/PatchMon/releases
+patchmon_backend_image: "ghcr.io/patchmon/patchmon-backend:1.4.2"
+patchmon_frontend_image: "ghcr.io/patchmon/patchmon-frontend:1.4.2"
+
+# Port exposed on the host (frontend nginx → container port 3000)
+patchmon_port: 3000
+
+# Install directory
+patchmon_install_dir: /opt/patchmon
+
+# PostgreSQL
+patchmon_pg_image: "postgres:17-alpine"
+
+# Redis
+patchmon_redis_image: "redis:7-alpine"
+
+# Server access — how agents and browsers reach PatchMon
+patchmon_server_protocol: http
+patchmon_server_port: 3000
+
+# Logging
+patchmon_log_level: info
+
+# Timezone (passed to container TZ env var)
+patchmon_timezone: "America/Chicago"
+
+# OIDC Single Sign-On (Authentik)
+# Credentials are read from Vault by the deploy playbook and override these defaults.
+patchmon_oidc_enabled: false
+patchmon_oidc_client_id: ""
+patchmon_oidc_client_secret: ""
+patchmon_oidc_issuer_url: "http://10.0.10.16:9000/application/o/patchmon/"
+patchmon_oidc_redirect_uri: "http://10.0.20.15:3000/api/v1/auth/oidc/callback"
+patchmon_oidc_scopes: "openid email profile groups"
+patchmon_oidc_auto_create_users: true
+patchmon_oidc_default_role: "user"
+patchmon_oidc_disable_local_auth: false
+patchmon_oidc_button_text: "Login with Authentik"
+patchmon_oidc_admin_group: "authentik-admins"
+patchmon_oidc_user_group: "authentik-users"
+patchmon_oidc_sync_roles: true

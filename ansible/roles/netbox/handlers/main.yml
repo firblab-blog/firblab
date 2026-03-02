@@ -1,0 +1,11 @@
+---
+# =============================================================================
+# NetBox Role Handlers
+# =============================================================================
+
+# No --wait: the Ansible uri health check handles readiness polling.
+# Docker Compose --wait races against start_period on slow hardware.
+- name: Restart netbox
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ netbox_base_path }}"

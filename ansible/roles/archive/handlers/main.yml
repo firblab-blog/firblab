@@ -1,0 +1,39 @@
+---
+# =============================================================================
+# Archive Appliance Role — Handlers
+# =============================================================================
+# IMPORTANT: Do NOT use 'docker compose down' here. Tearing down containers
+# during MariaDB operation can corrupt the transaction coordinator log
+# (tc.log), causing a restart loop. Instead:
+#   1. Gracefully stop MariaDB containers first (SIGTERM → clean shutdown)
+#   2. Remove any corrupt tc.log files (self-healing)
+#   3. 'up -d --remove-orphans' recreates only changed containers
+# =============================================================================
+
+- name: Restart archive
+  ansible.builtin.shell:
+    cmd: |
+      # Gracefully stop MariaDB containers before recreating anything.
+      # docker compose stop sends SIGTERM and waits for clean shutdown,
+      # preventing tc.log corruption that 'down' or hard kills cause.
+      docker compose stop bookstack-db wallabag-db 2>/dev/null || true
+      sleep 2
+
+      # Self-heal: remove corrupt tc.log if present (MariaDB will
+      # regenerate it on clean startup). This recovers from any prior
+      # crash without manual intervention.
+      for db_dir in "{{ archive_data_dir }}/bookstack/db" "{{ archive_data_dir }}/wallabag/db"; do
+        if [ -f "${db_dir}/tc.log" ]; then
+          rm -f "${db_dir}/tc.log"
+          echo "Removed stale tc.log from ${db_dir}"
+        fi
+      done
+
+      # Now bring everything up. 'up -d' recreates only containers whose
+      # config changed; --wait blocks until health checks pass.
+      docker compose up -d --remove-orphans --wait --wait-timeout 180
+    chdir: "{{ archive_install_dir }}"
+  register: archive_handler_result
+  retries: 2
+  delay: 15
+  until: archive_handler_result.rc == 0

@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# Vault — macOS Service (LaunchDaemon)
+# =============================================================================
+# Sets up Vault as a LaunchDaemon that starts at boot, runs as _vault user,
+# and auto-restarts on failure. No user login required.
+#
+# Pattern follows: ansible/roles/macos-pf/ (pf firewall LaunchDaemon)
+# =============================================================================
+
+- name: Template Vault LaunchDaemon plist
+  ansible.builtin.template:
+    src: vault.launchdaemon.plist.j2
+    dest: /Library/LaunchDaemons/com.example-lab.vault.plist
+    owner: root
+    group: wheel
+    mode: "0644"
+  notify:
+    - Unload vault launch daemon
+    - Load vault launch daemon
+  tags:
+    - service
+
+- name: Check if Vault LaunchDaemon is loaded
+  ansible.builtin.command: launchctl print system/com.example-lab.vault
+  register: vault_launchd_status
+  changed_when: false
+  failed_when: false
+  tags:
+    - service
+
+- name: Load Vault LaunchDaemon
+  ansible.builtin.command: launchctl bootstrap system /Library/LaunchDaemons/com.example-lab.vault.plist
+  when: vault_launchd_status.rc != 0
+  tags:
+    - service
+
+- name: Ensure Vault is running
+  ansible.builtin.command: launchctl kickstart -k system/com.example-lab.vault
+  changed_when: false
+  failed_when: false
+  tags:
+    - service

@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# PatchMon Role Handlers
+# =============================================================================
+
+- name: Restart patchmon
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ patchmon_install_dir }}"

@@ -1,0 +1,260 @@
+---
+# =============================================================================
+# Plex Role - Plex Media Server Installation
+# =============================================================================
+# Installs Plex Media Server from the official repository, creates media
+# directories, optionally mounts a media disk, and configures UFW.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+- name: Install Plex prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - gnupg
+      - apt-transport-https
+      - ca-certificates
+    state: present
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Plex Repository
+# ---------------------------------------------------------------------------
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags:
+    - install
+
+- name: Download Plex GPG key
+  ansible.builtin.get_url:
+    url: https://downloads.plex.tv/plex-keys/PlexSign.key
+    dest: /tmp/plex-gpg-key
+    mode: "0644"
+    force: true
+  tags:
+    - install
+
+- name: Dearmor Plex GPG key into keyring
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/plex-archive-keyring.gpg /tmp/plex-gpg-key
+  args:
+    creates: /etc/apt/keyrings/plex-archive-keyring.gpg
+  tags:
+    - install
+
+- name: Set Plex keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/plex-archive-keyring.gpg
+    mode: "0644"
+  tags:
+    - install
+
+- name: Add Plex apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/plex-archive-keyring.gpg]
+      https://downloads.plex.tv/repo/deb public main
+    state: present
+    filename: plex
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install Plex Media Server
+# ---------------------------------------------------------------------------
+- name: Install plexmediaserver package
+  ansible.builtin.apt:
+    name: plexmediaserver
+    state: present
+  notify: Restart plex
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Media Directories
+# ---------------------------------------------------------------------------
+- name: Create media root directory
+  ansible.builtin.file:
+    path: "{{ plex_media_root | default('/mnt/media') }}"
+    state: directory
+    owner: "{{ plex_user | default('plex') }}"
+    group: "{{ plex_group | default('plex') }}"
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+- name: Create media subdirectories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ plex_user | default('plex') }}"
+    group: "{{ plex_group | default('plex') }}"
+    mode: "0755"
+  loop: "{{ plex_media_directories | default(['/mnt/media/movies', '/mnt/media/tv', '/mnt/media/music', '/mnt/media/photos']) }}"
+  tags:
+    - configure
+    - directories
+
+- name: Create transcoder temp directory
+  ansible.builtin.file:
+    path: "{{ plex_transcoder_temp_dir | default('/tmp/plex_transcoder') }}"
+    state: directory
+    owner: "{{ plex_user | default('plex') }}"
+    group: "{{ plex_group | default('plex') }}"
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Media Disk (optional)
+# ---------------------------------------------------------------------------
+- name: Check if media disk exists
+  ansible.builtin.stat:
+    path: "{{ plex_media_disk | default('/dev/sdb') }}"
+  register: plex_media_disk_stat
+  when: plex_mount_media_disk | default(false) | bool
+  tags:
+    - storage
+
+- name: Create filesystem on media disk
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ plex_media_disk | default('/dev/sdb') }}"
+  when:
+    - plex_mount_media_disk | default(false) | bool
+    - plex_media_disk_stat.stat.exists | default(false)
+  tags:
+    - storage
+
+- name: Mount media disk
+  ansible.posix.mount:
+    path: "{{ plex_media_root | default('/mnt/media') }}"
+    src: "{{ plex_media_disk | default('/dev/sdb') }}"
+    fstype: ext4
+    opts: defaults,noatime
+    state: mounted
+  when:
+    - plex_mount_media_disk | default(false) | bool
+    - plex_media_disk_stat.stat.exists | default(false)
+  tags:
+    - storage
+
+# ---------------------------------------------------------------------------
+# Plex Configuration
+# ---------------------------------------------------------------------------
+- name: Ensure Plex config directory exists
+  ansible.builtin.file:
+    path: "{{ plex_config_dir | default('/var/lib/plexmediaserver/Library/Application Support/Plex Media Server') }}"
+    state: directory
+    owner: "{{ plex_user | default('plex') }}"
+    group: "{{ plex_group | default('plex') }}"
+    mode: "0755"
+  tags:
+    - configure
+
+- name: Template Plex preferences
+  ansible.builtin.template:
+    src: Preferences.xml.j2
+    dest: "{{ plex_config_dir | default('/var/lib/plexmediaserver/Library/Application Support/Plex Media Server') }}/Preferences.xml"
+    owner: "{{ plex_user | default('plex') }}"
+    group: "{{ plex_group | default('plex') }}"
+    mode: "0600"
+    backup: true
+  notify: Restart plex
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
+- name: Configure UFW for Plex - main TCP port
+  community.general.ufw:
+    rule: allow
+    port: "{{ plex_port | default('32400') }}"
+    proto: tcp
+    comment: "Plex Media Server - main"
+  tags:
+    - firewall
+
+- name: Configure UFW for Plex - additional TCP ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: tcp
+    comment: "Plex - {{ item.desc }}"
+  loop:
+    - { port: "3005", desc: "Plex Companion" }
+    - { port: "8324", desc: "Roku via Companion" }
+    - { port: "32469", desc: "DLNA Server" }
+  tags:
+    - firewall
+
+- name: Configure UFW for Plex - UDP ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: udp
+    comment: "Plex - {{ item.desc }}"
+  loop:
+    - { port: "1900", desc: "DLNA discovery" }
+    - { port: "5353", desc: "Bonjour/Avahi" }
+    - { port: "32410", desc: "GDM discovery" }
+    - { port: "32412", desc: "GDM discovery" }
+    - { port: "32413", desc: "GDM discovery" }
+    - { port: "32414", desc: "GDM discovery" }
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Enable and Start Service
+# ---------------------------------------------------------------------------
+- name: Enable and start Plex Media Server
+  ansible.builtin.systemd:
+    name: plexmediaserver
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Plex to be accessible
+  ansible.builtin.wait_for:
+    port: "{{ plex_port | default('32400') }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 10
+    timeout: 120
+  tags:
+    - verify
+
+- name: Display Plex access information
+  ansible.builtin.debug:
+    msg: >-
+      Plex Media Server is running.
+      Access at http://{{ ansible_default_ipv4.address }}:{{ plex_port | default('32400') }}/web
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Remove temporary GPG key file
+  ansible.builtin.file:
+    path: /tmp/plex-gpg-key
+    state: absent
+  tags:
+    - install
+    - cleanup

@@ -1,0 +1,195 @@
+---
+# =============================================================================
+# Global Variables - firblab Infrastructure
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SSH Connection
+# ---------------------------------------------------------------------------
+# Prevent ssh-agent from offering all loaded keys — fail2ban bans after
+# too many auth failures. Only offer the host-specific key defined in
+# ansible_ssh_private_key_file for each host.
+ansible_ssh_extra_args: "-o IdentitiesOnly=yes"
+
+# ---------------------------------------------------------------------------
+# Domain and DNS
+# ---------------------------------------------------------------------------
+domain_name: example-lab.local
+dns_servers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# ---------------------------------------------------------------------------
+# Internal DNS (Split-Horizon)
+# ---------------------------------------------------------------------------
+# Public DNS resolves *.home.example-lab.org to the Hetzner public IP, but
+# internal hosts must reach these via the Traefik standalone reverse proxy
+# (10.0.10.17) which terminates TLS with valid Let's Encrypt certs.
+# Without this, OIDC discovery (which mandates HTTPS) fails because
+# backends hit the public IP and get a self-signed cert or wrong server.
+# Managed by the common role (/etc/hosts entries).
+internal_dns_entries:
+  - ip: "10.0.10.17"
+    hostnames:
+      - auth.home.example-lab.org
+      - gitlab.home.example-lab.org
+      - patchmon.home.example-lab.org
+      - backrest.home.example-lab.org
+      - openwebui.home.example-lab.org
+      - argocd.home.example-lab.org
+      - netbox.home.example-lab.org
+      - vaultwarden.home.example-lab.org
+      - status.home.example-lab.org
+
+# ---------------------------------------------------------------------------
+# Time Configuration
+# ---------------------------------------------------------------------------
+timezone: America/New_York
+ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+  - 3.pool.ntp.org
+
+# ---------------------------------------------------------------------------
+# Network Configuration
+# ---------------------------------------------------------------------------
+management_vlan_id: 10
+management_subnet: 10.0.10.0/24
+workload_vlan_id: 50
+workload_subnet: 10.0.50.0/24
+
+# Management network range allowed for SSH access
+management_network: 10.0.10.0/24
+
+# Workstation LAN (Default VLAN — where the MacBook Pro admin box lives)
+# NOTE: gw-01 Default LAN subnet is 10.0.4.0/24 (not the typical 192.168.1.0/24)
+lan_network: 10.0.4.0/24
+
+# Services VLAN 20 (RKE2 cluster, standalone services)
+services_network: 10.0.20.0/24
+
+# DMZ VLAN 30 (WireGuard gateway, internet-facing services)
+dmz_network: 10.0.30.0/24
+
+# IoT VLAN 60 (Home Assistant, IoT devices)
+iot_network: 10.0.60.0/24
+
+# ---------------------------------------------------------------------------
+# Restic Backup Infrastructure
+# ---------------------------------------------------------------------------
+# IP and port of the Restic REST server (backup LXC on lab-01,
+# Management VLAN 10). Used by all service deploy playbooks to construct
+# the restic_repo_url for backup clients.
+restic_server_ip: "10.0.10.18"
+restic_server_port: 8500
+
+# ---------------------------------------------------------------------------
+# HashiCorp Vault
+# ---------------------------------------------------------------------------
+vault_addr: "https://10.0.10.10:8200"
+vault_skip_verify: false
+
+# Vault lookup plugin configuration (community.hashi_vault)
+# Used by playbooks that need to retrieve secrets at runtime.
+# Install collection: ansible-galaxy collection install -r collections/requirements.yml
+vault_lookup_addr: "https://10.0.10.10:8200"
+vault_lookup_ca_cert: "~/.lab/tls/ca/ca.pem"
+
+# community.hashi_vault lookup plugin connection vars (ansible_hashi_vault_* prefix)
+# The plugin auto-discovers these. Token comes from VAULT_TOKEN env var (not stored in code).
+ansible_hashi_vault_url: "https://10.0.10.10:8200"
+ansible_hashi_vault_ca_cert: "~/.lab/tls/ca/ca.pem"
+ansible_hashi_vault_auth_method: "token"
+
+# ---------------------------------------------------------------------------
+# Common Packages (installed on all managed Linux hosts)
+# ---------------------------------------------------------------------------
+# Split by OS family — roles combine shared + family-specific lists.
+common_packages_shared:
+  - curl
+  - wget
+  - jq
+  - unzip
+  - htop
+  - vim
+  - gnupg
+  - ca-certificates
+  - chrony
+  - fail2ban
+
+# Debian/Ubuntu-specific packages
+# Note: apt-transport-https is built into apt since Debian 10+ but kept
+# for compatibility. software-properties-common is Ubuntu-only (not in
+# Proxmox repos) so it's excluded.
+common_packages_debian:
+  - apt-transport-https
+
+# RHEL/Rocky-specific packages
+common_packages_redhat:
+  - dnf-utils
+  - policycoreutils-python-utils
+
+# ---------------------------------------------------------------------------
+# SSH Configuration
+# ---------------------------------------------------------------------------
+ssh_port: 22
+ssh_permit_root_login: "prohibit-password"
+ssh_password_authentication: "no"
+ssh_pubkey_authentication: "yes"
+ssh_max_auth_tries: 3
+ssh_allow_agent_forwarding: "no"
+ssh_x11_forwarding: "no"
+ssh_allow_tcp_forwarding: "no"
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+wazuh_enabled: true
+wazuh_manager_ip: "10.0.20.221"
+
+# ---------------------------------------------------------------------------
+# Ansible behavior
+# ---------------------------------------------------------------------------
+ansible_python_interpreter: /usr/bin/python3
+
+# ---------------------------------------------------------------------------
+# Monitoring — node_exporter + Promtail
+# ---------------------------------------------------------------------------
+# node_exporter: Prometheus metrics agent (port 9100)
+#   Installed on all Linux hosts via ansible/roles/common (tasks/node-exporter.yml).
+#   Prometheus scrapes via additionalScrapeConfigs in kube-prometheus-stack values.
+#
+# Promtail: Loki log shipping agent
+#   Ships system logs to Loki on K3s RPi5 cluster (10.0.20.201:3100, MetalLB VIP).
+#   Migrated from RKE2 NodePort (10.0.20.40:31100) on 2026-02-28.
+#   Network requirement: host must reach 10.0.20.201:3100 (Services VLAN):
+#     - Management VLAN: yes (services_to_mgmt ALLOW)
+#     - Services VLAN: yes (same VLAN)
+#     - LAN: yes (services_to_lan ALLOW)
+#     - DMZ/Security: restricted — promtail disabled for wireguard + vault-2
+
+# node_exporter version (https://github.com/prometheus/node_exporter/releases)
+# renovate: datasource=github-releases depName=prometheus/node_exporter
+monitoring_node_exporter_version: "1.9.0"
+
+# Promtail version — must be compatible with Loki version in loki-stack chart
+# loki-stack 2.10.x ships Loki 2.9.3; Promtail 2.9.x is the matching version.
+# Promtail 3.x is also push-API compatible with Loki 2.9.3.
+# renovate: datasource=github-releases depName=grafana/loki
+monitoring_promtail_version: "2.9.10"
+
+# Loki push URL — K3s RPi5 cluster MetalLB VIP (migrated from RKE2 NodePort)
+monitoring_loki_push_url: "http://10.0.20.201:3100/loki/api/v1/push"
+
+# Source networks that Prometheus scrapes from (node_exporter UFW allow rule)
+# Must include the Services VLAN where Prometheus lives.
+monitoring_scrape_sources:
+  - "10.0.20.0/24"   # Services VLAN (Prometheus on RKE2 cluster)
+  - "10.0.10.0/24"   # Management VLAN (admin access / debugging)
+  - "10.0.4.0/24"    # Default LAN (workstation access)
+
+# Host group label for Promtail — override in group_vars to set per-group
+# Meaningful values: proxmox, vault, core-infra, standalone-services, bare-metal
+monitoring_host_group: "ungrouped"
+

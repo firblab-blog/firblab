@@ -1,0 +1,69 @@
+# =============================================================================
+# Vault Unseal Instance systemd Service Unit
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# =============================================================================
+
+[Unit]
+Description=HashiCorp Vault Unseal Instance - Transit auto-unseal provider
+Documentation=https://developer.hashicorp.com/vault/docs
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty=/opt/unseal-vault/config/vault-unseal.hcl
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=notify
+User={{ vault_unseal_user | default('unseal-vault') }}
+Group={{ vault_unseal_group | default('unseal-vault') }}
+ExecStart=/opt/unseal-vault/vault server -config=/opt/unseal-vault/config/vault-unseal.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# ---------------------------------------------------------------------------
+# Security Hardening
+# ---------------------------------------------------------------------------
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ReadWritePaths=/opt/unseal-vault/data
+
+# Capability restrictions
+CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+
+# Restrict system calls
+SeccompProfile=@system-service
+SystemCallFilter=~@mount @reboot @swap @obsolete @clock @cpu-emulation @debug @module @raw-io
+
+# Restrict namespaces
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# ---------------------------------------------------------------------------
+# Resource Limits
+# ---------------------------------------------------------------------------
+LimitNOFILE=65536
+LimitNPROC=65536
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vault-unseal
+
+[Install]
+WantedBy=multi-user.target

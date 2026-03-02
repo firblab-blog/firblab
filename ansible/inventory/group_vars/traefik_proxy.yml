@@ -1,0 +1,39 @@
+---
+# =============================================================================
+# Traefik Reverse Proxy Configuration
+# =============================================================================
+# Group variables for the standalone Traefik proxy on Management VLAN 10:
+#   - Traefik Proxy (LXC) : Reverse proxy — ports 80/443 — lab-04
+#
+# On Management VLAN 10 (10.0.10.0/24).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# HTTP and HTTPS for all proxied traffic. Dashboard (8888) is bound to
+# localhost inside Docker — no UFW rule needed.
+traefik_proxy_firewall_ports:
+  - { port: "80", proto: tcp, comment: "Traefik HTTP (redirects to HTTPS)" }
+  - { port: "443", proto: tcp, comment: "Traefik HTTPS" }
+
+traefik_proxy_firewall_sources:
+  - "{{ management_network }}"
+  - "{{ lan_network }}"
+  - "{{ services_network }}"      # VLAN 20 — services that may need to reach proxy
+  - "{{ dmz_network }}"           # VLAN 30 — WireGuard tunnel traffic
+  - "{{ iot_network }}"           # VLAN 60 — Home Assistant Git Pull + proxied services
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ traefik_proxy_firewall_ports }}"
+firewall_additional_sources: "{{ traefik_proxy_firewall_sources }}"
+
+# Traefik uses network_mode: host (ports bind directly to LXC network stack,
+# traffic hits INPUT chain where UFW rules work). No FORWARD chain fix needed.
+firewall_docker_forwarding: false
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "traefik"
+monitoring_promtail_docker_logs: true   # Ship Traefik Docker container logs to Loki

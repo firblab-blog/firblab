@@ -1,0 +1,39 @@
+{
+    "device.node_id": "{{ honeypot_opencanary_node_id }}",
+    "server.ip": "0.0.0.0",
+    "ip.ignorelist": [],
+    "logtype.engine.ignorelist": [],
+    "ftp.enabled": true,
+    "ftp.port": {{ honeypot_opencanary_ftp_port }},
+    "ftp.banner": "{{ honeypot_opencanary_ftp_banner }}",
+    "mysql.enabled": false,
+    "mysql.port": {{ honeypot_opencanary_mysql_port }},
+    "mysql.banner": "{{ honeypot_opencanary_mysql_banner }}",
+    "rdp.enabled": true,
+    "rdp.port": {{ honeypot_opencanary_rdp_port }},
+    "vnc.enabled": true,
+    "vnc.port": {{ honeypot_opencanary_vnc_port }},
+    "redis.enabled": true,
+    "redis.port": {{ honeypot_opencanary_redis_port }},
+    "ssh.enabled": false,
+    "telnet.enabled": false,
+    "http.enabled": false,
+    "logger": {
+        "class": "PyLogger",
+        "kwargs": {
+            "formatters": {
+                "plain": {
+                    "format": "%(message)s"
+                }
+            },
+            "handlers": {
+                "file": {
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "filename": "/var/log/opencanary/opencanary.json",
+                    "maxBytes": 52428800,
+                    "backupCount": 5
+                }
+            }
+        }
+    }
+}

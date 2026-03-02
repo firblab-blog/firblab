@@ -1,0 +1,138 @@
+---
+# =============================================================================
+# macOS Host Bootstrap Playbook
+# =============================================================================
+# Hardens and configures macOS physical hosts (Mac Mini M4) for use as
+# infrastructure nodes in the firb-lab. Includes SSH hardening, pf firewall,
+# and Homebrew package management. Vault runs natively as a LaunchDaemon.
+#
+# Prerequisites:
+#   - SSH access to the macOS host (key-based, user admin)
+#   - Xcode Command Line Tools installed (xcode-select --install)
+#   - Homebrew installed (https://brew.sh)
+#
+# Usage:
+#   ansible-playbook playbooks/macos-bootstrap.yml
+#   ansible-playbook playbooks/macos-bootstrap.yml --check   # dry run
+#   ansible-playbook playbooks/macos-bootstrap.yml --tags ssh
+#   ansible-playbook playbooks/macos-bootstrap.yml --tags firewall
+# =============================================================================
+
+- name: Bootstrap macOS Host
+  hosts: macos_hosts
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    # -------------------------------------------------------------------------
+    # Validate prerequisites
+    # -------------------------------------------------------------------------
+    - name: Verify macOS host
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "Darwin"
+        fail_msg: "This playbook only runs on macOS hosts (got {{ ansible_facts['os_family'] }})"
+        success_msg: "Running on macOS {{ ansible_facts['distribution_version'] }}"
+      tags:
+        - always
+
+    - name: Check Xcode Command Line Tools
+      ansible.builtin.stat:
+        path: /Library/Developer/CommandLineTools/usr/bin/git
+      register: xcode_check
+      tags:
+        - always
+
+    - name: Warn if Xcode Command Line Tools missing
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Xcode Command Line Tools not found.
+          Run 'xcode-select --install' on the Mac Mini before proceeding.
+      when: not xcode_check.stat.exists
+      tags:
+        - always
+
+    - name: Display bootstrap info
+      ansible.builtin.debug:
+        msg: >
+          Bootstrapping {{ inventory_hostname }} ({{ ansible_host }})
+          — macOS {{ ansible_facts['distribution_version'] }},
+          arch={{ ansible_facts['architecture'] }}
+      tags:
+        - always
+
+  roles:
+    # 1. SSH hardening — key-only auth, AllowUsers, no root login
+    - role: macos-ssh
+      tags:
+        - ssh
+        - security
+
+    # 2. Homebrew — install jq, htop, and any additional packages
+    - role: macos-homebrew
+      tags:
+        - homebrew
+        - packages
+
+    # 3. pf firewall — SSH from mgmt VLAN, Vault ports from mgmt+security
+    - role: macos-pf
+      tags:
+        - firewall
+        - pf
+        - security
+
+    # 4. launchd services — generic launchd jobs
+    - role: macos-launchd
+      tags:
+        - launchd
+        - services
+
+  post_tasks:
+    # -------------------------------------------------------------------------
+    # macOS System Settings
+    # -------------------------------------------------------------------------
+    - name: Enable automatic restart after power failure
+      ansible.builtin.command: >
+        pmset -a autorestart 1
+      changed_when: true
+      tags:
+        - system
+        - power
+
+    - name: Set system to restart on freeze
+      ansible.builtin.command: >
+        systemsetup -setrestartfreeze on
+      register: restart_freeze
+      changed_when: "'on' not in restart_freeze.stdout | default('')"
+      failed_when: false
+      tags:
+        - system
+        - power
+
+    - name: Enable automatic software updates
+      ansible.builtin.command: >
+        softwareupdate --schedule on
+      changed_when: true
+      tags:
+        - system
+        - updates
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    - name: Display bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "macOS Bootstrap Complete — {{ inventory_hostname }}"
+          - ""
+          - "Applied:"
+          - "  SSH: Key-only auth, AllowUsers {{ sshd_allow_users | join(', ') }}"
+          - "  Firewall: pf enabled — SSH from {{ pf_management_network }}, Vault ports from mgmt+security"
+          - "  Homebrew: {{ homebrew_packages | join(', ') }}"
+          - "  System: Auto-restart on power failure, software updates enabled"
+          - ""
+          - "Next steps:"
+          - "  1. Deploy Vault: ansible-playbook playbooks/vault-deploy.yml --limit vault-1"
+          - "  2. Initialize Vault: vault operator init -key-shares=5 -key-threshold=3"
+      tags:
+        - always

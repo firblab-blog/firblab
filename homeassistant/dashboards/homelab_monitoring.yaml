@@ -1,0 +1,529 @@
+# =============================================================================
+# Homelab Monitoring Dashboard (Mushroom Cards)
+# =============================================================================
+# Requires: HACS + Mushroom Cards installed.
+#
+# Entity IDs for Proxmox VM/LXC status come from the Proxmox VE UI integration
+# (binary_sensor.firblab_XX_<vm_name>). Node-level CPU/memory/disk come from
+# REST sensors in packages/homelab_monitoring.yaml.
+#
+# Register this dashboard in configuration.yaml:
+#   lovelace:
+#     mode: storage
+#     dashboards:
+#       homelab-monitoring:
+#         mode: yaml
+#         filename: dashboards/homelab_monitoring.yaml
+#         title: Homelab
+#         icon: mdi:server-network
+#         show_in_sidebar: true
+# =============================================================================
+
+title: Homelab Monitoring
+views:
+  # ===========================================================================
+  # Tab 1: Infrastructure Overview
+  # ===========================================================================
+  - title: Infrastructure
+    path: infrastructure
+    icon: mdi:server
+    cards:
+      # ----- Vault Cluster -----
+      - type: custom:mushroom-title-card
+        title: Vault Cluster
+        subtitle: >-
+          {{ states('sensor.vault_cluster_health') | title }}
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: sensor.vault_1_sealed
+            name: "Vault-1 (Mac Mini)"
+            icon: mdi:shield-check
+            icon_color: >-
+              {% if is_state('sensor.vault_1_sealed', 'False') %}green
+              {% elif is_state('sensor.vault_1_sealed', 'True') %}red
+              {% else %}grey{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.vault_2_status
+            name: "Vault-2 (VLAN 50)"
+            icon: mdi:shield-off-outline
+            icon_color: grey
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.vault_3_sealed
+            name: "Vault-3 (RPi5)"
+            icon: mdi:shield-check
+            icon_color: >-
+              {% if is_state('sensor.vault_3_sealed', 'False') %}green
+              {% elif is_state('sensor.vault_3_sealed', 'True') %}red
+              {% else %}grey{% endif %}
+            layout: vertical
+
+      # ----- Proxmox Nodes: CPU -----
+      - type: custom:mushroom-title-card
+        title: Proxmox Nodes
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.firblab_01_cpu
+            name: "lab-01"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 60
+              red: 85
+          - type: gauge
+            entity: sensor.firblab_02_cpu
+            name: "lab-02"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 60
+              red: 85
+          - type: gauge
+            entity: sensor.firblab_03_cpu
+            name: "lab-03"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 60
+              red: 85
+          - type: gauge
+            entity: sensor.firblab_04_cpu
+            name: "lab-04"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 60
+              red: 85
+
+      # ----- Proxmox Nodes: Memory -----
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.firblab_01_memory
+            name: "RAM 01"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_02_memory
+            name: "RAM 02"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_03_memory
+            name: "RAM 03"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_04_memory
+            name: "RAM 04"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+
+      # ----- Proxmox Nodes: Disk -----
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.firblab_01_disk
+            name: "Disk 01"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_02_disk
+            name: "Disk 02"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_03_disk
+            name: "Disk 03"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.firblab_04_disk
+            name: "Disk 04"
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+
+      # ----- Uptime Kuma (Service Status) -----
+      - type: custom:mushroom-title-card
+        title: Service Status
+        subtitle: "Uptime Kuma"
+
+      # NOTE: Entity IDs depend on monitor names in Uptime Kuma.
+      # After adding the integration, check Developer Tools > States
+      # for sensor.uptime_kuma_* entities and populate this section.
+      - type: markdown
+        content: >-
+          **Add Uptime Kuma entity chips here after integration setup.**
+
+          Check Developer Tools > States for `sensor.uptime_kuma_*` entities.
+
+  # ===========================================================================
+  # Tab 2: Compute (VMs & Containers)
+  # ===========================================================================
+  - title: Compute
+    path: compute
+    icon: mdi:memory
+    cards:
+      # ----- lab-01: Main Compute -----
+      - type: custom:mushroom-title-card
+        title: "lab-01"
+        subtitle: "i9-12900K · 64GB · Main Compute"
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_gitlab
+            name: "GitLab"
+            icon: mdi:git
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_gitlab', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_authentik
+            name: "Authentik"
+            icon: mdi:shield-account
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_authentik', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_backup
+            name: "Backup"
+            icon: mdi:backup-restore
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_backup', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_rke2_server_1
+            name: "RKE2 S1"
+            icon: mdi:kubernetes
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_rke2_server_1', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_rke2_server_2
+            name: "RKE2 S2"
+            icon: mdi:kubernetes
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_rke2_server_2', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_rke2_server_3
+            name: "RKE2 S3"
+            icon: mdi:kubernetes
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_rke2_server_3', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_rke2_agent_1
+            name: "RKE2 A1"
+            icon: mdi:kubernetes
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_rke2_agent_1', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_01_rke2_agent_2
+            name: "RKE2 A2"
+            icon: mdi:kubernetes
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_01_rke2_agent_2', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+      # ----- lab-02: Pilot Node -----
+      - type: custom:mushroom-title-card
+        title: "lab-02"
+        subtitle: "N100 · 16GB · Pilot Node"
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_02_vault_2
+            name: "Vault-2"
+            icon: mdi:shield-check
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_02_vault_2', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_02_gitlab_runner
+            name: "GitLab Runner"
+            icon: mdi:run-fast
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_02_gitlab_runner', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+      # ----- lab-03: Lightweight Services -----
+      - type: custom:mushroom-title-card
+        title: "lab-03"
+        subtitle: "N100 · 12GB · Services"
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_ghost
+            name: "Ghost"
+            icon: mdi:post
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_ghost', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_roundcube
+            name: "Roundcube"
+            icon: mdi:email
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_roundcube', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_mealie
+            name: "Mealie"
+            icon: mdi:food
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_mealie', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_foundryvtt
+            name: "Foundry"
+            icon: mdi:dice-d20
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_foundryvtt', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_wireguard
+            name: "WireGuard"
+            icon: mdi:vpn
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_wireguard', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_vaultwarden
+            name: "Vaultwarden"
+            icon: mdi:lock
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_vaultwarden', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_actualbudget
+            name: "Actual"
+            icon: mdi:currency-usd
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_actualbudget', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_03_uptime_kuma_internal
+            name: "Uptime Kuma"
+            icon: mdi:monitor-eye
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_03_uptime_kuma_internal', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+      # ----- lab-04: Lightweight Compute -----
+      - type: custom:mushroom-title-card
+        title: "lab-04"
+        subtitle: "J5005 · 20GB · Compute"
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_04_pbs
+            name: "PBS"
+            icon: mdi:backup-restore
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_04_pbs', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_04_netbox
+            name: "NetBox"
+            icon: mdi:ip-network
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_04_netbox', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_04_patchmon
+            name: "PatchMon"
+            icon: mdi:update
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_04_patchmon', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: binary_sensor.firblab_04_traefik_proxy
+            name: "Traefik"
+            icon: mdi:web
+            icon_color: >-
+              {% if is_state('binary_sensor.firblab_04_traefik_proxy', 'on') %}green
+              {% else %}red{% endif %}
+            layout: vertical
+
+  # ===========================================================================
+  # Tab 3: Network
+  # ===========================================================================
+  - title: Network
+    path: network
+    icon: mdi:lan
+    cards:
+      - type: custom:mushroom-title-card
+        title: UniFi Network
+
+      # NOTE: UniFi integration creates entities for devices and clients.
+      # After integration setup, populate with actual entity IDs.
+      - type: markdown
+        content: >-
+          **Populate after UniFi Network integration is configured.**
+
+          Check Developer Tools > States for `sensor.unifi_*` and
+          `device_tracker.*` entities.
+
+          **Devices:** gw-01 (UDM Pro), switch-01/02/03
+
+          **VLANs:** Default (1), Management (10), Services (20), DMZ (30),
+          Storage (40), Security (50), IoT (60)
+
+  # ===========================================================================
+  # Tab 4: HA Host
+  # ===========================================================================
+  # System Monitor entity IDs: sensor.system_monitor_*
+  # Load averages are raw values (not percent). CM4 has 4 cores, so load 4.0
+  # = fully saturated. Gauge max set to 4.
+  # Network in/out are cumulative MiB (total_increasing), not throughput rate.
+  # ===========================================================================
+  - title: HA Host
+    path: ha-host
+    icon: mdi:raspberry-pi
+    cards:
+      - type: custom:mushroom-title-card
+        title: Home Assistant Host
+        subtitle: "RPi CM4 8GB — lab-11"
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.system_monitor_load_1_min
+            name: "Load (1m)"
+            min: 0
+            max: 4
+            severity:
+              green: 0
+              yellow: 2
+              red: 3
+          - type: gauge
+            entity: sensor.system_monitor_memory_usage
+            name: RAM
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+          - type: gauge
+            entity: sensor.system_monitor_disk_usage
+            name: Disk
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 70
+              red: 90
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_load_1_min
+            name: "Load 1m"
+            icon: mdi:cpu-64-bit
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_load_5_min
+            name: "Load 5m"
+            icon: mdi:cpu-64-bit
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_load_15_min
+            name: "Load 15m"
+            icon: mdi:cpu-64-bit
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_last_boot
+            name: "Last Boot"
+            icon: mdi:clock-outline
+            layout: vertical
+
+      - type: custom:mushroom-title-card
+        title: Network I/O
+
+      - type: horizontal-stack
+        cards:
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_network_in_end0
+            name: "Total In"
+            icon: mdi:download-network
+            layout: vertical
+          - type: custom:mushroom-entity-card
+            entity: sensor.system_monitor_network_out_end0
+            name: "Total Out"
+            icon: mdi:upload-network
+            layout: vertical

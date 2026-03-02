@@ -1,0 +1,188 @@
+---
+# =============================================================================
+# Proxmox User Setup for Home Assistant (Read-Only)
+# =============================================================================
+# Creates TWO auth mechanisms for HA to talk to Proxmox:
+#
+# 1. PVE realm user (homeassistant@pve) with PASSWORD
+#    → Used by HA's Proxmox VE UI integration (doesn't support API tokens)
+#    → Provides VM/LXC running status (binary_sensor entities)
+#
+# 2. PAM realm user (homeassistant@pam) with API TOKEN
+#    → Used by YAML REST sensors for node-level CPU/memory/disk
+#    → The HA REST platform sends the token as an Authorization header
+#
+# Both use PVEAuditor (built-in read-only role). Users, ACLs, and tokens
+# are cluster-wide (replicated via pmxcfs), so this runs on ONE node.
+#
+# After creation, ALL credentials are seeded into Vault at:
+#   secret/services/homeassistant/proxmox
+#   (username, password, realm, token_id, token_secret, api_auth_header)
+#
+# Requires: vault CLI on controller, VAULT_TOKEN set, CA cert at vault_lookup_ca_cert.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/proxmox-ha-api-setup.yml
+#   ansible-playbook ansible/playbooks/proxmox-ha-api-setup.yml -e force_reset=true
+#
+# Verify:
+#   vault kv get secret/services/homeassistant/proxmox
+# =============================================================================
+
+- name: "Create Proxmox Users for Home Assistant (Read-Only)"
+  hosts: "{{ target_node | default('lab-01') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    # PVE realm user (password auth for UI integration)
+    pve_ha_user: "homeassistant@pve"
+    pve_ha_username: "homeassistant"
+    pve_ha_realm: "pve"
+    # PAM realm user (API token for REST sensors)
+    pam_ha_user: "homeassistant@pam"
+    pam_ha_token_name: "ha-readonly-token"
+    # Shared
+    pve_ha_role: "PVEAuditor"
+    force_reset: false
+
+  tasks:
+    # =================================================================
+    # Discover existing state
+    # =================================================================
+    - name: List existing users
+      ansible.builtin.command: pveum user list --output-format json
+      register: pve_users
+      changed_when: false
+
+    - name: Set user existence facts
+      ansible.builtin.set_fact:
+        pve_user_exists: "{{ pve_ha_user in (pve_users.stdout | from_json | map(attribute='userid')) }}"
+        pam_user_exists: "{{ pam_ha_user in (pve_users.stdout | from_json | map(attribute='userid')) }}"
+
+    # =================================================================
+    # PVE Realm User (password auth — UI integration)
+    # =================================================================
+    - name: Generate random password for PVE user
+      ansible.builtin.set_fact:
+        pve_ha_password: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+      delegate_to: localhost
+      become: false
+      when: not pve_user_exists or force_reset | bool
+
+    - name: Create PVE realm user
+      ansible.builtin.command: >
+        pveum user add {{ pve_ha_user }}
+        --comment "Home Assistant read-only — UI integration (PVEAuditor)"
+      when: not pve_user_exists
+
+    - name: Set PVE user password
+      ansible.builtin.shell: |
+        printf '%s\n' '{{ pve_ha_password }}' '{{ pve_ha_password }}' | pveum passwd {{ pve_ha_user }}
+      no_log: true
+      when: not pve_user_exists or force_reset | bool
+
+    - name: Apply PVEAuditor role to PVE user
+      ansible.builtin.command: >
+        pveum acl modify / --users {{ pve_ha_user }} --roles {{ pve_ha_role }}
+      changed_when: false
+
+    # =================================================================
+    # PAM Realm User + API Token (REST sensors)
+    # =================================================================
+    - name: Create PAM realm user
+      ansible.builtin.command: >
+        pveum user add {{ pam_ha_user }}
+        --comment "Home Assistant read-only — REST sensors (PVEAuditor)"
+      when: not pam_user_exists
+
+    - name: Apply PVEAuditor role to PAM user
+      ansible.builtin.command: >
+        pveum acl modify / --users {{ pam_ha_user }} --roles {{ pve_ha_role }}
+      changed_when: false
+
+    - name: List existing tokens for PAM user
+      ansible.builtin.command: >
+        pveum user token list {{ pam_ha_user }} --output-format json
+      register: pam_tokens
+      changed_when: false
+
+    - name: Set token_exists fact
+      ansible.builtin.set_fact:
+        token_exists: >-
+          {{ pam_ha_token_name in
+             (pam_tokens.stdout | from_json | map(attribute='tokenid')
+             | map('regex_replace', '.*!', '') | list) }}
+
+    - name: Remove old token (force_reset)
+      ansible.builtin.command: >
+        pveum user token remove {{ pam_ha_user }} {{ pam_ha_token_name }}
+      when: token_exists and force_reset | bool
+
+    - name: Create API token (privilege separation disabled)
+      ansible.builtin.command: >
+        pveum user token add {{ pam_ha_user }} {{ pam_ha_token_name }}
+        --privsep 0 --output-format json
+      register: pam_token_result
+      when: not token_exists or force_reset | bool
+
+    - name: Parse token data
+      ansible.builtin.set_fact:
+        token_data: "{{ pam_token_result.stdout | from_json }}"
+      when: pam_token_result is changed
+
+    # =================================================================
+    # Vault Seeding (all credentials in one path)
+    # =================================================================
+    - name: Seed all credentials into Vault
+      ansible.builtin.command:
+        cmd: >-
+          vault kv put -mount=secret services/homeassistant/proxmox
+          username={{ pve_ha_username }}
+          password={{ pve_ha_password }}
+          realm={{ pve_ha_realm }}
+          token_id={{ token_data['full-tokenid'] }}
+          token_secret={{ token_data.value }}
+          api_auth_header=PVEAPIToken={{ token_data['full-tokenid'] }}={{ token_data.value }}
+      delegate_to: localhost
+      become: false
+      no_log: true
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      when: pve_ha_password is defined and token_data is defined
+
+    - name: Verify Vault secret
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret services/homeassistant/proxmox
+      delegate_to: localhost
+      become: false
+      register: _vault_verify
+      changed_when: false
+      environment:
+        VAULT_ADDR: "{{ vault_addr }}"
+        VAULT_CACERT: "{{ vault_lookup_ca_cert | expanduser }}"
+      when: pve_ha_password is defined and token_data is defined
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: |-
+          ============================================================
+          Proxmox HA Credentials — Seeded to Vault
+          ============================================================
+          Path:           secret/services/homeassistant/proxmox
+
+          UI Integration: {{ pve_ha_user }} (password auth, PVE realm)
+          REST Sensors:   {{ token_data['full-tokenid'] }} (API token)
+          Role:           {{ pve_ha_role }} (built-in, read-only)
+
+          Verify:  vault kv get secret/services/homeassistant/proxmox
+          ============================================================
+      when: pve_ha_password is defined and token_data is defined
+
+    - name: Already exists — nothing changed
+      ansible.builtin.debug:
+        msg: >-
+          Users and token already exist, force_reset=false.
+          To recreate: -e force_reset=true
+      when: pve_ha_password is not defined or token_data is not defined

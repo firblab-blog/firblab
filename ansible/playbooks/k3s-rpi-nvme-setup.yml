@@ -1,0 +1,725 @@
+---
+# =============================================================================
+# K3s RPi5 NVMe Setup Playbook
+# =============================================================================
+# Automates Phase 0 of K3s RPi5 deployment. Handles TWO starting states:
+#
+#   A) RPi5 booted from SD card (RPi OS Lite):
+#      → Flashes Ubuntu 24.04 to NVMe, configures cloud-init, updates
+#        EEPROM boot order, reboots into NVMe.
+#
+#   B) RPi5 already booted from NVMe (Ubuntu):
+#      → Writes cloud-init config to /boot/firmware, runs cloud-init clean,
+#        reboots so cloud-init re-applies (admin user, hostname, static IP).
+#
+# Both paths converge: after reboot, node runs Ubuntu from NVMe with a
+# VLAN 20 static IP. It's unreachable until terraform apply switches the
+# switch port to VLAN 20.
+#
+# This playbook supersedes k3s-rpi-bootstrap.yml — cloud-init handles
+# admin user, hostname, and static IP. After terraform apply, go straight
+# to k3s-deploy.yml.
+#
+# Play 1 - Diagnostic Pre-Flight (READ-ONLY):
+#   Detects boot device (SD vs NVMe), OS (RPi OS vs Ubuntu), NVMe presence,
+#   EEPROM config. Reports which path Play 2 will take.
+#
+# Play 2 - Configure Node:
+#   SD path: download Ubuntu image, flash NVMe, cloud-init, EEPROM, reboot.
+#   NVMe path: write cloud-init, cloud-init clean, reboot.
+#
+# Play 3 - Verify NVMe Boot:
+#   Runs AFTER terraform apply. Connects at VLAN 20 static IP, verifies
+#   NVMe boot, hostname, and SSH access.
+#
+# Prerequisites:
+#   1. RPi5 booted and reachable via Default LAN DHCP (SD or NVMe)
+#   2. NVMe drive inserted into RPi5 HAT/adapter
+#   3. SSH key generated: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_lab-05
+#   4. admin user accessible via SSH (RPi Imager or existing config)
+#   5. Switch ports on Default LAN (do NOT terraform apply until after reboot)
+#
+# Usage:
+#   # Diagnostic only (read-only, safe to run anytime):
+#   ansible-playbook playbooks/k3s-rpi-nvme-setup.yml --tags diagnostic \
+#     -e 'current_ip=10.0.4.242 target_hostname=k3s-server-1 target_ip=10.0.20.60 ssh_key_name=lab-05'
+#
+#   # Full setup (diagnostic + configure + reboot):
+#   ansible-playbook playbooks/k3s-rpi-nvme-setup.yml --tags diagnostic,nvme_setup \
+#     -e 'current_ip=10.0.4.242 target_hostname=k3s-server-1 target_ip=10.0.20.60 ssh_key_name=lab-05'
+#
+#   # Verify after terraform apply (VLAN 20 static IP):
+#   ansible-playbook playbooks/k3s-rpi-nvme-setup.yml --tags verify \
+#     -e 'target_hostname=k3s-server-1 target_ip=10.0.20.60 ssh_key_name=lab-05'
+#
+# Run once per RPi5:
+#   k3s-server-1 (lab-05): current_ip=10.0.4.242, target_ip=10.0.20.60, ssh_key_name=lab-05
+#   k3s-server-2 (lab-06): current_ip=10.0.4.167, target_ip=10.0.20.61, ssh_key_name=lab-06
+#   k3s-server-3 (lab-07): current_ip=10.0.4.107, target_ip=10.0.20.62, ssh_key_name=lab-07
+# =============================================================================
+
+
+# =========================================================================
+# Play 1: Diagnostic Pre-Flight (READ-ONLY)
+# =========================================================================
+# Detects current state: boot device, OS, NVMe presence, EEPROM config.
+# Reports which path Play 2 will take. Makes ZERO changes.
+# Run standalone with: --tags diagnostic
+# =========================================================================
+- name: "K3s RPi5 NVMe Setup (Play 1/3: Diagnostic Pre-Flight)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [never, diagnostic]
+
+  vars:
+    current_ip: "{{ current_ip }}"
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+
+  tasks:
+    - name: Add RPi5 host dynamically (DHCP address)
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ current_ip }}"
+        ansible_connection: ssh
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
+        groups: rpi_nvme_setup
+
+    - name: Delegate diagnostic tasks to RPi5
+      block:
+        - name: Gather system facts (unprivileged)
+          ansible.builtin.setup:
+            gather_subset:
+              - "!hardware"
+              - network
+              - distribution
+
+        # --- Detect boot device ---
+        # Use df — universally available (findmnt may not be on minimal images)
+        - name: Check current boot device
+          ansible.builtin.shell: df / | tail -1 | awk '{print $1}'
+          register: boot_device
+          changed_when: false
+
+        - name: Set boot source facts
+          ansible.builtin.set_fact:
+            boot_from_sd: "{{ 'mmcblk' in boot_device.stdout }}"
+            boot_from_nvme: "{{ 'nvme' in boot_device.stdout }}"
+
+        # --- Detect OS ---
+        # Use Ansible gathered facts — more robust than grepping /etc/os-release
+        # which may not exist on minimal or partially-configured images
+        - name: Set OS facts
+          ansible.builtin.set_fact:
+            os_is_ubuntu: "{{ (ansible_distribution | default('')) | lower == 'ubuntu' }}"
+            os_is_rpios: "{{ (ansible_distribution | default('')) | lower in ['debian', 'raspbian'] }}"
+
+        # --- Detect NVMe ---
+        - name: Check for NVMe device
+          ansible.builtin.stat:
+            path: /dev/nvme0n1
+          register: nvme_stat
+
+        - name: Set NVMe fact
+          ansible.builtin.set_fact:
+            nvme_present: "{{ (boot_from_nvme | bool) or (nvme_stat.stat.exists | default(false)) }}"
+
+        - name: Fail if no NVMe device found
+          ansible.builtin.fail:
+            msg: |
+              ================================================================
+              ERROR: No NVMe device found on {{ target_hostname }}.
+              ================================================================
+              Expected /dev/nvme0n1 but it does not exist.
+
+              Possible causes:
+                - NVMe drive not inserted
+                - NVMe HAT/adapter not connected properly
+                - Incompatible NVMe drive
+
+              Diagnostic: lsblk; dmesg | grep -i nvme
+              ================================================================
+          when: not nvme_present
+
+        # --- NVMe info ---
+        - name: Get NVMe device info
+          ansible.builtin.command: lsblk -o NAME,SIZE,MODEL,SERIAL -d /dev/nvme0n1
+          register: nvme_info
+          changed_when: false
+
+        - name: Get NVMe partition table
+          ansible.builtin.command: lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT /dev/nvme0n1
+          register: nvme_partitions
+          changed_when: false
+
+        # --- EEPROM config ---
+        # rpi-eeprom-config works on RPi OS; vcgencmd works on Ubuntu
+        - name: Read EEPROM config (RPi OS)
+          ansible.builtin.command: rpi-eeprom-config
+          register: eeprom_config_rpios
+          changed_when: false
+          failed_when: false
+          become: true
+          when: os_is_rpios | bool
+
+        - name: Read EEPROM config (Ubuntu via vcgencmd)
+          ansible.builtin.command: vcgencmd bootloader_config
+          register: eeprom_config_ubuntu
+          changed_when: false
+          failed_when: false
+          when: os_is_ubuntu | bool
+
+        - name: Set EEPROM config fact
+          ansible.builtin.set_fact:
+            eeprom_config: "{{ (eeprom_config_rpios.stdout | default('')) if (os_is_rpios | bool) else (eeprom_config_ubuntu.stdout | default('unable to read')) }}"
+
+        # --- Determine path ---
+        - name: Determine setup path
+          ansible.builtin.set_fact:
+            setup_path: >-
+              {% if boot_from_sd | bool %}SD_FLASH{% elif boot_from_nvme | bool %}NVME_RECONFIG{% else %}UNKNOWN{% endif %}
+
+        - name: Diagnostic summary
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              NVMe Setup Diagnostic — {{ target_hostname }}
+              ================================================================
+              Boot device:    {{ boot_device.stdout }}
+              Boot source:    {{ 'SD card' if (boot_from_sd | bool) else 'NVMe' if (boot_from_nvme | bool) else 'Unknown' }}
+              OS:             {{ ansible_distribution | default('unknown') }} {{ ansible_distribution_version | default('') }} ({{ ansible_architecture | default('') }})
+              NVMe present:   {{ nvme_present }}
+              Target:         {{ target_hostname }} @ {{ target_ip }}/24 (VLAN 20)
+
+              NVMe Device:
+              {{ nvme_info.stdout }}
+
+              NVMe Partitions:
+              {{ nvme_partitions.stdout }}
+
+              EEPROM Config:
+              {{ eeprom_config }}
+
+              Setup path: {{ setup_path | trim }}
+              {% if setup_path | trim == 'SD_FLASH' %}
+              → Will flash Ubuntu to NVMe, configure cloud-init, update EEPROM, reboot.
+              {% elif setup_path | trim == 'NVME_RECONFIG' %}
+              → Already on NVMe Ubuntu. Will write cloud-init, clean instance state, reboot.
+              {% else %}
+              → ⚠️  Unexpected state — investigate before proceeding.
+              {% endif %}
+              ================================================================
+
+      delegate_to: "{{ target_hostname }}"
+
+
+# =========================================================================
+# Play 2: Configure Node (SD Flash or NVMe Reconfig)
+# =========================================================================
+# Detects boot state and takes the appropriate path:
+#   SD_FLASH:    Download Ubuntu → dd to NVMe → cloud-init → EEPROM → reboot
+#   NVME_RECONFIG: Write cloud-init to /boot/firmware → clean → reboot
+#
+# Idempotent: SD path skips flash if NVMe already has Ubuntu.
+# Force re-flash with: -e 'force_flash=true'
+# =========================================================================
+- name: "K3s RPi5 NVMe Setup (Play 2/3: Configure Node)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [never, nvme_setup]
+
+  vars:
+    current_ip: "{{ current_ip }}"
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+    target_cidr: "24"
+    target_gateway: "10.0.20.1"
+    dns_1: "10.0.20.1"
+    dns_2: "1.1.1.1"
+    force_flash: false
+
+    # Ubuntu 24.04.2 preinstalled server for RPi (ARM64)
+    ubuntu_image_url: "https://cdimage.ubuntu.com/releases/24.04.2/release/ubuntu-24.04.2-preinstalled-server-arm64+raspi.img.xz"
+    ubuntu_image_sha256_url: "https://cdimage.ubuntu.com/releases/24.04.2/release/SHA256SUMS"
+    ubuntu_image_filename: "ubuntu-24.04.2-preinstalled-server-arm64+raspi.img.xz"
+
+    nvme_device: "/dev/nvme0n1"
+    nvme_boot_partition: "/dev/nvme0n1p1"
+    nvme_root_partition: "/dev/nvme0n1p2"
+    nvme_boot_mount: "/mnt/nvme-boot"
+
+    # EEPROM boot order: NVMe(6) → SD(1) → USB(4) → Network(f)
+    eeprom_boot_order: "0xf416"
+
+  tasks:
+    - name: Add RPi5 host dynamically (DHCP address)
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ current_ip }}"
+        ansible_connection: ssh
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
+        ansible_become: true
+        groups: rpi_nvme_setup
+
+    - name: Read SSH public key from control node
+      ansible.builtin.set_fact:
+        ssh_pubkey: "{{ lookup('file', '~/.ssh/id_ed25519_' + ssh_key_name + '.pub') }}"
+
+    - name: Delegate setup tasks to RPi5
+      block:
+        - name: Gather facts
+          ansible.builtin.setup:
+
+        # =================================================================
+        # Phase 1: Detect current state
+        # =================================================================
+        - name: Check current boot device
+          ansible.builtin.shell: df / | tail -1 | awk '{print $1}'
+          register: boot_device
+          changed_when: false
+
+        - name: Set state facts
+          ansible.builtin.set_fact:
+            boot_from_sd: "{{ 'mmcblk' in boot_device.stdout }}"
+            boot_from_nvme: "{{ 'nvme' in boot_device.stdout }}"
+            os_is_ubuntu: "{{ (ansible_distribution | default('')) | lower == 'ubuntu' }}"
+            os_is_rpios: "{{ (ansible_distribution | default('')) | lower in ['debian', 'raspbian'] }}"
+
+        - name: Set setup path
+          ansible.builtin.set_fact:
+            setup_path: "{{ 'SD_FLASH' if (boot_from_sd | bool) else 'NVME_RECONFIG' if (boot_from_nvme | bool) else 'UNKNOWN' }}"
+
+        - name: Report detected path
+          ansible.builtin.debug:
+            msg: "Detected: boot={{ 'SD' if (boot_from_sd | bool) else 'NVMe' }}, OS={{ 'Ubuntu' if (os_is_ubuntu | bool) else 'RPi OS' if (os_is_rpios | bool) else 'unknown' }} → path={{ setup_path }}"
+
+        - name: Fail on unknown state
+          ansible.builtin.fail:
+            msg: "Cannot determine setup path. Boot device: {{ boot_device.stdout }}, OS: {{ ansible_distribution | default('unknown') }}. Investigate manually."
+          when: setup_path == 'UNKNOWN'
+
+        # =================================================================
+        # PATH A: SD Card Boot → Flash Ubuntu to NVMe
+        # =================================================================
+        - name: "PATH A: SD Card → Flash NVMe"
+          when: setup_path == 'SD_FLASH'
+          block:
+            # --- Prerequisites ---
+            - name: "[SD] Install required packages"
+              ansible.builtin.apt:
+                name:
+                  - xz-utils
+                  - parted
+                  - cloud-guest-utils
+                  - e2fsprogs
+                state: present
+                update_cache: true
+              become: true
+
+            # --- Check existing NVMe state ---
+            - name: "[SD] Check if NVMe already has Ubuntu"
+              ansible.builtin.shell: |
+                if lsblk -no FSTYPE {{ nvme_root_partition }} 2>/dev/null | grep -q ext4; then
+                  mkdir -p /tmp/nvme-check
+                  mount -o ro {{ nvme_root_partition }} /tmp/nvme-check 2>/dev/null
+                  if [ -f /tmp/nvme-check/etc/os-release ] && grep -q "Ubuntu" /tmp/nvme-check/etc/os-release; then
+                    echo "UBUNTU_PRESENT"
+                  else
+                    echo "NOT_UBUNTU"
+                  fi
+                  umount /tmp/nvme-check 2>/dev/null
+                  rmdir /tmp/nvme-check 2>/dev/null
+                else
+                  echo "NO_ROOTFS"
+                fi
+              register: nvme_check
+              changed_when: false
+              become: true
+
+            - name: "[SD] Set flash_needed fact"
+              ansible.builtin.set_fact:
+                flash_needed: "{{ nvme_check.stdout | trim != 'UBUNTU_PRESENT' or (force_flash | bool) }}"
+
+            - name: "[SD] Report NVMe state"
+              ansible.builtin.debug:
+                msg: "NVMe: {{ nvme_check.stdout | trim }}. Flash needed: {{ flash_needed }}"
+
+            # --- Download image ---
+            - name: "[SD] Download and flash Ubuntu image"
+              when: flash_needed | bool
+              block:
+                - name: "[SD] Check if image already downloaded"
+                  ansible.builtin.stat:
+                    path: "/tmp/{{ ubuntu_image_filename }}"
+                  register: image_file
+
+                - name: "[SD] Download Ubuntu image (~1.2GB, takes a few minutes)"
+                  ansible.builtin.get_url:
+                    url: "{{ ubuntu_image_url }}"
+                    dest: "/tmp/{{ ubuntu_image_filename }}"
+                    mode: "0644"
+                    timeout: 600
+                  when: not image_file.stat.exists
+
+                - name: "[SD] Download SHA256SUMS"
+                  ansible.builtin.get_url:
+                    url: "{{ ubuntu_image_sha256_url }}"
+                    dest: "/tmp/SHA256SUMS"
+                    mode: "0644"
+                    timeout: 30
+
+                - name: "[SD] Extract expected SHA256"
+                  ansible.builtin.shell: >
+                    grep "{{ ubuntu_image_filename }}" /tmp/SHA256SUMS | awk '{print $1}'
+                  register: expected_sha256
+                  changed_when: false
+
+                - name: "[SD] Calculate actual SHA256"
+                  ansible.builtin.stat:
+                    path: "/tmp/{{ ubuntu_image_filename }}"
+                    checksum_algorithm: sha256
+                  register: actual_image
+
+                - name: "[SD] Verify SHA256 checksum"
+                  ansible.builtin.assert:
+                    that:
+                      - expected_sha256.stdout | trim == actual_image.stat.checksum
+                    fail_msg: "SHA256 MISMATCH. Expected: {{ expected_sha256.stdout | trim }}, Got: {{ actual_image.stat.checksum }}. Delete /tmp/{{ ubuntu_image_filename }} and retry."
+                    success_msg: "SHA256 verified: {{ actual_image.stat.checksum }}"
+
+                # --- Flash ---
+                - name: "[SD] Unmount any NVMe partitions"
+                  ansible.builtin.shell: |
+                    for part in {{ nvme_device }}p*; do
+                      umount "$part" 2>/dev/null || true
+                    done
+                  changed_when: false
+
+                - name: "[SD] Flash Ubuntu image to NVMe (xzcat | dd)"
+                  ansible.builtin.shell: |
+                    xzcat /tmp/{{ ubuntu_image_filename }} | dd of={{ nvme_device }} bs=4M conv=fsync status=none
+                  async: 600
+                  poll: 15
+
+                - name: "[SD] Sync filesystem buffers"
+                  ansible.builtin.command: sync
+
+                - name: "[SD] Re-read partition table"
+                  ansible.builtin.command: "partprobe {{ nvme_device }}"
+
+                - name: "[SD] Wait for partition devices"
+                  ansible.builtin.wait_for:
+                    path: "{{ nvme_root_partition }}"
+                    timeout: 10
+
+                - name: "[SD] Grow root partition to fill NVMe"
+                  ansible.builtin.command: "growpart {{ nvme_device }} 2"
+                  register: growpart_result
+                  failed_when:
+                    - growpart_result.rc != 0
+                    - "'NOCHANGE' not in growpart_result.stdout"
+
+                - name: "[SD] Resize ext4 filesystem"
+                  ansible.builtin.command: "resize2fs {{ nvme_root_partition }}"
+                  when: "'NOCHANGE' not in (growpart_result.stdout | default(''))"
+
+                - name: "[SD] Display post-flash partition table"
+                  ansible.builtin.command: "lsblk -o NAME,SIZE,FSTYPE {{ nvme_device }}"
+                  register: post_flash
+                  changed_when: false
+
+                - name: "[SD] Flash complete"
+                  ansible.builtin.debug:
+                    msg: "{{ post_flash.stdout }}"
+              become: true
+
+            # --- Cloud-init (SD path: mount NVMe boot partition) ---
+            - name: "[SD] Configure cloud-init on NVMe"
+              block:
+                - name: "[SD] Create mount point"
+                  ansible.builtin.file:
+                    path: "{{ nvme_boot_mount }}"
+                    state: directory
+                    mode: "0755"
+
+                - name: "[SD] Mount NVMe system-boot partition"
+                  ansible.posix.mount:
+                    path: "{{ nvme_boot_mount }}"
+                    src: "{{ nvme_boot_partition }}"
+                    fstype: vfat
+                    state: mounted
+
+                - name: "[SD] Write cloud-init user-data"
+                  ansible.builtin.template:
+                    src: templates/nvme-user-data.yaml.j2
+                    dest: "{{ nvme_boot_mount }}/user-data"
+                    mode: "0644"
+
+                - name: "[SD] Write cloud-init network-config"
+                  ansible.builtin.template:
+                    src: templates/nvme-network-config.yaml.j2
+                    dest: "{{ nvme_boot_mount }}/network-config"
+                    mode: "0644"
+
+                - name: "[SD] Unmount NVMe system-boot"
+                  ansible.posix.mount:
+                    path: "{{ nvme_boot_mount }}"
+                    state: unmounted
+
+                - name: "[SD] Clean up mount point"
+                  ansible.builtin.file:
+                    path: "{{ nvme_boot_mount }}"
+                    state: absent
+              become: true
+
+            # --- EEPROM (SD path: use rpi-eeprom-config) ---
+            - name: "[SD] Read current EEPROM config"
+              ansible.builtin.command: rpi-eeprom-config
+              register: current_eeprom
+              changed_when: false
+              become: true
+
+            - name: "[SD] Check EEPROM boot order"
+              ansible.builtin.set_fact:
+                eeprom_update_needed: "{{ 'BOOT_ORDER=' + eeprom_boot_order not in current_eeprom.stdout }}"
+
+            - name: "[SD] Update EEPROM boot order"
+              when: eeprom_update_needed | bool
+              block:
+                - name: "[SD] Write EEPROM config"
+                  ansible.builtin.copy:
+                    content: |
+                      {{ current_eeprom.stdout | regex_replace('BOOT_ORDER=.*', 'BOOT_ORDER=' + eeprom_boot_order) }}
+                    dest: /tmp/boot.conf
+                    mode: "0644"
+
+                - name: "[SD] Ensure BOOT_ORDER line present"
+                  ansible.builtin.lineinfile:
+                    path: /tmp/boot.conf
+                    regexp: "^BOOT_ORDER="
+                    line: "BOOT_ORDER={{ eeprom_boot_order }}"
+                    state: present
+
+                - name: "[SD] Apply EEPROM config"
+                  ansible.builtin.command: "rpi-eeprom-config --apply /tmp/boot.conf"
+
+                # Note: rpi-eeprom-config --apply STAGES the update for next reboot.
+                # Reading back immediately still shows the old config. Trust the
+                # apply command's exit code — the new boot order takes effect on reboot.
+                - name: "[SD] EEPROM update staged"
+                  ansible.builtin.debug:
+                    msg: "EEPROM update staged — BOOT_ORDER={{ eeprom_boot_order }} will take effect on reboot"
+              become: true
+
+            - name: "[SD] EEPROM already correct"
+              ansible.builtin.debug:
+                msg: "EEPROM BOOT_ORDER already {{ eeprom_boot_order }}"
+              when: not (eeprom_update_needed | bool)
+
+        # =================================================================
+        # PATH B: Already on NVMe Ubuntu → Reconfigure via cloud-init
+        # =================================================================
+        - name: "PATH B: NVMe Ubuntu → Reconfigure"
+          when: setup_path == 'NVME_RECONFIG'
+          block:
+            # system-boot is at /boot/firmware on running Ubuntu
+            - name: "[NVMe] Check system-boot mount"
+              ansible.builtin.shell: "df /boot/firmware 2>/dev/null | tail -1 | awk '{print $1}'"
+              register: sysboot_mount
+              changed_when: false
+              failed_when: false
+
+            - name: "[NVMe] Verify /boot/firmware is mounted"
+              ansible.builtin.assert:
+                that:
+                  - sysboot_mount.stdout | trim | length > 0
+                fail_msg: "/boot/firmware not mounted. Cannot write cloud-init config. Check if system-boot partition exists."
+                success_msg: "system-boot mounted at /boot/firmware ({{ sysboot_mount.stdout | trim }})"
+
+            - name: "[NVMe] Write cloud-init user-data"
+              ansible.builtin.template:
+                src: templates/nvme-user-data.yaml.j2
+                dest: /boot/firmware/user-data
+                mode: "0644"
+              become: true
+
+            - name: "[NVMe] Write cloud-init network-config"
+              ansible.builtin.template:
+                src: templates/nvme-network-config.yaml.j2
+                dest: /boot/firmware/network-config
+                mode: "0644"
+              become: true
+
+            # cloud-init clean removes /var/lib/cloud/ (instance state) but does NOT
+            # remove /etc/cloud/cloud.cfg.d/ files. If a previous cloud-init run
+            # created 99-disable-network-config.cfg, it persists and causes cloud-init
+            # to skip network config entirely on next boot — leaving eth0 unconfigured.
+            - name: "[NVMe] Remove cloud-init network disable file (if exists)"
+              ansible.builtin.file:
+                path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+                state: absent
+              become: true
+
+            - name: "[NVMe] Remove stale netplan configs (cloud-init will regenerate)"
+              ansible.builtin.shell: "rm -f /etc/netplan/*.yaml"
+              become: true
+              changed_when: true
+
+            - name: "[NVMe] Reset cloud-init instance state (forces re-run on reboot)"
+              ansible.builtin.command: cloud-init clean
+              become: true
+
+            - name: "[NVMe] EEPROM already NVMe-first (booted from NVMe)"
+              ansible.builtin.debug:
+                msg: "EEPROM is already configured for NVMe boot (we booted from it). No update needed."
+
+        # =================================================================
+        # Common: Summary + Reboot
+        # =================================================================
+        - name: Pre-reboot summary
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              NVMe Setup Complete — {{ target_hostname }}
+              ================================================================
+              Path taken:   {{ setup_path }}
+              NVMe:         {{ nvme_device }} — Ubuntu 24.04 Server ARM64
+              Cloud-init:   admin user, hostname={{ target_hostname }}
+              Static IP:    {{ target_ip }}/{{ target_cidr }} (VLAN 20)
+              EEPROM:       BOOT_ORDER={{ eeprom_boot_order }}
+
+              REBOOTING NOW. After reboot:
+                - Node boots Ubuntu from NVMe with VLAN 20 IP
+                - UNREACHABLE until terraform apply switches port to VLAN 20
+                - After all 3 nodes: terraform apply Layer 00
+                - Then verify with --tags verify
+              ================================================================
+
+        - name: Reboot (SSH will disconnect — expected)
+          ansible.builtin.shell: "sleep 2 && shutdown -r now"
+          async: 1
+          poll: 0
+          become: true
+          ignore_errors: true
+
+      delegate_to: "{{ target_hostname }}"
+      become: true
+
+
+# =========================================================================
+# Play 3: Verify NVMe Boot
+# =========================================================================
+# Run AFTER terraform apply moves switch ports to VLAN 20.
+# Connects at the static VLAN 20 IP and verifies Ubuntu is running
+# from NVMe with correct hostname and network config.
+# Run standalone with: --tags verify
+# =========================================================================
+- name: "K3s RPi5 NVMe Setup (Play 3/3: Verify NVMe Boot)"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: [never, verify]
+
+  vars:
+    target_hostname: "{{ target_hostname }}"
+    target_ip: "{{ target_ip }}"
+    ssh_key_name: "{{ ssh_key_name }}"
+
+  tasks:
+    - name: Add RPi5 host dynamically (VLAN 20 static IP)
+      ansible.builtin.add_host:
+        name: "{{ target_hostname }}"
+        ansible_host: "{{ target_ip }}"
+        ansible_connection: ssh
+        ansible_user: admin
+        ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ ssh_key_name }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
+        groups: rpi_nvme_verify
+
+    - name: Delegate verification tasks to RPi5
+      block:
+        - name: Wait for host to become reachable (up to 120s)
+          ansible.builtin.wait_for_connection:
+            timeout: 120
+            sleep: 5
+
+        - name: Gather facts
+          ansible.builtin.setup:
+            gather_subset:
+              - "!hardware"
+              - network
+              - distribution
+
+        - name: Check boot device
+          ansible.builtin.shell: df / | tail -1 | awk '{print $1}'
+          register: verify_boot_device
+          changed_when: false
+
+        - name: Verify booted from NVMe
+          ansible.builtin.assert:
+            that:
+              - "'nvme' in verify_boot_device.stdout"
+            fail_msg: "Not booted from NVMe. Boot device: {{ verify_boot_device.stdout }}"
+            success_msg: "Booted from NVMe: {{ verify_boot_device.stdout }}"
+
+        - name: Verify hostname
+          ansible.builtin.assert:
+            that:
+              - "ansible_hostname == target_hostname"
+            fail_msg: "Hostname mismatch: expected {{ target_hostname }}, got {{ ansible_hostname }}"
+            success_msg: "Hostname: {{ ansible_hostname }}"
+
+        - name: Get current IP address
+          ansible.builtin.shell: >
+            ip -4 addr show dev eth0 2>/dev/null | grep inet | awk '{print $2}' | head -1
+          register: verify_ip
+          changed_when: false
+          failed_when: false
+
+        - name: Verify IP address
+          ansible.builtin.assert:
+            that:
+              - "target_ip in (verify_ip.stdout | default(''))"
+            fail_msg: "IP mismatch: expected {{ target_ip }}, got {{ verify_ip.stdout | default('none') }}"
+            success_msg: "IP: {{ verify_ip.stdout | trim }}"
+
+        - name: Check OS version
+          ansible.builtin.command: lsb_release -ds
+          register: os_version
+          changed_when: false
+          failed_when: false
+
+        - name: Check disk space
+          ansible.builtin.command: df -h /
+          register: disk_space
+          changed_when: false
+
+        - name: Verification summary
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              NVMe Boot Verified — {{ target_hostname }}
+              ================================================================
+              Boot device:  {{ verify_boot_device.stdout }}
+              Hostname:     {{ ansible_hostname }}
+              IP:           {{ verify_ip.stdout | trim }}
+              OS:           {{ os_version.stdout | default('Ubuntu') }}
+              Architecture: {{ ansible_architecture }}
+              Disk:
+              {{ disk_space.stdout }}
+
+              Ready for k3s-deploy.yml
+              ================================================================
+
+      delegate_to: "{{ target_hostname }}"

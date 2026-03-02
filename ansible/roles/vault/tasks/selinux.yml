@@ -1,0 +1,47 @@
+---
+# =============================================================================
+# Vault — SELinux Policy (RedHat/Rocky only)
+# =============================================================================
+# Sets file contexts, applies restorecon, and opens Vault ports in SELinux.
+# This file is only included when ansible_os_family == "RedHat".
+# =============================================================================
+
+- name: Set SELinux file contexts for Vault directories
+  community.general.sefcontext:
+    target: "{{ item.target }}"
+    setype: "{{ item.setype }}"
+    state: present
+  loop:
+    - { target: "{{ vault_data_dir }}(/.*)?", setype: "var_t" }
+    - { target: "{{ vault_config_dir }}(/.*)?", setype: "etc_t" }
+    - { target: "{{ vault_log_dir }}(/.*)?", setype: "var_log_t" }
+    - { target: "{{ vault_binary_path }}", setype: "bin_t" }
+  notify: Restorecon vault dirs
+  tags:
+    - selinux
+    - security
+
+- name: Apply SELinux file contexts
+  ansible.builtin.command: restorecon -Rv {{ item }}
+  loop:
+    - "{{ vault_data_dir }}"
+    - "{{ vault_config_dir }}"
+    - "{{ vault_log_dir }}"
+    - "{{ vault_binary_path }}"
+  changed_when: false
+  tags:
+    - selinux
+    - security
+
+- name: Allow Vault ports in SELinux
+  community.general.seport:
+    ports: "{{ item }}"
+    proto: tcp
+    setype: http_port_t
+    state: present
+  loop:
+    - "{{ vault_api_port }}"
+    - "{{ vault_cluster_port }}"
+  tags:
+    - selinux
+    - security

@@ -1,0 +1,57 @@
+---
+# =============================================================================
+# Proxmox Node Group Variables
+# =============================================================================
+# Overrides for proxmox_nodes group. Applied automatically by Ansible when
+# targeting hosts in the proxmox_nodes inventory group.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SSH Security
+# ---------------------------------------------------------------------------
+# Proxmox clusters REQUIRE root key-based SSH between nodes for pvecm,
+# VM migration, /etc/pve config sync, and Web UI remote shell access.
+# "prohibit-password" allows key-based root SSH while blocking password auth.
+# Do NOT set this to "no" — it breaks cluster operations.
+# The admin user is used for operator access; root SSH is for Proxmox internals only.
+ssh_permit_root_login: "prohibit-password"
+# Proxmox nodes serve as SSH jump hosts for VLAN 20 (Services) because
+# gw-01 intermittently drops TCP to newly-created VMs. Enables
+# ssh -L tunnels for kubectl access to RKE2 API (10.0.20.40:6443).
+# CIS 5.2.6 deviation — documented, limited to hypervisor nodes only.
+ssh_allow_tcp_forwarding: "yes"
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
+# Proxmox manages its own firewall via iptables (not UFW).
+# The bootstrap playbook configures iptables rules for Proxmox-specific ports:
+#   - 8006 (Proxmox Web UI)
+#   - 5405-5412 (Corosync cluster communication)
+#   - 60000-60050 (VM migration traffic)
+# The common role's UFW firewall tasks are skipped when this is true.
+proxmox_skip_ufw: true
+
+# ---------------------------------------------------------------------------
+# USB Storage
+# ---------------------------------------------------------------------------
+# Proxmox nodes may need USB passthrough for VMs, so USB storage
+# kernel module is NOT blocked by the hardening role.
+usb_storage_enabled: true
+
+# ---------------------------------------------------------------------------
+# Proxmox Cluster
+# ---------------------------------------------------------------------------
+# Cluster configuration for proxmox-cluster-init.yml playbook.
+# The leader creates the cluster; all other nodes join it.
+# Leader should be a fresh node with no VMs for lowest risk.
+proxmox_cluster_name: "firblab"
+proxmox_cluster_leader: "lab-01"
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+# node_exporter is installed but UFW rule is skipped (proxmox_skip_ufw: true).
+# The Proxmox host-level PVE firewall must allow TCP/9100 from the Services
+# VLAN (10.0.20.0/24) for Prometheus to scrape these hosts.
+monitoring_host_group: "proxmox"

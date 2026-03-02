@@ -1,0 +1,267 @@
+---
+# =============================================================================
+# hetzner-gateway Role — Tasks
+# =============================================================================
+# Manages all Hetzner gateway service configs. Idempotent — safe to re-run
+# at any time. On first run against a bootstrapped server, starts the full
+# service stack alongside the already-running WireGuard container.
+#
+# Secrets injected from Vault by gateway-deploy.yml:
+#   gateway_gotify_password       — plain text (Gotify DEFAULTUSER_PASS env var)
+#   gateway_traefik_dashboard_hash — bcrypt hash for basic auth
+#   gateway_adguard_password_hash  — bcrypt hash for AdGuard UI
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Ensure gateway directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ gateway_base_dir }}"
+    - "{{ gateway_services_dir }}"
+    - "{{ gateway_traefik_dir }}"
+    - "{{ gateway_traefik_dir }}/dynamic"
+    - "{{ gateway_traefik_dir }}/letsencrypt"
+    - "{{ gateway_adguard_dir }}"
+    - "{{ gateway_adguard_dir }}/conf"
+    - "{{ gateway_adguard_dir }}/work"
+    - "{{ gateway_wireguard_dir }}"
+    - "{{ gateway_fail2ban_dir }}"
+    - "{{ gateway_fail2ban_dir }}/jail.d"
+    - "{{ gateway_alloy_dir }}"
+    - /backups
+  tags:
+    - configure
+
+- name: Ensure acme.json exists with correct permissions
+  ansible.builtin.file:
+    path: "{{ gateway_traefik_dir }}/letsencrypt/acme.json"
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker daemon configuration (log rotation, storage driver)
+# ---------------------------------------------------------------------------
+- name: Configure Docker daemon (log rotation + log driver)
+  ansible.builtin.template:
+    src: docker-daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  # No handler: daemon.json log settings (max-size/max-file) apply to new containers.
+  # docker compose up --remove-orphans already recreates containers whose definitions
+  # changed, so they pick up the new log settings. Restarting the Docker daemon after
+  # compose up would stop all containers and rely on auto-restart, which is fragile.
+  # If daemon.json ever needs a daemon restart (e.g. storage-driver change), do it
+  # explicitly before running this playbook.
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Log rotation
+# ---------------------------------------------------------------------------
+- name: Configure logrotate for gateway logs
+  ansible.builtin.template:
+    src: logrotate-gateway.j2
+    dest: /etc/logrotate.d/lab-gateway
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose — full service stack
+# ---------------------------------------------------------------------------
+- name: Deploy Docker Compose service definition
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ gateway_services_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  register: compose_result
+  tags:
+    - configure
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Traefik configuration
+# ---------------------------------------------------------------------------
+- name: Deploy Traefik static config
+  ansible.builtin.template:
+    src: traefik-static.yml.j2
+    dest: "{{ gateway_traefik_dir }}/traefik.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart traefik
+  tags:
+    - configure
+    - traefik
+
+- name: Deploy Traefik dynamic routing config
+  ansible.builtin.template:
+    src: traefik-services.yml.j2
+    dest: "{{ gateway_traefik_dir }}/dynamic/services.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  # No handler notify — Traefik watches this directory (watch: true in static config)
+  # and hot-reloads routes without a container restart.
+  tags:
+    - configure
+    - traefik
+
+# ---------------------------------------------------------------------------
+# AdGuard Home configuration
+# ---------------------------------------------------------------------------
+- name: Deploy AdGuard Home config
+  ansible.builtin.template:
+    src: adguard.yaml.j2
+    dest: "{{ gateway_adguard_dir }}/conf/AdGuardHome.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart adguard
+  tags:
+    - configure
+    - adguard
+
+# ---------------------------------------------------------------------------
+# Fail2ban configuration
+# ---------------------------------------------------------------------------
+- name: Deploy Fail2ban SSH jail config
+  ansible.builtin.template:
+    src: fail2ban-sshd.local.j2
+    dest: "{{ gateway_fail2ban_dir }}/jail.d/sshd.local"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart fail2ban
+  tags:
+    - configure
+    - fail2ban
+
+# ---------------------------------------------------------------------------
+# Alloy (log shipping to Loki)
+# ---------------------------------------------------------------------------
+- name: Deploy Alloy config
+  ansible.builtin.template:
+    src: alloy-config.alloy.j2
+    dest: "{{ gateway_alloy_dir }}/config.alloy"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart alloy
+  tags:
+    - configure
+    - alloy
+
+# ---------------------------------------------------------------------------
+# Ensure auth.log and syslog exist (required by CrowdSec + Fail2ban)
+# ---------------------------------------------------------------------------
+- name: Ensure log files exist for CrowdSec and Fail2ban
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - /var/log/auth.log
+    - /var/log/syslog
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# WireGuard homelab subnet routes
+# ---------------------------------------------------------------------------
+# The linuxserver/wireguard Docker image runs with network_mode: host. AllowedIPs
+# in the WireGuard peer config controls cryptographic routing (which peers can
+# send/receive which IPs), but does NOT create Linux kernel routes automatically.
+# Kernel routes must be added explicitly on the host. Phase 8.6 of cloud-init
+# does this on first boot; these tasks keep the running gateway in sync when
+# gateway_homelab_subnets changes (e.g. adding a new VLAN to the tunnel).
+
+- name: Set WireGuard homelab peer AllowedIPs and reload config
+  ansible.builtin.shell:
+    cmd: |
+      WANT="{{ gateway_wireguard_homelab_peer_ip }}/32, {{ gateway_homelab_subnets | join(', ') }}"
+      HAVE=$(docker exec wireguard grep -A10 '# {{ gateway_wireguard_homelab_peer_name }}$' \
+        /config/wg_confs/wg0.conf | grep '^AllowedIPs' | sed 's/AllowedIPs = //')
+      if [ "$HAVE" = "$WANT" ]; then
+        echo "unchanged"
+        exit 0
+      fi
+      docker exec wireguard bash -c "
+        sed -i '/# {{ gateway_wireguard_homelab_peer_name }}\$/,/AllowedIPs/ \
+          s|AllowedIPs = .*|AllowedIPs = ${WANT}|' /config/wg_confs/wg0.conf
+      "
+      docker exec wireguard bash -c \
+        "wg syncconf wg0 <(wg-quick strip /config/wg_confs/wg0.conf)"
+      echo "changed"
+  register: wg_peer_result
+  changed_when: "'changed' in wg_peer_result.stdout"
+  tags:
+    - configure
+    - wireguard-routes
+
+- name: Ensure kernel routes exist for homelab subnets
+  ansible.builtin.command:
+    cmd: ip route add {{ item }} dev wg0
+  loop: "{{ gateway_homelab_subnets }}"
+  register: route_result
+  changed_when: route_result.rc == 0
+  failed_when:
+    - route_result.rc != 0
+    - "'File exists' not in route_result.stderr"
+  tags:
+    - configure
+    - wireguard-routes
+
+- name: Deploy wireguard-routes systemd unit (restores routes after reboot)
+  ansible.builtin.template:
+    src: wireguard-routes.service.j2
+    dest: /etc/systemd/system/wireguard-routes.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: enable wireguard-routes
+  tags:
+    - configure
+    - wireguard-routes
+
+# ---------------------------------------------------------------------------
+# Start / reconcile the full service stack
+# ---------------------------------------------------------------------------
+- name: Start all gateway services (up -d --remove-orphans)
+  community.docker.docker_compose_v2:
+    project_src: "{{ gateway_services_dir }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+  register: compose_up_result
+  tags:
+    - deploy
+
+- name: Display service status
+  ansible.builtin.debug:
+    msg: "Services changed: {{ compose_up_result.actions | default([]) | length }} action(s)"
+  tags:
+    - deploy

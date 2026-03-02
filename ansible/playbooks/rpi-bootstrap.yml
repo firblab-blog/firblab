@@ -1,0 +1,631 @@
+---
+# =============================================================================
+# Raspberry Pi Bootstrap Playbook (Safe, Diagnose-First)
+# =============================================================================
+# Four-phase bootstrap for fresh Raspberry Pi hosts running Ubuntu 24.04.
+# Designed to NEVER kill the working connection until the new one is proven.
+#
+# Play 1 - Diagnostic Pre-Flight (READ-ONLY):
+#   Detects wired interface name (auto, not hardcoded), verifies link/carrier,
+#   displays all interface info for operator review. Makes ZERO changes.
+#   Fails early with clear messages if hardware isn't ready.
+#
+# Play 2 - Wired Connectivity Test (ADDITIVE, with rollback):
+#   Adds wired netplan config ALONGSIDE existing WiFi config. Tests gateway
+#   ping and SSH on new IP. If anything fails, removes test config, restores
+#   WiFi, and aborts. RPi stays reachable.
+#
+# Play 3 - Full Setup + Network Cutover (wired CONFIRMED working):
+#   Creates admin user, sets hostname, writes final wired-only netplan,
+#   disables WiFi, locks admin. SSH drops — safe because Play 2 proved
+#   wired works.
+#
+# Play 4 - System Hardening (as admin via wired VLAN 10):
+#   Applies common baseline and CIS L1 hardening via reusable roles.
+#
+# After running this playbook, the host is ready for vault-deploy.yml.
+# Vault-specific firewall ports are applied by vault-deploy.yml when
+# targeting the vault_cluster group — they are NOT part of this bootstrap.
+#
+# Prerequisites:
+#   1. Ubuntu 24.04 flashed via Raspberry Pi Imager with user 'admin'
+#   2. RPi connected to WiFi (reachable at wifi_ip)
+#   3. Wired ethernet cable plugged into switch port with Management Access
+#      profile (VLAN 10 native/untagged)
+#   4. SSH key deployed by Imager: ~/.ssh/id_ed25519_lab-rpi5
+#
+# Usage:
+#   # Diagnostic only (read-only, safe to run anytime):
+#   ansible-playbook playbooks/rpi-bootstrap.yml --tags diagnostic \
+#     -e "wifi_ip=10.0.4.83"
+#
+#   # Full bootstrap (all 4 plays):
+#   ansible-playbook playbooks/rpi-bootstrap.yml --tags full_bootstrap \
+#     -e "wifi_ip=10.0.4.83"
+# =============================================================================
+
+# =========================================================================
+# Play 1: Diagnostic Pre-Flight (READ-ONLY)
+# =========================================================================
+# Makes ZERO changes. Detects wired interface, verifies link, displays
+# state for operator review. Fail early if hardware isn't ready.
+# Run standalone with: --tags diagnostic
+# =========================================================================
+- name: "Bootstrap RPi (Play 1/4: Diagnostic Pre-Flight)"
+  hosts: lab-rpi
+  become: true
+  gather_facts: true
+  tags: [diagnostic, always]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ wifi_ip | default('10.0.4.83') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_lab-rpi5"
+
+  tasks:
+    # -------------------------------------------------------------------
+    # Detect wired interface name from kernel metadata
+    # -------------------------------------------------------------------
+    # Scans /sys/class/net/ for interfaces that are:
+    #   - type 1 (Ethernet)
+    #   - NOT wireless (no /sys/class/net/*/wireless directory)
+    #   - NOT virtual (has /sys/class/net/*/device symlink = real hardware)
+    #   - NOT loopback
+    # This works regardless of naming scheme: eth0, end0, enp1s0, etc.
+    # -------------------------------------------------------------------
+    - name: Detect wired Ethernet interface name
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          # Skip loopback
+          [ "$name" = "lo" ] && continue
+          # Skip wireless interfaces
+          [ -d "$iface/wireless" ] && continue
+          # Must be a real hardware device (has /device symlink)
+          [ -e "$iface/device" ] || continue
+          # Must be type 1 (Ethernet)
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        echo "NONE"
+        exit 1
+      register: wired_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if no wired Ethernet interface detected
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: No wired Ethernet interface detected on this RPi.
+          ================================================================
+          Checked /sys/class/net/ for type=1 (Ethernet), non-wireless,
+          hardware-backed interfaces. Found none.
+
+          Possible causes:
+            - Ethernet cable not plugged in
+            - Carrier board Ethernet not recognized by Ubuntu
+            - Missing driver for CM5 carrier board NIC
+
+          Diagnostic commands (run on RPi console):
+            ls -la /sys/class/net/
+            ip link show
+            dmesg | grep -i eth
+          ================================================================
+      when: wired_detect.rc != 0
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+      when: wired_detect.rc == 0
+
+    - name: Display detected wired interface
+      ansible.builtin.debug:
+        msg: "Detected wired interface: {{ wired_iface }}"
+
+    # -------------------------------------------------------------------
+    # Verify wired link state (carrier)
+    # -------------------------------------------------------------------
+    - name: Check wired interface carrier (link state)
+      ansible.builtin.slurp:
+        src: "/sys/class/net/{{ wired_iface }}/carrier"
+      register: carrier_check
+      failed_when: false
+
+    - name: Fail if wired interface has no link
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: Wired interface '{{ wired_iface }}' has no link (no carrier).
+          ================================================================
+          The interface exists but there is no active Ethernet link.
+
+          Possible causes:
+            - Ethernet cable not plugged in or loose
+            - Switch port is down or disabled
+            - Cable fault
+            - Switch port not assigned Management Access profile
+
+          Check:
+            1. Physical cable connection
+            2. Switch port LED status
+            3. UniFi → Devices → Switch → Port status
+          ================================================================
+      when: >
+        carrier_check.failed or
+        (carrier_check.content | default('') | b64decode | trim) != '1'
+
+    - name: Wired link confirmed UP
+      ansible.builtin.debug:
+        msg: "Interface '{{ wired_iface }}' has active carrier (link UP)"
+
+    # -------------------------------------------------------------------
+    # Display full interface and netplan state for operator review
+    # -------------------------------------------------------------------
+    - name: Gather all interface information
+      ansible.builtin.command: ip addr show
+      register: ip_addr_output
+      changed_when: false
+
+    - name: Display all interface information
+      ansible.builtin.debug:
+        msg: "{{ ip_addr_output.stdout_lines }}"
+
+    - name: Find existing netplan configs
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: "*.yaml,*.yml"
+      register: existing_netplan_files
+
+    - name: Read existing netplan configs
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ existing_netplan_files.files }}"
+      register: netplan_contents
+
+    - name: Display existing netplan configs
+      ansible.builtin.debug:
+        msg: |
+          File: {{ item.item.path }}
+          Contents:
+          {{ item.content | b64decode }}
+      loop: "{{ netplan_contents.results }}"
+      when: netplan_contents.results | length > 0
+
+    - name: Diagnostic summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          Diagnostic Pre-Flight PASSED
+          ================================================================
+          Wired interface:  {{ wired_iface }}
+          Link state:       UP (carrier detected)
+          WiFi IP:          {{ ansible_host }}
+          Target wired IP:  10.0.10.13/24
+          Gateway:          10.0.10.1
+
+          Ready to proceed with wired connectivity test.
+          ================================================================
+
+# =========================================================================
+# Play 2: Wired Connectivity Test (ADDITIVE, with rollback)
+# =========================================================================
+# Adds a wired netplan config ALONGSIDE the existing WiFi config.
+# Netplan merges all .yaml files — both interfaces come up.
+# Tests gateway reachability and SSH on the new IP.
+# If ANYTHING fails → removes test config, restores WiFi, aborts safely.
+# =========================================================================
+- name: "Bootstrap RPi (Play 2/4: Wired Connectivity Test)"
+  hosts: lab-rpi
+  become: true
+  gather_facts: false
+  tags: [never, wired_test, full_bootstrap]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ wifi_ip | default('10.0.4.83') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_lab-rpi5"
+    target_ip: 10.0.10.13
+    target_cidr: 24
+    target_gateway: 10.0.10.1
+    dns_1: 1.1.1.1
+    dns_2: 8.8.8.8
+
+  tasks:
+    # Re-detect wired interface (Play 1 facts don't carry between plays)
+    - name: Re-detect wired Ethernet interface
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        exit 1
+      register: wired_detect
+      changed_when: false
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+
+    - name: Test wired connectivity (with automatic rollback on failure)
+      block:
+        # Write ADDITIONAL netplan — WiFi config stays untouched
+        - name: Write wired test netplan (additive — WiFi stays active)
+          ansible.builtin.copy:
+            dest: /etc/netplan/02-wired-test.yaml
+            owner: root
+            group: root
+            mode: "0600"
+            content: |
+              # Temporary wired connectivity test
+              # Generated by rpi-bootstrap.yml Play 2
+              # Will be replaced by final config in Play 3
+              network:
+                version: 2
+                renderer: networkd
+                ethernets:
+                  {{ wired_iface }}:
+                    addresses:
+                      - {{ target_ip }}/{{ target_cidr }}
+                    routes:
+                      - to: default
+                        via: {{ target_gateway }}
+                        metric: 100
+                    nameservers:
+                      addresses:
+                        - {{ dns_1 }}
+                        - {{ dns_2 }}
+                    dhcp4: false
+                    dhcp6: false
+
+        - name: Apply netplan (dual-stack — WiFi + wired both active)
+          ansible.builtin.command: netplan apply
+          changed_when: true
+
+        - name: Wait for wired interface to acquire IP
+          ansible.builtin.shell: |
+            for i in $(seq 1 15); do
+              if ip addr show {{ wired_iface }} | grep -q '{{ target_ip }}'; then
+                echo "IP {{ target_ip }} found on {{ wired_iface }}"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "TIMEOUT: {{ target_ip }} not found on {{ wired_iface }} after 30 seconds"
+            ip addr show {{ wired_iface }}
+            exit 1
+          register: ip_wait
+          changed_when: false
+
+        - name: Display wired IP status
+          ansible.builtin.debug:
+            msg: "{{ ip_wait.stdout }}"
+
+        - name: Test gateway reachability from wired interface
+          ansible.builtin.command: ping -I {{ wired_iface }} -c 3 -W 2 {{ target_gateway }}
+          register: ping_result
+          changed_when: false
+
+        - name: Display gateway ping result
+          ansible.builtin.debug:
+            msg: "{{ ping_result.stdout_lines }}"
+
+        - name: Test SSH reachable on wired IP (from RPi itself)
+          ansible.builtin.wait_for:
+            host: "{{ target_ip }}"
+            port: 22
+            timeout: 15
+            state: started
+
+        - name: Wired connectivity test PASSED
+          ansible.builtin.debug:
+            msg: |
+              ================================================================
+              Wired Connectivity Test PASSED
+              ================================================================
+              Interface:   {{ wired_iface }}
+              IP:          {{ target_ip }}/{{ target_cidr }}
+              Gateway:     {{ target_gateway }} — reachable (ping OK)
+              SSH:         Port 22 listening on {{ target_ip }}
+
+              Safe to proceed with network cutover.
+              ================================================================
+
+      rescue:
+        # -----------------------------------------------------------
+        # ROLLBACK: Remove wired test config, restore WiFi-only
+        # -----------------------------------------------------------
+        - name: "ROLLBACK: Remove wired test netplan config"
+          ansible.builtin.file:
+            path: /etc/netplan/02-wired-test.yaml
+            state: absent
+
+        - name: "ROLLBACK: Re-apply netplan (WiFi-only restored)"
+          ansible.builtin.command: netplan apply
+          changed_when: true
+
+        - name: "ROLLBACK: Fail with diagnostic info"
+          ansible.builtin.fail:
+            msg: |
+              ================================================================
+              WIRED CONNECTIVITY TEST FAILED — WiFi RESTORED
+              ================================================================
+              The RPi is still reachable at {{ ansible_host }} via WiFi.
+              NO changes were made to user accounts or hostname.
+
+              The wired test config has been removed and WiFi restored.
+
+              Diagnose before retrying:
+                1. Is the switch port set to Management Access profile?
+                   (UniFi → Devices → Switch → find the RPi port)
+                2. Is the cable good? Check switch port LED.
+                3. SSH to RPi and run:
+                   ip link show {{ wired_iface }}
+                   ping -I {{ wired_iface }} {{ target_gateway }}
+
+              Interface detected: {{ wired_iface }}
+              ================================================================
+
+# =========================================================================
+# Play 3: Full Setup + Network Cutover (wired CONFIRMED working)
+# =========================================================================
+# Wired is proven. Now: create admin, set hostname, write final wired-only
+# netplan, kill WiFi, lock admin, apply. SSH drops — safe.
+# =========================================================================
+- name: "Bootstrap RPi (Play 3/4: Setup + Network Cutover)"
+  hosts: lab-rpi
+  become: true
+  gather_facts: true
+  tags: [never, full_bootstrap]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ wifi_ip | default('10.0.4.83') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_lab-rpi5"
+    admin_user: admin
+    admin_ssh_pubkey: "{{ lookup('file', '~/.ssh/id_ed25519_lab-rpi5.pub') }}"
+    target_hostname: vault-3
+    target_ip: 10.0.10.13
+    target_cidr: 24
+    target_gateway: 10.0.10.1
+    dns_1: 1.1.1.1
+    dns_2: 8.8.8.8
+
+  tasks:
+    # Re-detect wired interface
+    - name: Re-detect wired Ethernet interface
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        exit 1
+      register: wired_detect
+      changed_when: false
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+
+    # -------------------------------------------------------------------
+    # Hostname
+    # -------------------------------------------------------------------
+    - name: Set hostname to {{ target_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ target_hostname }}"
+
+    - name: Update /etc/hosts with new hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ target_hostname }}"
+        state: present
+
+    # -------------------------------------------------------------------
+    # Admin User Setup
+    # -------------------------------------------------------------------
+    - name: Create admin user with sudo privileges
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Set up SSH authorized key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_ssh_pubkey }}"
+        state: present
+        exclusive: false
+
+    - name: Grant admin user passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    # -------------------------------------------------------------------
+    # Network Cutover: Final wired-only netplan
+    # -------------------------------------------------------------------
+    - name: Find all netplan config files (including test config)
+      ansible.builtin.find:
+        paths: /etc/netplan
+        patterns: "*.yaml,*.yml"
+      register: netplan_files
+
+    - name: Backup existing netplan configs
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ item.path }}.bak.{{ ansible_facts['date_time']['epoch'] }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ netplan_files.files }}"
+      when: netplan_files.files | length > 0
+
+    - name: Remove ALL existing netplan configs
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ netplan_files.files }}"
+      when: netplan_files.files | length > 0
+
+    - name: Write final wired-only netplan config
+      ansible.builtin.copy:
+        dest: /etc/netplan/01-management.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Management VLAN 10 — static IP (wired only)
+          # Generated by ansible/playbooks/rpi-bootstrap.yml
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              {{ wired_iface }}:
+                addresses:
+                  - {{ target_ip }}/{{ target_cidr }}
+                routes:
+                  - to: default
+                    via: {{ target_gateway }}
+                nameservers:
+                  addresses:
+                    - {{ dns_1 }}
+                    - {{ dns_2 }}
+                dhcp4: false
+                dhcp6: false
+
+    # -------------------------------------------------------------------
+    # Disable WiFi (belt-and-suspenders)
+    # -------------------------------------------------------------------
+    - name: Disable WiFi radio via rfkill (best-effort)
+      ansible.builtin.shell: |
+        for p in /usr/sbin/rfkill /usr/bin/rfkill /sbin/rfkill; do
+          if [ -x "$p" ]; then
+            "$p" block wifi
+            exit 0
+          fi
+        done
+        echo "rfkill not found — skipping (netplan already disables WiFi)"
+      changed_when: true
+
+    # -------------------------------------------------------------------
+    # Lock Imager User (admin)
+    # -------------------------------------------------------------------
+    - name: Lock admin user password
+      ansible.builtin.user:
+        name: admin
+        password_lock: true
+
+    - name: Remove admin sudoers entry (if any)
+      ansible.builtin.file:
+        path: /etc/sudoers.d/admin
+        state: absent
+
+    - name: Remove admin from sudo group
+      ansible.builtin.user:
+        name: admin
+        groups: ""
+        append: false
+
+    # -------------------------------------------------------------------
+    # Apply Network Config (SSH will drop — SAFE because Play 2 passed)
+    # -------------------------------------------------------------------
+    - name: Flush handlers before network cutover
+      ansible.builtin.meta: flush_handlers
+
+    # Fire-and-forget: netplan apply runs after a 2-second delay.
+    # SSH drops — this is expected AND safe because Play 2 confirmed wired.
+    - name: Apply final netplan configuration (SSH will drop — expected)
+      ansible.builtin.shell: |
+        nohup bash -c 'sleep 2 && netplan apply' &>/dev/null &
+      async: 0
+      poll: 0
+      changed_when: true
+
+# =========================================================================
+# Play 4: System Hardening (as admin via wired VLAN 10)
+# =========================================================================
+# Connects as the newly-created admin user at the wired static IP.
+# Uses inventory defaults for lab-rpi (10.0.10.13, admin user).
+# Applies the full common baseline and CIS L1 hardening.
+# =========================================================================
+- name: "Bootstrap RPi (Play 4/4: Hardening via Wired VLAN 10)"
+  hosts: lab-rpi
+  become: true
+  gather_facts: false
+  tags: [never, full_bootstrap]
+
+  # No connection overrides — inventory defaults are correct:
+  #   ansible_host: 10.0.10.13
+  #   ansible_user: admin
+  #   ansible_ssh_private_key_file: ~/.ssh/id_ed25519_lab-rpi5
+
+  pre_tasks:
+    - name: Wait for host to come up at new IP (10.0.10.13)
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 120
+
+    - name: Gather facts from host at new IP
+      ansible.builtin.setup:
+
+    - name: Verify admin user connectivity
+      ansible.builtin.ping:
+
+  roles:
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+  post_tasks:
+    - name: Display bootstrap summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          RPi Bootstrap Complete!
+          ================================================================
+          Hostname:   {{ ansible_hostname }}
+          IP:         {{ ansible_default_ipv4.address | default('10.0.10.13') }}
+          OS:         {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+          User:       admin (admin locked)
+          WiFi:       Disabled
+          Roles:      common + hardening applied
+
+          Next steps:
+            1. Verify SSH:
+               ssh -i ~/.ssh/id_ed25519_lab-rpi5 admin@10.0.10.13
+
+            2. Deploy Vault:
+               ansible-playbook playbooks/vault-deploy.yml --limit vault-3 \
+                 -e "vault_transit_seal_token=<transit-token>"
+
+            3. Join Raft cluster:
+               export VAULT_ADDR=https://10.0.10.13:8200
+               export VAULT_CACERT=$HOME/.lab/tls/vault-3/ca.pem
+               vault operator raft join \
+                 -leader-ca-cert=@$HOME/.lab/tls/vault-1/ca.pem \
+                 https://10.0.10.10:8200
+          ================================================================

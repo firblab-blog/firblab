@@ -1,0 +1,32 @@
+# ArgoCD Root App-of-Apps
+#
+# Applied by the argocd-bootstrap.yml Ansible playbook:
+#   ansible-playbook ansible/playbooks/argocd-bootstrap.yml
+#
+# The root application watches k8s/argocd/apps/ for sub-application definitions.
+# ArgoCD sync waves control deployment ordering:
+#   Wave 0: Platform Helm charts (MetalLB, Traefik, cert-manager, ESO,
+#           Longhorn, Trivy Operator)
+#   NOTE: Monitoring (Prometheus, Loki, Grafana, Alertmanager) migrated to K3s RPi5 cluster.
+#         Deployed via Ansible k3s-monitoring-deploy.yml (Helm-only, no ArgoCD).
+#   Wave 1: Post-install config (IPAddressPool, ClusterIssuer, ClusterSecretStore,
+#           Middlewares)
+#   Wave 2: Workload applications (GitLab CE, Wazuh SIEM)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: http://10.0.10.50/infrastructure/firblab.git
+    targetRevision: HEAD
+    path: k8s/argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

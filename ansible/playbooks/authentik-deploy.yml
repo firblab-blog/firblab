@@ -1,0 +1,263 @@
+---
+# =============================================================================
+# Authentik SSO/IDP Deployment Playbook
+# =============================================================================
+# Deploys Authentik with PostgreSQL, server, and worker services via Docker
+# Compose on a CIS-hardened VM (Management VLAN 10).
+#
+# Prerequisites:
+#   - Authentik VM provisioned by Terraform Layer 05 (cloned from Packer template)
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - Vault secrets seeded by Layer 02-vault-config (secret/services/authentik)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/authentik-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags authentik   # Only Authentik app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+#   ansible-playbook ... --tags backup      # Only backup automation
+# =============================================================================
+
+- name: Deploy Authentik SSO/IDP
+  hosts: authentik
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Read from Vault (seeded by Terraform Layer 02)
+    # -----------------------------------------------------------------
+    - name: Read Authentik secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/authentik
+      register: vault_authentik_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: authentik_secret_key is not defined
+      tags:
+        - always
+
+    - name: Set secrets from Vault
+      ansible.builtin.set_fact:
+        authentik_secret_key: "{{ (vault_authentik_read.stdout | from_json).data.data.secret_key }}"
+        authentik_db_password: "{{ (vault_authentik_read.stdout | from_json).data.data.postgresql_password }}"
+        authentik_bootstrap_password: "{{ (vault_authentik_read.stdout | from_json).data.data.bootstrap_password }}"
+        authentik_bootstrap_token: "{{ (vault_authentik_read.stdout | from_json).data.data.bootstrap_token }}"
+      when:
+        - authentik_secret_key is not defined
+        - vault_authentik_read.rc is defined
+        - vault_authentik_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate Authentik secrets are available
+      ansible.builtin.assert:
+        that:
+          - authentik_secret_key is defined
+          - authentik_secret_key | length > 0
+          - authentik_db_password is defined
+          - authentik_db_password | length > 0
+          - authentik_bootstrap_password is defined
+          - authentik_bootstrap_password | length > 0
+          - authentik_bootstrap_token is defined
+          - authentik_bootstrap_token | length > 0
+        fail_msg: >
+          Authentik secrets not available. Ensure Terraform Layer 02 has been applied:
+            terraform -chdir=terraform/layers/02-vault-config apply
+          Then verify Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/authentik
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Authentik on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-04:{{ (vault_restic_read.stdout | from_json).data.data.firblab04_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-04/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    # Backup configuration (S3 off-site for Authentik SSO data)
+    # CRITICAL: Losing Authentik PostgreSQL = all OIDC/ForwardAuth integrations break
+    backup_enabled: true
+    backup_cron_hour: "4"
+    backup_cron_minute: "45"
+    backup_services:
+      - name: authentik
+        compose_path: /opt/authentik
+        pre_commands:
+          - "docker exec authentik-db pg_dump -U authentik authentik > /opt/authentik/authentik-dump.sql"
+        paths:
+          - /opt/authentik/media
+          - /opt/authentik/custom-templates
+        extra_paths:
+          - /opt/authentik/authentik-dump.sql
+        post_commands:
+          - "rm -f /opt/authentik/authentik-dump.sql"
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    # CRITICAL: Authentik is the SSO provider — losing it breaks all OIDC integrations
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: authentik
+        stop_compose: /opt/authentik
+        pre_commands:
+          - "docker exec authentik-db pg_dump -U authentik authentik > /opt/authentik/authentik-dump.sql"
+        paths:
+          - /opt/authentik/media
+          - /opt/authentik/custom-templates
+        extra_paths:
+          - /opt/authentik/authentik-dump.sql
+        post_commands:
+          - "rm -f /opt/authentik/authentik-dump.sql"
+        tags: ["authentik", "sso"]
+        cron_hour: "2"
+        cron_minute: "0"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM, not LXC — has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Authentik (Docker Compose: PostgreSQL + server + worker)
+    - role: authentik
+      tags:
+        - authentik
+
+    # Automated S3 backup (daily, age-encrypted, includes pg_dump)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Authentik Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ authentik_port | default(9000) }}/"
+          - "DNS: http://auth.home.example-lab.org:9000/"
+          - "Admin: akadmin / (see Vault)"
+          - ""
+          - "Secrets: vault kv get -mount=secret services/authentik"
+          - "Initial setup: http://{{ ansible_host }}:9000/if/flow/initial-setup/"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ authentik_install_dir | default('/opt/authentik') }}/docker-compose.yml ps"
+          - "  docker compose -f {{ authentik_install_dir | default('/opt/authentik') }}/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

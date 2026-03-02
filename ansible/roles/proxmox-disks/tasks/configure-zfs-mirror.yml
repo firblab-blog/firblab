@@ -1,0 +1,246 @@
+---
+# =============================================================================
+# proxmox-disks — ZFS Mirror Pool Configuration
+# =============================================================================
+# Creates a ZFS mirror pool from two (or more) same-size HDDs and registers
+# it as a Proxmox storage pool. Used for redundant bulk storage: backups,
+# ISOs, container templates, and VM images.
+#
+# Expected variables (set by main.yml loop):
+#   mirror_pool_name: "hdd-mirror-0"
+#   mirror_disks: [{ name: "/dev/sda", ... }, { name: "/dev/sdb", ... }]
+#
+# ZFS mirror provides:
+#   - Data redundancy (survives single disk failure)
+#   - Checksumming and self-healing
+#   - Transparent compression (lz4)
+#   - Snapshots and clones
+#
+# The pool is created with whole disks (no partitions). ZFS manages the
+# disk directly, which gives it full control over alignment and caching.
+#
+# NOTE: All shell tasks export PATH to include /usr/sbin where Proxmox/ZFS
+# admin tools live. Ansible's become + shell may not inherit the login PATH.
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Step 0: Verify all member disks exist
+# -------------------------------------------------------------------------
+- name: "ZFS Mirror | Verify member disks exist for {{ mirror_pool_name }}"
+  ansible.builtin.stat:
+    path: "{{ mirror_disk_item.name }}"
+  register: mirror_disk_stats
+  loop: "{{ mirror_disks }}"
+  loop_control:
+    loop_var: mirror_disk_item
+    label: "{{ mirror_disk_item.name }}"
+  failed_when: not mirror_disk_stats.stat.exists
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 1: Ensure ZFS utilities are installed
+# -------------------------------------------------------------------------
+# Proxmox ships zfsutils-linux by default, but verify it's present.
+# This is idempotent — apt won't reinstall if already installed.
+- name: "ZFS Mirror | Ensure zfsutils-linux is installed"
+  ansible.builtin.apt:
+    name: zfsutils-linux
+    state: present
+    update_cache: false
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 2: Check if ZFS pool already exists
+# -------------------------------------------------------------------------
+- name: "ZFS Mirror | Check if pool '{{ mirror_pool_name }}' already exists"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      zpool list {{ mirror_pool_name }} &>/dev/null && echo "exists" || echo "absent"
+    executable: /bin/bash
+  register: zpool_check
+  changed_when: false
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 3: Create ZFS mirror pool
+# -------------------------------------------------------------------------
+- name: "ZFS Mirror | Create pool '{{ mirror_pool_name }}' with mirror vdev"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      zpool create -f \
+        -o ashift={{ proxmox_zfs_mirror_ashift }} \
+        -O compression={{ proxmox_zfs_mirror_compression }} \
+        -O atime=off \
+        -O xattr=sa \
+        -O acltype=posixacl \
+        {{ mirror_pool_name }} mirror \
+        {{ mirror_disks | map(attribute='name') | join(' ') }}
+    executable: /bin/bash
+  when: zpool_check.stdout | trim == "absent"
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 4: Verify pool health
+# -------------------------------------------------------------------------
+- name: "ZFS Mirror | Verify pool '{{ mirror_pool_name }}' is healthy"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      HEALTH=$(zpool status {{ mirror_pool_name }} | grep -oP 'state:\s+\K\S+')
+      echo "$HEALTH"
+      if [ "$HEALTH" != "ONLINE" ]; then
+        echo "ERROR: Pool {{ mirror_pool_name }} is not ONLINE (state: $HEALTH)" >&2
+        exit 1
+      fi
+    executable: /bin/bash
+  register: zpool_health
+  changed_when: false
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 5A: Register as zfspool in Proxmox (block storage: images, rootdir)
+# -------------------------------------------------------------------------
+# Proxmox 'zfspool' type ONLY supports 'images' and 'rootdir' (ZFS zvol-
+# backed block devices). Skip registration entirely if content is empty
+# (e.g., when only directory storage is desired on the ZFS mount point).
+- name: "ZFS Mirror | Check if Proxmox zfspool storage '{{ mirror_pool_name }}' exists"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvesm status 2>/dev/null | grep -qP '^\s*{{ mirror_pool_name }}\s' \
+        && echo "exists" || echo "absent"
+    executable: /bin/bash
+  register: pvesm_check
+  changed_when: false
+  when: proxmox_zfs_mirror_content | default('') | length > 0
+  tags: [proxmox-disks, zfs-mirror]
+
+- name: "ZFS Mirror | Register '{{ mirror_pool_name }}' as Proxmox ZFS storage"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      pvesm add zfspool {{ mirror_pool_name }} \
+        --pool {{ mirror_pool_name }} \
+        --content {{ proxmox_zfs_mirror_content }} \
+        --nodes {{ inventory_hostname }}
+    executable: /bin/bash
+  when:
+    - proxmox_zfs_mirror_content | default('') | length > 0
+    - pvesm_check.stdout | default('absent') | trim == "absent"
+  tags: [proxmox-disks, zfs-mirror]
+
+# If the pool already exists (created by another node in a cluster), ensure
+# this node is in the 'nodes' list so it can access its own local storage.
+- name: "ZFS Mirror | Ensure {{ inventory_hostname }} is in nodes list for '{{ mirror_pool_name }}'"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      CURRENT_NODES=$(pvesh get /storage/{{ mirror_pool_name }} --output-format json 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('nodes',''))" 2>/dev/null || echo "")
+      if [ -z "$CURRENT_NODES" ]; then
+        pvesm set {{ mirror_pool_name }} --nodes {{ inventory_hostname }}
+        echo "changed: set nodes to {{ inventory_hostname }}"
+      elif echo "$CURRENT_NODES" | grep -q '{{ inventory_hostname }}'; then
+        echo "ok: {{ inventory_hostname }} already in nodes list ($CURRENT_NODES)"
+      else
+        pvesm set {{ mirror_pool_name }} --nodes "${CURRENT_NODES},{{ inventory_hostname }}"
+        echo "changed: added {{ inventory_hostname }} to nodes list (was: $CURRENT_NODES)"
+      fi
+    executable: /bin/bash
+  register: nodes_update
+  changed_when: "'changed:' in nodes_update.stdout"
+  when:
+    - proxmox_zfs_mirror_content | default('') | length > 0
+    - pvesm_check.stdout | default('absent') | trim == "exists"
+  tags: [proxmox-disks, zfs-mirror]
+
+- name: "ZFS Mirror | Skipping zfspool registration (proxmox_zfs_mirror_content is empty)"
+  ansible.builtin.debug:
+    msg: >-
+      Skipping zfspool registration for '{{ mirror_pool_name }}' — no block
+      storage content types requested. The ZFS pool is still mounted at
+      /{{ mirror_pool_name }} and available for direct filesystem use.
+  when: proxmox_zfs_mirror_content | default('') | length == 0
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 5B: Register as dir in Proxmox (file storage: backup, iso, etc.)
+# -------------------------------------------------------------------------
+# ZFS mount point (/<pool-name>/) can also be registered as directory
+# storage for file-based content types that zfspool doesn't support.
+# ZFS still provides checksumming, compression, and self-healing underneath.
+# Storage name: <pool-name>-dir (e.g., hdd-mirror-0-dir).
+- name: "ZFS Mirror | Check if Proxmox dir storage '{{ mirror_pool_name }}-dir' exists"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvesm status 2>/dev/null | grep -qP '^\s*{{ mirror_pool_name }}-dir\s' \
+        && echo "exists" || echo "absent"
+    executable: /bin/bash
+  register: pvesm_dir_check
+  changed_when: false
+  when: proxmox_zfs_mirror_dir_content | default('') | length > 0
+  tags: [proxmox-disks, zfs-mirror]
+
+- name: "ZFS Mirror | Register '/{{ mirror_pool_name }}' as Proxmox directory storage"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      pvesm add dir {{ mirror_pool_name }}-dir \
+        --path /{{ mirror_pool_name }} \
+        --content {{ proxmox_zfs_mirror_dir_content }} \
+        --nodes {{ inventory_hostname }}
+    executable: /bin/bash
+  when:
+    - proxmox_zfs_mirror_dir_content | default('') | length > 0
+    - pvesm_dir_check.stdout | default('absent') | trim == "absent"
+  tags: [proxmox-disks, zfs-mirror]
+
+# If dir storage already exists, ensure this node is in the nodes list.
+- name: "ZFS Mirror | Ensure {{ inventory_hostname }} is in nodes list for '{{ mirror_pool_name }}-dir'"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      CURRENT_NODES=$(pvesh get /storage/{{ mirror_pool_name }}-dir --output-format json 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('nodes',''))" 2>/dev/null || echo "")
+      if [ -z "$CURRENT_NODES" ]; then
+        pvesm set {{ mirror_pool_name }}-dir --nodes {{ inventory_hostname }}
+        echo "changed: set nodes to {{ inventory_hostname }}"
+      elif echo "$CURRENT_NODES" | grep -q '{{ inventory_hostname }}'; then
+        echo "ok: {{ inventory_hostname }} already in nodes list ($CURRENT_NODES)"
+      else
+        pvesm set {{ mirror_pool_name }}-dir --nodes "${CURRENT_NODES},{{ inventory_hostname }}"
+        echo "changed: added {{ inventory_hostname }} to nodes list (was: $CURRENT_NODES)"
+      fi
+    executable: /bin/bash
+  register: dir_nodes_update
+  changed_when: "'changed:' in dir_nodes_update.stdout"
+  when:
+    - proxmox_zfs_mirror_dir_content | default('') | length > 0
+    - pvesm_dir_check.stdout | default('absent') | trim == "exists"
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Step 6: Success summary
+# -------------------------------------------------------------------------
+- name: "ZFS Mirror | Pool '{{ mirror_pool_name }}' configured successfully"
+  ansible.builtin.debug:
+    msg: >-
+      ZFS mirror pool '{{ mirror_pool_name }}' created.
+      Disks: {{ mirror_disks | map(attribute='name') | join(' + ') }}
+      ({{ (mirror_disks | first).size_human }} each).
+      Compression: {{ proxmox_zfs_mirror_compression }},
+      Ashift: {{ proxmox_zfs_mirror_ashift }}.
+      Health: {{ zpool_health.stdout | trim }}.
+      ZFS pool content: {{ proxmox_zfs_mirror_content | default('(none — zfspool registration skipped)') }}.
+      Dir content: {{ proxmox_zfs_mirror_dir_content | default('(none — dir registration skipped)') }}
+  tags: [proxmox-disks, zfs-mirror]

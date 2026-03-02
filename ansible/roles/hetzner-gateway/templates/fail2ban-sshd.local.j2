@@ -1,0 +1,16 @@
+# =============================================================================
+# Fail2ban SSH Jail Configuration — Hetzner Gateway
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Role: ansible/roles/hetzner-gateway, template: fail2ban-sshd.local.j2
+# =============================================================================
+
+[sshd]
+enabled = true
+port = 2222
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+action = iptables-multiport[name=sshd, port="2222", protocol=tcp]

@@ -1,0 +1,32 @@
+---
+# =============================================================================
+# PatchMon Agent Role - Default Variables
+# =============================================================================
+# Lightweight agent that reports package/patch status to PatchMon server.
+# Communicates outbound-only (no inbound ports needed on agent hosts).
+#
+# The agent is installed via PatchMon's auto-enrollment script which handles
+# architecture detection, binary download, credential injection, and cron setup.
+# =============================================================================
+
+# PatchMon server URL (agents connect here)
+patchmon_server_url: "http://10.0.20.15:3000"
+
+# Agent dependencies (installed via package manager before enrollment)
+patchmon_agent_deps_debian:
+  - curl
+  - jq
+  - bc
+
+patchmon_agent_deps_redhat:
+  - curl
+  - jq
+  - bc
+
+# Agent credential file path (created by enrollment script)
+# v1.4.0+ uses credentials.yml (not credentials)
+patchmon_agent_credentials_path: /etc/patchmon/credentials.yml
+
+# Enrollment token (must be set by playbook from Vault)
+# patchmon_enrollment_token_key: ""
+# patchmon_enrollment_token_secret: ""

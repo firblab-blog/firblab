@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# RKE2 STIG Hardening Configuration
+# =============================================================================
+# Deploys DISA STIG and CIS Benchmark configuration files BEFORE RKE2 starts.
+# These files must be in place at first boot for the CIS profile to work.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Audit Policy (DISA STIG V-242402, V-242403)
+# ---------------------------------------------------------------------------
+- name: Deploy API server audit policy
+  ansible.builtin.template:
+    src: audit-policy.yaml.j2
+    dest: "{{ rke2_config_dir }}/audit-policy.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - hardening
+    - audit
+
+# ---------------------------------------------------------------------------
+# Secrets Encryption at Rest (DISA STIG V-242450)
+# ---------------------------------------------------------------------------
+- name: Generate encryption key if not provided
+  ansible.builtin.set_fact:
+    rke2_encryption_key: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) | b64encode }}"
+  when:
+    - rke2_encryption_key is not defined
+    - rke2_role == "server"
+  no_log: true
+  run_once: true
+  tags:
+    - hardening
+
+- name: Deploy secrets encryption config
+  ansible.builtin.template:
+    src: encryption-config.yaml.j2
+    dest: "{{ rke2_config_dir }}/encryption-config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  when: rke2_role == "server"
+  tags:
+    - hardening
+
+# ---------------------------------------------------------------------------
+# CIS Sysctl Config (RKE2 reads this at startup)
+# ---------------------------------------------------------------------------
+- name: Deploy RKE2 CIS sysctl config
+  ansible.builtin.template:
+    src: rke2-cis-sysctl.conf.j2
+    dest: /etc/sysctl.d/60-rke2-cis.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload sysctl
+  tags:
+    - hardening
+    - sysctl
+
+# ---------------------------------------------------------------------------
+# Audit Log Directory
+# ---------------------------------------------------------------------------
+- name: Create audit log directory
+  ansible.builtin.file:
+    path: "{{ rke2_data_dir }}/server/logs"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: rke2_role == "server"
+  tags:
+    - hardening
+    - audit

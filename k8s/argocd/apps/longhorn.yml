@@ -1,0 +1,53 @@
+# Longhorn — Distributed block storage for Kubernetes
+# Wave 0: Helm chart install via multi-source (chart + Git values)
+# Config (basic-auth Middleware) applied by longhorn-config (wave 1)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: longhorn
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  # Longhorn modifies the default-setting ConfigMap at runtime (settings are
+  # stored there). Without this, ArgoCD sees perpetual drift and triggers
+  # the Helm pre-delete hook (longhorn-uninstall), which destroys volumes.
+  ignoreDifferences:
+    - group: ""
+      kind: ConfigMap
+      name: longhorn-default-setting
+      namespace: longhorn-system
+      jsonPointers:
+        - /data
+  sources:
+    - repoURL: https://charts.longhorn.io
+      chart: longhorn
+      targetRevision: "1.*"
+      helm:
+        releaseName: longhorn
+        valueFiles:
+          - $values/k8s/platform/longhorn/helm/values.yaml
+        valuesObject:
+          preUpgradeChecker:
+            jobEnabled: false
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: longhorn-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # Longhorn CSI driver needs privileged containers, hostPath, SYS_ADMIN
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

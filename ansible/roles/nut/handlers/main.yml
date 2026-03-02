@@ -1,0 +1,24 @@
+---
+# =============================================================================
+# NUT Handlers
+# =============================================================================
+
+- name: Reload udev rules
+  ansible.builtin.shell: udevadm control --reload-rules && udevadm trigger
+  changed_when: true
+  when: nut_mode != "netclient"
+
+# nut-server manages the UPS driver lifecycle via upsdrvctl.
+# Restarting nut-server restarts the driver — there is no standalone
+# nut-driver.service on Debian bookworm NUT packages.
+# Skipped in netclient mode (nut-server is not installed).
+- name: Restart nut-server
+  ansible.builtin.systemd:
+    name: nut-server.service
+    state: restarted
+  when: nut_mode != "netclient"
+
+- name: Restart nut-monitor
+  ansible.builtin.systemd:
+    name: nut-monitor.service
+    state: restarted

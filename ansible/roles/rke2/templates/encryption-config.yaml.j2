@@ -1,0 +1,14 @@
+# Kubernetes Secrets Encryption at Rest
+# DISA STIG V-242450
+# Managed by Ansible — DO NOT EDIT MANUALLY
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+    providers:
+      - aescbc:
+          keys:
+            - name: key1
+              secret: {{ rke2_encryption_key }}
+      - identity: {}

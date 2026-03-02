@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# GitLab Host Variables
+# =============================================================================
+# Host-specific overrides for the GitLab server.
+# Group-level vars are in group_vars/core_infra.yml.
+# =============================================================================
+
+# Enable automated backup: daily cron → encrypt → upload to Hetzner S3.
+gitlab_backup_enabled: true
+
+# node_exporter — GitLab omnibus bundles its own node_exporter which binds
+# 127.0.0.1:9100 by default. We disable our standalone exporter here and
+# configure GitLab's built-in one to bind 0.0.0.0:9100 instead so that
+# Prometheus (Services VLAN 20) can scrape it directly.
+monitoring_node_exporter_enabled: false
+gitlab_node_exporter_listen_address: "0.0.0.0:9100"

@@ -1,0 +1,11 @@
+# UniFi gw-01 connection
+unifi_username = "admin"
+unifi_password = "CHANGE_ME"
+unifi_api_url  = "https://10.0.4.1"
+unifi_api_key  = "CHANGE_ME"
+
+# DNS servers per VLAN (customize as needed)
+management_dns_servers = ["1.1.1.1", "8.8.8.8"]
+services_dns_servers   = ["1.1.1.1", "8.8.8.8"]
+dmz_dns_servers        = ["1.1.1.1", "8.8.8.8"]
+security_dns_servers   = ["1.1.1.1", "8.8.8.8"]

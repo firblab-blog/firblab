@@ -1,0 +1,49 @@
+# kured — Kubernetes Reboot Daemon
+# Watches /var/run/reboot-required on each node (set by unattended-upgrades
+# after a kernel security update). When present, kured acquires a cluster-wide
+# lock, cordons + drains the node, then reboots — preventing ungraceful pod
+# termination that leaves init containers in broken state on restart.
+#
+# Why this matters: ArgoCD v3.3.0 copyutil init container uses `ln -s` (not
+# `ln -sf`). If a node reboots ungracefully, the init container fails on
+# restart because the symlink already exists in the surviving emptyDir.
+# A properly drained pod is evicted first, so the new pod gets a fresh emptyDir.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kured
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://kubereboot.github.io/charts
+    chart: kured
+    targetRevision: "5.*"
+    helm:
+      valuesObject:
+        tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+        configuration:
+          rebootSentinel: /var/run/reboot-required
+          annotateNodes: true
+          period: 1h
+          rebootDelay: 90s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kured
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: privileged
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,306 @@
+---
+# =============================================================================
+# NetBox Role - DCIM/IPAM via Docker Compose
+# =============================================================================
+# Deploys NetBox with PostgreSQL, Redis, worker, and housekeeping services
+# using Docker Compose. Expects the docker role to be applied first.
+#
+# Plugins installed via custom Dockerfile:
+#   - netbox-topology-views: Interactive topology diagrams
+#   - netbox-proxmox-importer: Auto-sync VMs from Proxmox API
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flush pending handlers from earlier roles (common, hardening, docker)
+# ---------------------------------------------------------------------------
+# Critical: the docker role's daemon.json template triggers a "Restart docker"
+# handler. If this fires AFTER we start containers, it kills them all.
+# Flushing here ensures Docker is fully restarted before we touch containers.
+- name: Flush handlers from earlier roles before starting containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create NetBox directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ netbox_base_path }}"
+    - path: "{{ netbox_base_path }}/config"
+      mode: "0750"
+    - path: "{{ netbox_base_path }}/docker"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Configuration Files
+# ---------------------------------------------------------------------------
+- name: Template NetBox environment file
+  ansible.builtin.template:
+    src: env.netbox.j2
+    dest: "{{ netbox_base_path }}/config/netbox.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: env_changed
+  tags:
+    - configure
+
+- name: Template PostgreSQL environment file
+  ansible.builtin.copy:
+    content: |
+      POSTGRES_DB={{ netbox_db_name }}
+      POSTGRES_USER={{ netbox_db_user }}
+      POSTGRES_PASSWORD={{ netbox_db_password }}
+    dest: "{{ netbox_base_path }}/config/postgres.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: postgres_env_changed
+  tags:
+    - configure
+
+- name: Template Redis environment file
+  ansible.builtin.copy:
+    content: |
+      REDIS_PASSWORD={{ netbox_redis_password }}
+    dest: "{{ netbox_base_path }}/config/redis.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: redis_env_changed
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Custom Docker Image (Plugins)
+# ---------------------------------------------------------------------------
+- name: Template plugin Dockerfile
+  ansible.builtin.template:
+    src: Dockerfile-Plugins.j2
+    dest: "{{ netbox_base_path }}/docker/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  register: dockerfile_changed
+  tags:
+    - configure
+
+- name: Template plugin configuration
+  ansible.builtin.template:
+    src: plugins.py.j2
+    dest: "{{ netbox_base_path }}/docker/plugins.py"
+    owner: root
+    group: root
+    mode: "0644"
+  register: plugins_changed
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template NetBox Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ netbox_base_path }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_changed
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Build and Start
+# ---------------------------------------------------------------------------
+# No flush_handlers here — we manage the full lifecycle explicitly:
+# build → pull → up --wait. This avoids the first-deploy race where the
+# handler fires before the custom image is built.
+
+- name: Build custom NetBox image with plugins
+  ansible.builtin.command:
+    cmd: docker compose build --no-cache
+    chdir: "{{ netbox_base_path }}"
+  register: netbox_build_result
+  changed_when: "'Successfully built' in netbox_build_result.stdout or 'writing image' in netbox_build_result.stderr"
+  when: dockerfile_changed.changed or plugins_changed.changed
+  tags:
+    - deploy
+    - build
+
+- name: Pull NetBox dependency images
+  ansible.builtin.command:
+    cmd: docker compose pull postgres redis redis-cache
+    chdir: "{{ netbox_base_path }}"
+  register: netbox_pull_result
+  changed_when: "'Pull complete' in netbox_pull_result.stdout or 'Downloaded' in netbox_pull_result.stderr"
+  tags:
+    - deploy
+
+# Don't use --wait here. On first deploy, database migrations take 8-10
+# minutes on slow hardware (J5005). Docker Compose --wait races against
+# start_period and dependent containers, causing false-negative failures.
+# Instead, let 'up -d' return immediately and rely on the Ansible uri
+# health check task below to wait for readiness.
+- name: Start NetBox containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose up -d
+      {{ '--force-recreate' if (env_changed.changed | default(false) or postgres_env_changed.changed | default(false) or redis_env_changed.changed | default(false) or compose_changed.changed | default(false)) else '' }}
+    chdir: "{{ netbox_base_path }}"
+  register: netbox_up_result
+  changed_when: "'Started' in netbox_up_result.stderr or 'Creating' in netbox_up_result.stderr or 'Recreat' in netbox_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+# First deploy on slow hardware (J5005) takes ~8-10 minutes for database
+# migrations. 60 retries × 15s = 15 minutes max wait.
+- name: Wait for NetBox to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ netbox_port }}/login/"
+    method: GET
+    status_code: [200]
+  register: netbox_health
+  retries: 60
+  delay: 15
+  until: netbox_health.status is defined and netbox_health.status == 200
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if NetBox never became accessible
+  ansible.builtin.fail:
+    msg: "NetBox failed to respond after 900 seconds. Last status: {{ netbox_health.status | default('connection refused') }}"
+  when: netbox_health.status is not defined or netbox_health.status != 200
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Superuser & API Token (idempotent)
+# ---------------------------------------------------------------------------
+# The Docker entrypoint handles superuser + token creation via env vars
+# (SUPERUSER_NAME, SUPERUSER_PASSWORD, SUPERUSER_API_TOKEN, SKIP_SUPERUSER).
+# These tasks are a safety net for cases where the entrypoint skipped creation.
+- name: Check if superuser exists
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T netbox python /opt/netbox/netbox/manage.py shell -c
+      "from django.contrib.auth import get_user_model; User = get_user_model(); print(User.objects.filter(username='{{ netbox_superuser_name }}').exists())"
+    chdir: "{{ netbox_base_path }}"
+  register: superuser_check
+  changed_when: false
+  tags:
+    - configure
+
+- name: Create NetBox superuser
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T netbox python /opt/netbox/netbox/manage.py shell -c
+      "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('{{ netbox_superuser_name }}', '{{ netbox_superuser_email }}', '{{ netbox_superuser_password }}')"
+    chdir: "{{ netbox_base_path }}"
+  when: "'False' in superuser_check.stdout"
+  no_log: true
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# API Token Validation & Creation
+# ---------------------------------------------------------------------------
+# NetBox v4.5 uses v2 tokens (nbt_<key>.<secret>) with Bearer auth and
+# HMAC-SHA256 digest. Rather than just checking the token format, we
+# validate the Vault token against the live API. If it fails (wrong format,
+# HMAC mismatch, deleted token, etc.), we delete all tokens and create a
+# fresh one.
+#
+# Token internals (v4.5):
+#   - Token(token=<value>) triggers a property setter that computes the
+#     HMAC digest via update_digest(). The plaintext is NOT stored.
+#   - Token.generate() is a static helper that returns a random string
+#     but does NOT set any fields on the token object.
+#   - save() auto-generates a token value only if self.token is None.
+#   - We must pass token=secret to the constructor so the HMAC is
+#     computed from the same value we store in Vault.
+# Reference: https://github.com/netbox-community/netbox/issues/20210
+# ---------------------------------------------------------------------------
+- name: Ensure NetBox is accessible before token validation
+  ansible.builtin.uri:
+    url: "http://localhost:{{ netbox_port }}/login/"
+    method: GET
+    status_code: [200]
+  register: netbox_pre_token_check
+  retries: 60
+  delay: 15
+  until: netbox_pre_token_check.status is defined and netbox_pre_token_check.status == 200
+  tags:
+    - configure
+
+- name: Validate Vault API token against live NetBox API
+  ansible.builtin.uri:
+    url: "http://localhost:{{ netbox_port }}/api/users/tokens/"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ netbox_api_token }}"
+    status_code: [200, 403]
+  register: token_validation
+  changed_when: false
+  tags:
+    - configure
+
+- name: Set token refresh flag
+  ansible.builtin.set_fact:
+    needs_new_token: "{{ token_validation.status != 200 }}"
+  tags:
+    - configure
+
+- name: Delete existing tokens for admin user (invalid token in Vault)
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T netbox python /opt/netbox/netbox/manage.py shell -c
+      "from django.contrib.auth import get_user_model; from users.models import Token; User = get_user_model(); u = User.objects.get(username='{{ netbox_superuser_name }}'); deleted = Token.objects.filter(user=u).count(); Token.objects.filter(user=u).delete(); print(f'Deleted {deleted} existing tokens')"
+    chdir: "{{ netbox_base_path }}"
+  when: needs_new_token | bool
+  changed_when: false
+  tags:
+    - configure
+
+- name: Create v2 API token for automation
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T netbox python /opt/netbox/netbox/manage.py shell -c
+      "from django.contrib.auth import get_user_model; from users.models import Token; User = get_user_model(); u = User.objects.get(username='{{ netbox_superuser_name }}'); secret = Token.generate(); t = Token(user=u, description='Ansible automation', token=secret); t.save(); print(f'nbt_{t.key}.{secret}')"
+    chdir: "{{ netbox_base_path }}"
+  register: token_create_result
+  when: needs_new_token | bool
+  no_log: true
+  tags:
+    - configure
+
+- name: Update Vault with v2 API token
+  ansible.builtin.command:
+    argv:
+      - vault
+      - kv
+      - patch
+      - -mount=secret
+      - services/netbox
+      - "api_token={{ token_create_result.stdout_lines | last }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when:
+    - needs_new_token | bool
+    - token_create_result is changed
+    - token_create_result.stdout_lines is defined
+  tags:
+    - configure

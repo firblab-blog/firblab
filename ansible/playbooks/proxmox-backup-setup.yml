@@ -1,0 +1,82 @@
+---
+# =============================================================================
+# Proxmox VM/LXC Backup Cleanup Playbook
+# =============================================================================
+# DEPRECATED: This playbook previously managed per-node vzdump cron scripts.
+# Backups are now handled by PBS (Proxmox Backup Server) on lab-04.
+#
+# This playbook now REMOVES the old vzdump cron automation from all nodes.
+# Run it once after PBS is deployed and registered to clean up legacy scripts.
+#
+# Current backup strategy:
+#   - PBS (10.0.10.15:8007) manages all VM/LXC backups centrally
+#   - Content-addressable dedup, incremental backups
+#   - Retention: keep-daily=7, keep-weekly=4, keep-monthly=3
+#   - Setup via: proxmox-pbs-register.yml
+#
+# For PBS management:
+#   ansible-playbook -i inventory/hosts.yml playbooks/pbs-deploy.yml
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-pbs-register.yml
+#
+# Usage (cleanup only):
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-backup-setup.yml
+# =============================================================================
+
+- name: Clean up legacy vzdump backup automation (replaced by PBS)
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Remove vzdump backup scripts and cron jobs
+    # -----------------------------------------------------------------
+    - name: Remove vzdump backup script
+      ansible.builtin.file:
+        path: /opt/firblab/scripts/proxmox-backup.sh
+        state: absent
+
+    - name: Remove daily vzdump cron job
+      ansible.builtin.cron:
+        name: "proxmox-vzdump-daily"
+        state: absent
+        user: root
+
+    - name: Remove vzdump log file
+      ansible.builtin.file:
+        path: /var/log/proxmox-backup.log
+        state: absent
+
+    # -----------------------------------------------------------------
+    # Remove legacy S3 upload artifacts (belt-and-suspenders cleanup)
+    # -----------------------------------------------------------------
+    - name: Remove S3 upload script (removed in S3 cost trimming)
+      ansible.builtin.file:
+        path: /opt/firblab/scripts/proxmox-backup-s3.sh
+        state: absent
+
+    - name: Remove weekly S3 upload cron job
+      ansible.builtin.cron:
+        name: "proxmox-vzdump-s3-weekly"
+        state: absent
+        user: root
+
+    - name: Remove S3 upload log file
+      ansible.builtin.file:
+        path: /var/log/proxmox-backup-s3.log
+        state: absent
+
+  post_tasks:
+    - name: Display cleanup summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "vzdump Cleanup Complete: {{ inventory_hostname }}"
+          - "=========================================="
+          - "Removed: proxmox-backup.sh, vzdump cron, log files"
+          - ""
+          - "Backups are now managed by PBS:"
+          - "  PBS UI: https://10.0.10.15:8007"
+          - "  Verify: pvesm status --storage pbs-backup"
+          - "=========================================="

@@ -1,0 +1,104 @@
+# =============================================================================
+# HashiCorp Vault Configuration
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Node: {{ vault_node_id }}
+# Host: {{ inventory_hostname }} ({{ ansible_host }})
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global Settings
+# ---------------------------------------------------------------------------
+ui            = {{ vault_ui_enabled | lower }}
+disable_mlock = {{ vault_disable_mlock | lower }}
+log_level     = "info"
+
+# Cluster identity
+cluster_name = "firblab-vault"
+api_addr     = "{{ vault_api_addr }}"
+cluster_addr = "{{ vault_cluster_addr }}"
+
+# ---------------------------------------------------------------------------
+# TCP Listener
+# ---------------------------------------------------------------------------
+listener "tcp" {
+  address       = "0.0.0.0:{{ vault_api_port }}"
+  cluster_address = "{{ ansible_host }}:{{ vault_cluster_port }}"
+
+  # TLS Configuration
+  tls_cert_file      = "{{ vault_tls_cert_file }}"
+  tls_key_file       = "{{ vault_tls_key_file }}"
+  tls_client_ca_file = "{{ vault_tls_ca_file }}"
+  tls_min_version    = "{{ vault_tls_min_version }}"
+
+  # Disable TLS only if explicitly set (NOT recommended for production)
+  tls_disable = false
+
+  # Telemetry
+  telemetry {
+    unauthenticated_metrics_access = true
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Integrated Raft Storage
+# ---------------------------------------------------------------------------
+storage "raft" {
+  path    = "{{ vault_data_dir }}"
+  node_id = "{{ vault_node_id }}"
+
+  # Performance tuning
+  performance_multiplier = 1
+
+{% for peer in vault_raft_peers %}
+{% if peer.node_id != vault_node_id %}
+  retry_join {
+    leader_api_addr         = "{{ peer.api_addr }}"
+    leader_ca_cert_file     = "{{ vault_tls_ca_file }}"
+    leader_tls_servername   = "{{ peer.node_id }}.{{ domain_name }}"
+  }
+
+{% endif %}
+{% endfor %}
+}
+
+# ---------------------------------------------------------------------------
+# Seal Configuration
+# ---------------------------------------------------------------------------
+{% if vault_transit_unseal_enabled | default(false) | bool %}
+# Transit auto-unseal via another Vault instance
+seal "transit" {
+  address         = "{{ vault_transit_seal_address }}"
+  token           = "{{ vault_transit_seal_token }}"
+  disable_renewal = "false"
+
+  // Key configuration
+  key_name  = "{{ vault_transit_seal_key_name }}"
+  mount_path = "{{ vault_transit_seal_mount_path }}"
+
+  // TLS
+  tls_ca_cert = "{{ vault_tls_ca_file }}"
+}
+{% else %}
+# Shamir seal (default) — manual unseal with key shares required.
+# Once transit auto-unseal is configured, set vault_transit_unseal_enabled=true
+# and re-run the vault-deploy playbook to migrate the seal.
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# Telemetry (Prometheus)
+# ---------------------------------------------------------------------------
+{% if vault_telemetry_enabled | default(true) | bool %}
+telemetry {
+  prometheus_retention_time = "{{ vault_prometheus_retention_time | default('30s') }}"
+  disable_hostname          = true
+}
+{% endif %}
+
+# ---------------------------------------------------------------------------
+# Service Registration (optional - for Consul integration)
+# ---------------------------------------------------------------------------
+# service_registration "consul" {
+#   address = "127.0.0.1:8500"
+# }

@@ -1,0 +1,96 @@
+---
+# =============================================================================
+# Traefik Standalone Reverse Proxy - Tasks
+# =============================================================================
+# Deploys Traefik v3 as a Docker Compose service with:
+#   - HTTPS termination via Let's Encrypt DNS-01 (Cloudflare)
+#   - ForwardAuth middleware via Authentik
+#   - Dynamic routing to all standalone + management services
+# =============================================================================
+
+- name: Create Traefik directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: root
+    group: root
+  loop:
+    - "{{ traefik_install_dir }}"
+    - "{{ traefik_install_dir }}/config"
+    - "{{ traefik_install_dir }}/config/dynamic"
+    - "{{ traefik_install_dir }}/config/acme"
+    - "{{ traefik_install_dir }}/logs"
+
+- name: Template Traefik static configuration
+  ansible.builtin.template:
+    src: traefik.yml.j2
+    dest: "{{ traefik_install_dir }}/config/traefik.yml"
+    mode: "0640"
+    owner: root
+    group: root
+  notify: Restart traefik
+
+- name: Template Traefik dynamic routes
+  ansible.builtin.template:
+    src: dynamic-routes.yml.j2
+    dest: "{{ traefik_install_dir }}/config/dynamic/routes.yml"
+    mode: "0640"
+    owner: root
+    group: root
+  notify: Restart traefik
+
+- name: Template Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ traefik_install_dir }}/docker-compose.yml"
+    mode: "0640"
+    owner: root
+    group: root
+  notify: Restart traefik
+
+- name: Create ACME storage file (if not exists)
+  ansible.builtin.file:
+    path: "{{ traefik_install_dir }}/config/acme/acme.json"
+    state: touch
+    mode: "0600"
+    owner: root
+    group: root
+    modification_time: preserve
+    access_time: preserve
+
+- name: Pull Traefik Docker image
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_install_dir }}"
+    pull: always
+    state: present
+  register: traefik_pull
+  changed_when: traefik_pull.actions | default([]) | length > 0
+
+- name: Start Traefik
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_install_dir }}"
+    state: present
+  register: traefik_start
+
+- name: Wait for Traefik to be healthy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ traefik_dashboard_port }}/api/overview"
+    method: GET
+    status_code: 200
+    timeout: 5
+  register: traefik_health
+  retries: 12
+  delay: 5
+  until: traefik_health.status == 200
+  tags:
+    - verify
+
+- name: Display Traefik health status
+  ansible.builtin.debug:
+    msg: >
+      Traefik is healthy — {{ traefik_health.json.http.routers.total | default('?') }} routers,
+      {{ traefik_health.json.http.services.total | default('?') }} services
+  when: traefik_health.status == 200
+  tags:
+    - verify

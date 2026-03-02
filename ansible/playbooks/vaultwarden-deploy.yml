@@ -1,0 +1,435 @@
+---
+# =============================================================================
+# Vaultwarden Password Manager Deployment Playbook
+# =============================================================================
+# Deploys Vaultwarden via Docker Compose on an LXC container. Serves as a
+# self-hosted backup vault mirroring 1Password data. Authentik OIDC for SSO
+# with master password fallback (SSO_ONLY=false).
+#
+# Prerequisites:
+#   - Vaultwarden LXC provisioned by Terraform Layer 05
+#   - Vault secrets seeded by Layer 02 (services/vaultwarden)
+#   - Authentik OIDC provider created by Layer 07 (services/vaultwarden/oidc)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/vaultwarden-deploy.yml
+#
+# After playbook completes:
+#   1. Go to Vaultwarden: http://10.0.20.19:8000
+#   2. Create a master password (first user becomes owner)
+#   3. Or login via Authentik SSO
+#
+# Tags:
+#   ansible-playbook ... --tags common       # Only baseline system config
+#   ansible-playbook ... --tags docker       # Only Docker installation
+#   ansible-playbook ... --tags vaultwarden  # Only Vaultwarden app deployment
+#   ansible-playbook ... --tags verify       # Only health checks
+#   ansible-playbook ... --tags backup       # Only backup automation
+# =============================================================================
+
+- name: Deploy Vaultwarden password manager
+  hosts: vaultwarden
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Vaultwarden on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Vaultwarden secrets from Vault
+    # -----------------------------------------------------------------
+    - name: Read Vaultwarden secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/vaultwarden
+      register: vault_vaultwarden_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [vaultwarden]
+
+    - name: Set Vaultwarden plaintext admin token
+      ansible.builtin.set_fact:
+        vaultwarden_admin_token_plain: "{{ (vault_vaultwarden_read.stdout | from_json).data.data.admin_token }}"
+        vaultwarden_admin_token_hash_cached: "{{ (vault_vaultwarden_read.stdout | from_json).data.data.admin_token_hash | default('') }}"
+      when: vault_vaultwarden_read.rc is defined and vault_vaultwarden_read.rc == 0
+      no_log: true
+      tags: [vaultwarden]
+
+    - name: Set Vaultwarden user accounts to invite
+      ansible.builtin.set_fact:
+        vaultwarden_invite_emails: >-
+          {{ [(vault_vaultwarden_read.stdout | from_json).data.data.admin_email | default(''),
+              (vault_vaultwarden_read.stdout | from_json).data.data.user_email | default('')]
+             | select('ne', '') | list }}
+      when: vault_vaultwarden_read.rc is defined and vault_vaultwarden_read.rc == 0
+      tags: [vaultwarden]
+
+    # -----------------------------------------------------------------
+    # Argon2 hash of admin token (CIS hardening)
+    # -----------------------------------------------------------------
+    # Vaultwarden recommends Argon2 PHC string instead of plaintext.
+    # We hash once, store it back in Vault, and reuse on subsequent runs.
+    # The plaintext token remains the login credential for /admin.
+    #
+    # NOTE: `/vaultwarden hash` is strictly interactive (no stdin, no flags).
+    # PR #4894 to add non-interactive support was rejected upstream.
+    # We use the standalone `argon2` CLI tool instead.
+    # Params match Vaultwarden default: Argon2id, m=65540, t=3, p=4.
+    - name: Install argon2 CLI for admin token hashing
+      ansible.builtin.apt:
+        name: argon2
+        state: present
+        update_cache: true
+      when:
+        - vaultwarden_admin_token_plain is defined
+        - vaultwarden_admin_token_plain != ""
+        - vaultwarden_admin_token_hash_cached == ""
+      tags: [vaultwarden]
+
+    - name: Generate Argon2 hash of admin token
+      ansible.builtin.shell:
+        cmd: >
+          echo -n '{{ vaultwarden_admin_token_plain }}'
+          | argon2 "$(openssl rand -base64 32)" -e -id -k 65540 -t 3 -p 4
+      register: argon2_hash_output
+      changed_when: false
+      no_log: true
+      when:
+        - vaultwarden_admin_token_plain is defined
+        - vaultwarden_admin_token_plain != ""
+        - vaultwarden_admin_token_hash_cached == ""
+      tags: [vaultwarden]
+
+    - name: Set Argon2 hash from CLI output
+      ansible.builtin.set_fact:
+        vaultwarden_admin_token_hash: "{{ argon2_hash_output.stdout | trim }}"
+      when:
+        - argon2_hash_output is defined
+        - argon2_hash_output.rc is defined
+        - argon2_hash_output.rc == 0
+      no_log: true
+      tags: [vaultwarden]
+
+    - name: Store Argon2 hash back in Vault for future runs
+      ansible.builtin.shell:
+        cmd: >
+          vault kv patch -mount=secret services/vaultwarden
+          'admin_token_hash={{ vaultwarden_admin_token_hash }}'
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      no_log: true
+      when:
+        - vaultwarden_admin_token_hash is defined
+        - vaultwarden_admin_token_hash != ""
+      tags: [vaultwarden]
+
+    - name: Use cached Argon2 hash from Vault
+      ansible.builtin.set_fact:
+        vaultwarden_admin_token_hash: "{{ vaultwarden_admin_token_hash_cached }}"
+      when:
+        - vaultwarden_admin_token_hash_cached is defined
+        - vaultwarden_admin_token_hash_cached != ""
+        - vaultwarden_admin_token_hash is not defined
+      no_log: true
+      tags: [vaultwarden]
+
+    - name: Set final admin token (Argon2 hash or plaintext fallback)
+      ansible.builtin.set_fact:
+        vaultwarden_admin_token: "{{ vaultwarden_admin_token_hash | default(vaultwarden_admin_token_plain) }}"
+      no_log: true
+      tags: [vaultwarden]
+
+    # -----------------------------------------------------------------
+    # OIDC secrets from Vault (for Authentik SSO)
+    # -----------------------------------------------------------------
+    - name: Read Vaultwarden OIDC credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/vaultwarden/oidc
+      register: vault_oidc_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [vaultwarden]
+
+    - name: Set OIDC credentials
+      ansible.builtin.set_fact:
+        vaultwarden_sso_enabled: true
+        vaultwarden_sso_client_id: "{{ (vault_oidc_read.stdout | from_json).data.data.client_id }}"
+        vaultwarden_sso_client_secret: "{{ (vault_oidc_read.stdout | from_json).data.data.client_secret }}"
+        vaultwarden_sso_authority: "http://10.0.10.16:9000/application/o/vaultwarden/"
+      when: vault_oidc_read.rc is defined and vault_oidc_read.rc == 0
+      no_log: true
+      tags: [vaultwarden]
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    # Backup configuration (S3 off-site for vault data)
+    backup_enabled: true
+    backup_cron_hour: "4"
+    backup_cron_minute: "15"
+    backup_services:
+      - name: vaultwarden
+        compose_path: /opt/vaultwarden
+        paths:
+          - /opt/vaultwarden/data
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: vaultwarden
+        stop_compose: /opt/vaultwarden
+        paths:
+          - /opt/vaultwarden/data
+        tags: ["vaultwarden", "passwords"]
+        cron_hour: "1"
+        cron_minute: "10"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Vaultwarden (Docker Compose: single container, SQLite)
+    - role: vaultwarden
+      tags:
+        - vaultwarden
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for Vaultwarden to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vaultwarden_port | default(8000) }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: vaultwarden_health
+      retries: 15
+      delay: 10
+      until: vaultwarden_health.status is defined and vaultwarden_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if Vaultwarden never became accessible
+      ansible.builtin.fail:
+        msg: "Vaultwarden failed to respond after 150 seconds. Last status: {{ vaultwarden_health.status | default('connection refused') }}"
+      when: vaultwarden_health.status is not defined or vaultwarden_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------
+    # Invite user accounts via admin API
+    # -----------------------------------------------------------------
+    # Authenticates to the admin panel (Argon2-hashed token requires
+    # a two-step flow: POST plaintext token → receive JWT cookie → use
+    # cookie for API calls). Invites are idempotent — re-inviting an
+    # existing user is a no-op (HTTP 200, no duplicate created).
+    #
+    # After invite, users must complete registration at:
+    #   https://vaultwarden.home.example-lab.org/#/register
+    # using the exact invited email + their master password from Vault.
+    # -----------------------------------------------------------------
+    - name: Authenticate to Vaultwarden admin API
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vaultwarden_port | default(8000) }}/admin"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          token: "{{ vaultwarden_admin_token_plain }}"
+        status_code: [200, 303]
+        follow_redirects: none
+      register: vaultwarden_admin_auth
+      no_log: true
+      when:
+        - vaultwarden_admin_token_plain is defined
+        - vaultwarden_invite_emails is defined
+        - vaultwarden_invite_emails | length > 0
+      tags:
+        - vaultwarden
+        - invite
+
+    - name: Extract admin session cookie
+      ansible.builtin.set_fact:
+        vaultwarden_admin_cookie: "{{ vaultwarden_admin_auth.cookies_string }}"
+      when:
+        - vaultwarden_admin_auth is defined
+        - vaultwarden_admin_auth.cookies_string is defined
+      no_log: true
+      tags:
+        - vaultwarden
+        - invite
+
+    - name: Invite Vaultwarden users
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vaultwarden_port | default(8000) }}/admin/invite"
+        method: POST
+        body_format: json
+        body:
+          email: "{{ item }}"
+        headers:
+          Cookie: "{{ vaultwarden_admin_cookie }}"
+        status_code: [200]
+      loop: "{{ vaultwarden_invite_emails | default([]) }}"
+      register: vaultwarden_invite_result
+      failed_when: false
+      when:
+        - vaultwarden_admin_cookie is defined
+      tags:
+        - vaultwarden
+        - invite
+
+    - name: Display invite results
+      ansible.builtin.debug:
+        msg: "Invited {{ item.item }} → HTTP {{ item.status | default('skipped') }}"
+      loop: "{{ vaultwarden_invite_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('unknown') }}"
+      when: vaultwarden_invite_result.results is defined
+      tags:
+        - vaultwarden
+        - invite
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vaultwarden Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ vaultwarden_port | default(8000) }}"
+          - "DNS: https://vaultwarden.home.example-lab.org"
+          - "Port: {{ vaultwarden_port | default(8000) }}"
+          - "Image: {{ vaultwarden_image }}"
+          - ""
+          - "Authentication: {{ 'Authentik SSO (OIDC) + master password fallback' if vaultwarden_sso_enabled | default(false) else 'Master password only' }}"
+          - ""
+          - "User Registration (invited users must complete signup):"
+          - "  1. Go to https://vaultwarden.home.example-lab.org/#/register"
+          - "  2. Enter the exact invited email address"
+          - "  3. Master passwords are in Vault: vault kv get -mount=secret services/vaultwarden"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/vaultwarden/docker-compose.yml ps"
+          - "  docker compose -f /opt/vaultwarden/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

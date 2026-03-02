@@ -1,0 +1,285 @@
+# =============================================================================
+# Headlamp Helm Values — FirbLab RKE2 Cluster
+# =============================================================================
+# Headlamp is a K8s web UI from the official Kubernetes SIG UI team.
+# Tier 3 visualization tool complementing NetBox (IPAM) and Scanopy (network).
+#
+# Chart: https://kubernetes-sigs.github.io/headlamp/
+# Docs:  https://headlamp.dev/docs/latest/installation/in-cluster/
+#
+# RBAC: Overrides default cluster-admin with read-only headlamp-reader role.
+# Auth: OIDC via Authentik (SSO). Credentials from Vault via ESO.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: headlamp-k8s/headlamp
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+config:
+  inCluster: true
+  baseURL: ""
+  sessionTTL: 86400  # 24 hours
+  oidc:
+    # OIDC config injected via ESO-managed external secret (envFrom).
+    # The headlamp-oidc K8s Secret contains env var keys:
+    #   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER_URL, OIDC_SCOPES
+    # Chart values below are ignored when externalSecret.enabled=true
+    # (envFrom takes precedence), but kept for documentation.
+    clientID: headlamp
+    clientSecret: ""
+    issuerURL: https://auth.home.example-lab.org/application/o/headlamp/
+    scopes: "openid profile email"
+    secret:
+      create: false
+    externalSecret:
+      enabled: true
+      name: headlamp-oidc
+
+# ---------------------------------------------------------------------------
+# RBAC — Read-Only Access
+# ---------------------------------------------------------------------------
+# SECURITY: Override default cluster-admin with custom read-only ClusterRole.
+# The headlamp-reader ClusterRole is created via extraManifests below.
+serviceAccount:
+  create: true
+  name: headlamp
+
+clusterRoleBinding:
+  create: true
+  clusterRoleName: headlamp-reader
+
+# ---------------------------------------------------------------------------
+# Security Context (Pod Security Standard: restricted)
+# ---------------------------------------------------------------------------
+# Headlamp runs as UID 100 / GID 101 by default.
+# All settings below satisfy restricted PSA + Gatekeeper policies.
+podSecurityContext:
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 100
+  runAsGroup: 101
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Resources (Gatekeeper: require-resource-limits)
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Writable volumes for read-only root filesystem
+# ---------------------------------------------------------------------------
+# Headlamp needs to write to ~/.config (plugins) and /tmp (static files).
+volumeMounts:
+  - name: headlamp-config
+    mountPath: /home/headlamp/.config
+  - name: tmp
+    mountPath: /tmp
+
+volumes:
+  - name: headlamp-config
+    emptyDir: {}
+  - name: tmp
+    emptyDir: {}
+
+# ---------------------------------------------------------------------------
+# Node Affinity — schedule on agent nodes only
+# ---------------------------------------------------------------------------
+# Server nodes have 4GB RAM and run etcd + kube-apiserver. Headlamp's watch
+# connections caused OOM-level pressure on rke2-server-1 during first deploy.
+# Agent nodes have 8GB RAM with headroom for workloads.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/agent
+              operator: Exists
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+
+# ---------------------------------------------------------------------------
+# Ingress (Traefik + cert-manager via Let's Encrypt DNS-01)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+  hosts:
+    - host: headlamp.home.example-lab.org
+      paths:
+        - path: /
+          type: Prefix
+  tls:
+    - secretName: headlamp-tls
+      hosts:
+        - headlamp.home.example-lab.org
+
+# ---------------------------------------------------------------------------
+# Persistent ServiceAccount Token (for UI authentication)
+# ---------------------------------------------------------------------------
+# Headlamp requires a ServiceAccount token to authenticate API requests.
+# This Secret creates a non-expiring token bound to the headlamp SA.
+#
+# Retrieve token:
+#   kubectl get secret headlamp-token -n headlamp -o jsonpath='{.data.token}' | base64 -d
+#
+# Store in Vault (one-time after first deploy):
+#   vault kv put secret/k8s/headlamp token="$(kubectl get secret headlamp-token -n headlamp -o jsonpath='{.data.token}' | base64 -d)"
+#
+# Retrieve from Vault:
+#   vault kv get -field=token secret/k8s/headlamp
+
+# ---------------------------------------------------------------------------
+# Read-Only ClusterRole (bundled via extraManifests)
+# ---------------------------------------------------------------------------
+# Grants get/list/watch on core resources + all platform CRDs.
+# NO write verbs (create, update, patch, delete).
+extraManifests:
+  - |
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: headlamp-token
+      annotations:
+        kubernetes.io/service-account.name: headlamp
+    type: kubernetes.io/service-account-token
+  - |
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: headlamp-reader
+      labels:
+        app.kubernetes.io/name: headlamp
+        app.kubernetes.io/component: rbac
+    rules:
+      # Core API
+      - apiGroups: [""]
+        resources:
+          - configmaps
+          - endpoints
+          - events
+          - limitranges
+          - namespaces
+          - nodes
+          - persistentvolumeclaims
+          - persistentvolumes
+          - pods
+          - pods/log
+          - pods/status
+          - replicationcontrollers
+          - resourcequotas
+          - secrets
+          - serviceaccounts
+          - services
+        verbs: ["get", "list", "watch"]
+      # Apps
+      - apiGroups: ["apps"]
+        resources:
+          - daemonsets
+          - deployments
+          - replicasets
+          - statefulsets
+        verbs: ["get", "list", "watch"]
+      # Batch
+      - apiGroups: ["batch"]
+        resources:
+          - cronjobs
+          - jobs
+        verbs: ["get", "list", "watch"]
+      # Networking
+      - apiGroups: ["networking.k8s.io"]
+        resources:
+          - ingresses
+          - ingressclasses
+          - networkpolicies
+        verbs: ["get", "list", "watch"]
+      # Storage
+      - apiGroups: ["storage.k8s.io"]
+        resources:
+          - storageclasses
+          - volumeattachments
+          - csinodes
+          - csidrivers
+        verbs: ["get", "list", "watch"]
+      # RBAC (read-only)
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        resources:
+          - clusterroles
+          - clusterrolebindings
+          - roles
+          - rolebindings
+        verbs: ["get", "list", "watch"]
+      # Policy
+      - apiGroups: ["policy"]
+        resources:
+          - poddisruptionbudgets
+        verbs: ["get", "list", "watch"]
+      # CRDs
+      - apiGroups: ["apiextensions.k8s.io"]
+        resources:
+          - customresourcedefinitions
+        verbs: ["get", "list", "watch"]
+      # Metrics (resource usage graphs)
+      - apiGroups: ["metrics.k8s.io"]
+        resources:
+          - pods
+          - nodes
+        verbs: ["get", "list"]
+      # --- Platform CRDs ---
+      # Longhorn
+      - apiGroups: ["longhorn.io"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      # Traefik
+      - apiGroups: ["traefik.io"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      # cert-manager
+      - apiGroups: ["cert-manager.io"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      # External Secrets Operator
+      - apiGroups: ["external-secrets.io"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      # Gatekeeper
+      - apiGroups: ["constraints.gatekeeper.sh"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["templates.gatekeeper.sh"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]
+      # Prometheus / monitoring
+      - apiGroups: ["monitoring.coreos.com"]
+        resources: ["*"]
+        verbs: ["get", "list", "watch"]

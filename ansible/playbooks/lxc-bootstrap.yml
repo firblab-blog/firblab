@@ -1,0 +1,194 @@
+---
+# =============================================================================
+# LXC Container Bootstrap Playbook
+# =============================================================================
+# One-time bootstrap for Proxmox LXC containers created by Terraform.
+#
+# Problem: The bpg/proxmox provider's LXC resource only injects SSH keys
+# into the root account (the Proxmox LXC API has no username field in
+# user_account). Our Ansible inventory expects to connect as 'admin'.
+#
+# This playbook connects as root, creates the admin user with sudo
+# privileges, and copies the SSH authorized keys from root.
+#
+# Prerequisites:
+#   - LXC container deployed via Terraform Layer 03
+#   - SSH key available (Terraform-generated, in .secrets/ or ~/.ssh/)
+#   - proxmox_host variable set (default: lab-03) — the Proxmox node
+#     hosting the LXC, used to refresh ARP via pct exec.
+#
+# Usage (run from repo root):
+#   cd ~/repos/firb-lab/firblab
+#   ansible-playbook ansible/playbooks/lxc-bootstrap.yml \
+#     --limit gitlab-runner -e "ansible_user=root"
+#
+# After bootstrap, normal playbooks connect as admin (per inventory).
+# =============================================================================
+
+# ============================================================================
+# Play 1: Pre-flight — clean up stale state from destroy/recreate cycles
+# ============================================================================
+# Runs on localhost BEFORE connecting to the target container.
+# Fixes two recurring issues:
+#   1. Stale SSH host keys in known_hosts (host key changed after recreate)
+#   2. Stale ARP on the gw-01 gateway (old MAC cached for the same IP)
+# Without these, Ansible SSH hangs or gets rejected.
+- name: Pre-flight — clean stale SSH keys and refresh ARP
+  hosts: all
+  gather_facts: false
+  connection: local
+  become: false
+
+  vars:
+    # Proxmox node that hosts the LXC containers — used for pct exec
+    proxmox_host: lab-03
+    proxmox_ssh_key: ~/.ssh/id_ed25519_lab-03
+    proxmox_ssh_user: admin
+    proxmox_ip: 10.0.10.3
+    # Gateway IP to ping from inside the container to refresh ARP
+    # LXC containers live on Services VLAN 20 (gateway 10.0.20.1)
+    arp_refresh_gateway: 10.0.20.1
+
+  tasks:
+    - name: Remove stale SSH host key for {{ ansible_host }}
+      ansible.builtin.command:
+        cmd: "ssh-keygen -R {{ ansible_host }}"
+      changed_when: true
+      failed_when: false
+      tags:
+        - always
+
+    - name: Determine container VM ID from inventory hostname
+      ansible.builtin.set_fact:
+        _container_vm_id: >-
+          {{ hostvars[inventory_hostname].get('container_vm_id', '') }}
+      tags:
+        - always
+
+    - name: Refresh ARP — ping gateway from inside container via pct exec
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -i {{ proxmox_ssh_key }} {{ proxmox_ssh_user }}@{{ proxmox_ip }}
+          "sudo pct exec {{ _container_vm_id }} -- ping -c 3 {{ arp_refresh_gateway }}"
+      when: _container_vm_id | default('') | string | length > 0
+      changed_when: true
+      failed_when: false
+      tags:
+        - always
+
+    - name: Wait for SSH to be reachable on {{ ansible_host }}
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 60
+        delay: 5
+      tags:
+        - always
+
+# ============================================================================
+# Play 2: Bootstrap — create admin user on the container
+# ============================================================================
+- name: Bootstrap LXC Container — Create admin user
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    bootstrap_user: admin
+    bootstrap_user_shell: /bin/bash
+    bootstrap_user_groups:
+      - sudo
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Validate we're running as root (bootstrap requirement)
+    # -----------------------------------------------------------------
+    - name: Verify running as root
+      ansible.builtin.assert:
+        that:
+          - ansible_user_id == "root" or ansible_user == "root"
+        fail_msg: >
+          This playbook must be run as root for initial bootstrap.
+          Use: -e "ansible_user=root"
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Create admin user
+    # -----------------------------------------------------------------
+    - name: Create admin user
+      ansible.builtin.user:
+        name: "{{ bootstrap_user }}"
+        shell: "{{ bootstrap_user_shell }}"
+        groups: "{{ bootstrap_user_groups }}"
+        append: true
+        create_home: true
+        state: present
+      tags:
+        - user
+
+    - name: Ensure .ssh directory for admin
+      ansible.builtin.file:
+        path: "/home/{{ bootstrap_user }}/.ssh"
+        state: directory
+        owner: "{{ bootstrap_user }}"
+        group: "{{ bootstrap_user }}"
+        mode: "0700"
+      tags:
+        - user
+        - ssh
+
+    - name: Copy root authorized_keys to admin
+      ansible.builtin.copy:
+        src: /root/.ssh/authorized_keys
+        dest: "/home/{{ bootstrap_user }}/.ssh/authorized_keys"
+        owner: "{{ bootstrap_user }}"
+        group: "{{ bootstrap_user }}"
+        mode: "0600"
+        remote_src: true
+      tags:
+        - user
+        - ssh
+
+    # -----------------------------------------------------------------
+    # Sudo configuration
+    # -----------------------------------------------------------------
+    - name: Configure passwordless sudo for admin
+      ansible.builtin.lineinfile:
+        path: "/etc/sudoers.d/{{ bootstrap_user }}"
+        line: "{{ bootstrap_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: true
+        mode: "0440"
+        validate: "visudo -cf %s"
+      tags:
+        - user
+        - sudo
+
+    # -----------------------------------------------------------------
+    # Verify
+    # -----------------------------------------------------------------
+    - name: Verify admin user can be reached via SSH
+      ansible.builtin.command:
+        cmd: "id {{ bootstrap_user }}"
+      register: admin_id
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Display bootstrap result
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "LXC Bootstrap Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "User created: {{ bootstrap_user }}"
+          - "User info: {{ admin_id.stdout }}"
+          - "SSH keys: copied from root"
+          - "Sudo: passwordless via /etc/sudoers.d/{{ bootstrap_user }}"
+          - ""
+          - "Test: ssh -i ~/.ssh/id_ed25519_{{ inventory_hostname }} {{ bootstrap_user }}@{{ ansible_host }} hostname"
+          - "=========================================="
+      tags:
+        - verify

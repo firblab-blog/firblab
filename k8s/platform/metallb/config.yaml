@@ -1,0 +1,32 @@
+# MetalLB L2 configuration for Services VLAN (20)
+# Provides LoadBalancer IP addresses for RKE2 cluster services.
+#
+# Prerequisites:
+#   helm repo add metallb https://metallb.github.io/metallb
+#   helm install metallb metallb/metallb -n metallb-system --create-namespace
+#   kubectl apply -f config.yaml
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: services-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    # Range on Services VLAN (10.0.20.0/24)
+    # Reserved: .1 gateway, .40-.52 RKE2 nodes, .100-.200 DHCP
+    - 10.0.20.220-10.0.20.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: services-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - services-pool
+  # Restrict VIP advertisement to agent nodes only.
+  # Prevents control plane nodes (etcd/apiserver) from handling ingress traffic.
+  nodeSelectors:
+    - matchLabels:
+        node-role.kubernetes.io/agent: "true"

@@ -1,0 +1,384 @@
+---
+# =============================================================================
+# Honeypot Role — Multi-Protocol Deception System
+# =============================================================================
+# Deploys a honeypot stack on a dedicated Hetzner server:
+#   - OpenCanary: FTP, MySQL, RDP, VNC, Redis emulation (Thinkst-backed)
+#   - Cowrie: Interactive SSH/Telnet honeypot (session recording, malware capture)
+#   - Dionaea: SMB/SIP/HTTP malware capture honeypot
+#   - Endlessh: SSH tarpit (wastes bot resources with infinite banner)
+#   - Grafana Alloy: Ships all honeypot logs to Loki via WireGuard tunnel
+#
+# Also migrates real SSH from port 22 to 2222 (port 22 → Cowrie honeypot).
+#
+# Prerequisites:
+#   - Docker + Docker Compose plugin installed on the target
+#   - Hetzner firewall: port 2222 restricted (WG+Home), honeypot ports public
+#   - WireGuard peer config at {{ honeypot_wireguard_config_path }} (for Alloy → Loki)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SSH Port Migration (port 22 → Cowrie, real SSH → 2222)
+# ---------------------------------------------------------------------------
+- name: Configure sshd for port {{ honeypot_real_ssh_port }}
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible — honeypot role
+      # Real SSH moved to port {{ honeypot_real_ssh_port }} (port 22 reserved for Cowrie)
+      Port {{ honeypot_real_ssh_port }}
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+      MaxAuthTries 3
+    dest: /etc/ssh/sshd_config.d/99-firblab.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - configure
+    - ssh
+
+# Ubuntu 24.04 uses systemd socket activation — sshd_config Port is ignored.
+# Must override ssh.socket to change the listening port.
+- name: Create ssh.socket override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/ssh.socket.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - configure
+    - ssh
+
+- name: Configure ssh.socket to listen on port {{ honeypot_real_ssh_port }} only
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible — honeypot role
+      # Real SSH on port {{ honeypot_real_ssh_port }} — port 22 reserved for Cowrie
+      [Socket]
+      ListenStream=
+      ListenStream=0.0.0.0:{{ honeypot_real_ssh_port }}
+      ListenStream=[::]:{{ honeypot_real_ssh_port }}
+    dest: /etc/systemd/system/ssh.socket.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ssh socket
+  tags:
+    - configure
+    - ssh
+
+# Immediately apply SSH changes — Ansible is already connected on port 2222
+# so this is safe (won't drop the current session)
+- name: Flush handlers to apply SSH port change
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - configure
+    - ssh
+
+- name: Verify sshd is listening on port {{ honeypot_real_ssh_port }}
+  ansible.builtin.command:
+    cmd: ss -tlnp
+  register: ssh_listen_check
+  changed_when: false
+  failed_when: "':' ~ honeypot_real_ssh_port | string not in ssh_listen_check.stdout"
+  tags:
+    - configure
+    - ssh
+    - verify
+
+# ---------------------------------------------------------------------------
+# WireGuard Client (tunnel to gateway for log shipping)
+# ---------------------------------------------------------------------------
+- name: Install WireGuard
+  ansible.builtin.apt:
+    name: wireguard
+    state: present
+    update_cache: true
+  when: honeypot_wireguard_enabled
+  tags:
+    - configure
+    - wireguard
+
+- name: Check WireGuard peer config exists
+  ansible.builtin.stat:
+    path: "{{ honeypot_wireguard_config_path }}"
+  register: wg_config_stat
+  when: honeypot_wireguard_enabled
+  tags:
+    - configure
+    - wireguard
+
+- name: Warn if WireGuard config is missing
+  ansible.builtin.debug:
+    msg: >
+      WARNING: WireGuard config not found at {{ honeypot_wireguard_config_path }}.
+      Alloy log shipping to Loki will not work until a peer config is placed there.
+      Download a peer config from the gateway S3 bucket or generate a new one.
+  when:
+    - honeypot_wireguard_enabled
+    - not (wg_config_stat.stat.exists | default(false))
+  tags:
+    - configure
+    - wireguard
+
+- name: Enable and start WireGuard tunnel
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ honeypot_wireguard_interface }}"
+    enabled: true
+    state: started
+  when:
+    - honeypot_wireguard_enabled
+    - wg_config_stat.stat.exists | default(false)
+  tags:
+    - configure
+    - wireguard
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create honeypot directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ honeypot_install_dir }}"
+    - path: "{{ honeypot_install_dir }}/opencanary"
+    - path: "{{ honeypot_install_dir }}/opencanary/logs"
+    - path: "{{ honeypot_install_dir }}/cowrie/etc"
+    - path: "{{ honeypot_install_dir }}/cowrie/log"
+    - path: "{{ honeypot_install_dir }}/cowrie/dl"
+    - path: "{{ honeypot_install_dir }}/dionaea"
+    - path: "{{ honeypot_install_dir }}/dionaea/bistreams"
+    - path: "{{ honeypot_install_dir }}/dionaea/binaries"
+    - path: "{{ honeypot_install_dir }}/dionaea/log"
+    - path: "{{ honeypot_install_dir }}/endlessh"
+    - path: "{{ honeypot_install_dir }}/alloy"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Configuration Files
+# ---------------------------------------------------------------------------
+- name: Template OpenCanary Dockerfile
+  ansible.builtin.copy:
+    content: |
+      FROM python:3.12-slim
+      RUN pip install --no-cache-dir opencanary
+      # Fix: Python 3 bytes/str incompatibility in Redis module.
+      # transport.write() requires bytes; the installed package passes str.
+      RUN python3 -c "import opencanary.modules.redis as m, inspect; p = inspect.getfile(m); t = open(p).read().replace('write(\"+OK\\\\r\\\\n\")', 'write(b\"+OK\\\\r\\\\n\")'); open(p, 'w').write(t)"
+      CMD ["opencanaryd", "--dev"]
+    dest: "{{ honeypot_install_dir }}/opencanary/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart honeypot
+  tags:
+    - configure
+
+- name: Template OpenCanary config
+  ansible.builtin.template:
+    src: opencanary.conf.j2
+    dest: "{{ honeypot_install_dir }}/opencanary/opencanary.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart honeypot
+  tags:
+    - configure
+
+- name: Template Cowrie config
+  ansible.builtin.template:
+    src: cowrie.cfg.j2
+    dest: "{{ honeypot_install_dir }}/cowrie/etc/cowrie.cfg"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart honeypot
+  tags:
+    - configure
+
+# Dionaea config: using image defaults (correct INI structure with module
+# definitions, processors, and service configs). Custom config mount removed
+# from docker-compose.yml.j2 — only persistent data/log volumes are mounted.
+
+- name: Template Grafana Alloy config
+  ansible.builtin.template:
+    src: alloy-config.alloy.j2
+    dest: "{{ honeypot_install_dir }}/alloy/config.alloy"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart honeypot
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template honeypot Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ honeypot_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart honeypot
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Log Symlinks (for Alloy host-path volume mounts)
+# ---------------------------------------------------------------------------
+- name: Symlink OpenCanary logs to /var/log
+  ansible.builtin.file:
+    src: "{{ honeypot_install_dir }}/opencanary/logs"
+    dest: /var/log/opencanary
+    state: link
+    force: true
+  tags:
+    - configure
+
+- name: Symlink Cowrie logs to /var/log
+  ansible.builtin.file:
+    src: "{{ honeypot_install_dir }}/cowrie/log"
+    dest: /var/log/cowrie
+    state: link
+    force: true
+  tags:
+    - configure
+
+- name: Symlink Dionaea logs to /var/log
+  ansible.builtin.file:
+    src: "{{ honeypot_install_dir }}/dionaea/log"
+    dest: /var/log/dionaea
+    state: link
+    force: true
+  when: honeypot_dionaea_enabled
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Malware Cleanup Crons
+# ---------------------------------------------------------------------------
+- name: Create Cowrie download cleanup cron (weekly)
+  ansible.builtin.cron:
+    name: "cowrie-cleanup"
+    special_time: weekly
+    job: "find {{ honeypot_install_dir }}/cowrie/dl -type f -mtime +7 -delete && find {{ honeypot_install_dir }}/cowrie/dl -type d -empty -delete"
+    user: root
+  tags:
+    - configure
+
+- name: Create Dionaea malware cleanup cron (weekly)
+  ansible.builtin.cron:
+    name: "dionaea-cleanup"
+    special_time: weekly
+    job: "find {{ honeypot_install_dir }}/dionaea/binaries -type f -mtime +30 -delete && find {{ honeypot_install_dir }}/dionaea/bistreams -type f -mtime +7 -delete"
+    user: root
+  when: honeypot_dionaea_enabled
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Systemd Service (auto-restart on reboot)
+# ---------------------------------------------------------------------------
+- name: Create honeypot systemd service
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible — honeypot role
+      [Unit]
+      Description=FirbLab Honeypot Services (OpenCanary + Cowrie + Dionaea + Endlessh + Alloy)
+      Requires=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory={{ honeypot_install_dir }}
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/lab-honeypot.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: honeypot_systemd_unit
+  tags:
+    - configure
+
+- name: Enable honeypot systemd service
+  ansible.builtin.systemd:
+    name: lab-honeypot.service
+    enabled: true
+    daemon_reload: "{{ honeypot_systemd_unit.changed }}"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Build, Pull and Start Containers
+# ---------------------------------------------------------------------------
+- name: Flush handlers before starting honeypot containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Build OpenCanary image
+  ansible.builtin.command:
+    cmd: docker compose build
+    chdir: "{{ honeypot_install_dir }}"
+  register: honeypot_build_result
+  changed_when: "'Successfully built' in honeypot_build_result.stdout or 'exporting' in honeypot_build_result.stderr"
+  tags:
+    - deploy
+
+- name: Pull honeypot container images
+  ansible.builtin.command:
+    cmd: docker compose pull --ignore-pull-failures
+    chdir: "{{ honeypot_install_dir }}"
+  register: honeypot_pull_result
+  changed_when: "'Pull complete' in honeypot_pull_result.stdout or 'Downloaded' in honeypot_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start honeypot containers
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ honeypot_install_dir }}"
+  register: honeypot_up_result
+  changed_when: "'Started' in honeypot_up_result.stderr or 'Creating' in honeypot_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Checks
+# ---------------------------------------------------------------------------
+- name: Wait for Cowrie to start listening on port {{ honeypot_cowrie_ssh_host_port }}
+  ansible.builtin.wait_for:
+    port: "{{ honeypot_cowrie_ssh_host_port }}"
+    host: 127.0.0.1
+    timeout: 60
+  tags:
+    - verify
+
+- name: Check all honeypot containers are running
+  ansible.builtin.command:
+    cmd: docker compose ps --format json
+    chdir: "{{ honeypot_install_dir }}"
+  register: honeypot_ps
+  changed_when: false
+  tags:
+    - verify
+
+- name: Display running honeypot containers
+  ansible.builtin.debug:
+    msg: "{{ honeypot_ps.stdout }}"
+  tags:
+    - verify

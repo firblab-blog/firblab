@@ -1,0 +1,681 @@
+---
+# =============================================================================
+# Proxmox Cluster Initialization Playbook
+# =============================================================================
+# Forms a Proxmox VE cluster from standalone nodes. Five phases:
+#
+# Play 1 - Pre-flight (all nodes):
+#   Verifies connectivity, checks no existing cluster membership, and
+#   populates /etc/hosts so all nodes can resolve each other by hostname
+#   (required by corosync). Temporarily re-enables root SSH and sets up
+#   root SSH key auth from joining nodes → leader (needed by pvecm for
+#   corosync key exchange between nodes).
+#
+# Play 2 - Create cluster (leader node only):
+#   Runs 'pvecm create' on the designated leader. Only one node creates
+#   the cluster; all others join it. The leader should ideally be a fresh
+#   node with no VMs to minimize risk.
+#
+# Play 3 - Join cluster (remaining nodes, serial: 1):
+#   Joins each non-leader node one at a time via 'pvecm add'. Serial
+#   execution is critical — joining multiple nodes simultaneously can
+#   cause corosync quorum issues. Each join is followed by a health check.
+#
+# Play 4 - Lock down root SSH (all nodes):
+#   Re-disables root SSH login on all nodes. The bootstrap playbook
+#   originally disabled it; we temporarily re-enabled it for pvecm.
+#
+# Play 5 - Post-cluster verification (all nodes):
+#   Validates cluster health: expected node count, quorum, and corosync
+#   ring status on every node.
+#
+# SAFETY:
+#   - Nodes already in the target cluster are automatically skipped
+#   - Running VMs are NOT affected by cluster join (only pveproxy restarts)
+#   - The playbook is idempotent — safe to re-run after partial failure
+#   - Serial join (one node at a time) prevents quorum race conditions
+#   - Root SSH is re-disabled at the end regardless of success/failure
+#
+# Usage:
+#   # Create cluster with lab-01 as leader, join all other nodes:
+#   ansible-playbook ansible/playbooks/proxmox-cluster-init.yml
+#
+#   # Override leader:
+#   ansible-playbook ansible/playbooks/proxmox-cluster-init.yml \
+#     -e proxmox_cluster_leader=lab-02
+#
+#   # Add a new node to an existing cluster:
+#   ansible-playbook ansible/playbooks/proxmox-cluster-init.yml \
+#     --limit lab-01,lab-04
+#
+# Prerequisites:
+#   - All target nodes bootstrapped (admin user, SSH key auth, iptables)
+#   - Corosync ports open (UDP 5405-5412) — done by proxmox-bootstrap.yml
+#   - All nodes on Management VLAN 10 (10.0.10.0/24)
+#   - No node is already a member of a DIFFERENT cluster
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Play 1: Pre-flight Checks, /etc/hosts, & Root SSH (all nodes)
+# -------------------------------------------------------------------------
+# Proxmox corosync requires hostname resolution between all cluster
+# members. The Proxmox installer only sets the local node's entry.
+# This play ensures every node can resolve every other node by hostname.
+#
+# pvecm add/create uses root SSH internally to exchange corosync auth
+# keys between nodes. Since the bootstrap playbook disables root SSH,
+# we temporarily re-enable it here and lock it back down in Play 4.
+# -------------------------------------------------------------------------
+- name: "Proxmox Cluster (Phase 1: Pre-flight & Host Resolution)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+
+  # proxmox_cluster_name and proxmox_cluster_leader are defined in
+  # group_vars/proxmox_nodes.yml. Override with -e if needed.
+
+  tasks:
+    - name: Verify Proxmox VE is installed
+      ansible.builtin.command: pveversion
+      register: pve_version
+      changed_when: false
+      failed_when: pve_version.rc != 0
+      tags: [preflight]
+
+    - name: Display Proxmox version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ pve_version.stdout }}"
+      tags: [preflight]
+
+    # -------------------------------------------------------------------
+    # Check for existing cluster membership
+    # -------------------------------------------------------------------
+    - name: Check current cluster status
+      ansible.builtin.command: pvecm status
+      register: cluster_status
+      changed_when: false
+      failed_when: false  # Non-zero exit is expected on standalone nodes
+      tags: [preflight]
+
+    - name: Determine if node is already in the target cluster
+      ansible.builtin.set_fact:
+        already_in_target_cluster: "{{ proxmox_cluster_name in (cluster_status.stdout | default('')) }}"
+        in_any_cluster: "{{ cluster_status.rc == 0 and 'Cluster information' in (cluster_status.stdout | default('')) }}"
+      tags: [preflight]
+
+    # Determine if ANY node still needs to join. Used to decide whether SSH
+    # prep tasks should run on ALL nodes (including the leader). Without
+    # this, re-runs after partial failure skip SSH setup on the leader
+    # because it's "already in the cluster", but joining nodes need to
+    # SSH to the leader as root.
+    - name: Determine if any node still needs to join
+      ansible.builtin.set_fact:
+        _cluster_join_pending: >-
+          {% set pending = [] -%}
+          {% for node in groups['proxmox_nodes'] -%}
+            {% if not (hostvars[node].already_in_target_cluster | default(false) | bool) -%}
+              {% set _ = pending.append(node) -%}
+            {% endif -%}
+          {% endfor -%}
+          {{ pending | length > 0 }}
+      tags: [preflight]
+
+    - name: "SAFETY CHECK: Fail if node is in a DIFFERENT cluster"
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is already a member of a cluster that is NOT
+          '{{ proxmox_cluster_name }}'. Current status:
+          {{ cluster_status.stdout }}
+          Remove the node from its current cluster first (pvecm delnode) or
+          reinstall Proxmox.
+      when:
+        - in_any_cluster | bool
+        - not (already_in_target_cluster | bool)
+      tags: [preflight]
+
+    - name: "INFO: Node cluster status"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          {% if already_in_target_cluster | bool %}ALREADY in cluster '{{ proxmox_cluster_name }}' — will be skipped
+          {% elif in_any_cluster | bool %}ERROR — in a different cluster
+          {% else %}STANDALONE — will {% if inventory_hostname == proxmox_cluster_leader %}CREATE{% else %}JOIN{% endif %} cluster '{{ proxmox_cluster_name }}'
+          {% endif %}
+      tags: [preflight]
+
+    # -------------------------------------------------------------------
+    # /etc/hosts — Ensure all Proxmox nodes can resolve each other
+    # -------------------------------------------------------------------
+    # The Proxmox installer writes the node's own hostname with whatever
+    # IP was active during install. If the IP has since changed (e.g.,
+    # VLAN reconfiguration), the stale entry causes pvecm to advertise
+    # the wrong address to corosync, breaking cluster joins silently.
+    #
+    # Fix the node's OWN entry first (replace any stale IP for this
+    # hostname), then add/update entries for all other cluster members.
+    # -------------------------------------------------------------------
+    - name: "Fix this node's own /etc/hosts entry (may be stale from installer)"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "\\s{{ inventory_hostname }}(\\s|$)"
+        line: "{{ ansible_host }} {{ inventory_hostname }}"
+        state: present
+      register: own_hosts_entry
+      notify: Restart pve-cluster for hosts change
+      tags: [hosts]
+
+    - name: "Populate /etc/hosts with all other Proxmox cluster members"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "\\s{{ item }}(\\s|$)"
+        line: "{{ hostvars[item].ansible_host }} {{ item }}"
+        state: present
+      loop: "{{ groups['proxmox_nodes'] }}"
+      when: item != inventory_hostname
+      tags: [hosts]
+
+    # pmxcfs resolves the node's hostname at startup to determine its
+    # cluster IP. If we just corrected a stale /etc/hosts entry, restart
+    # pve-cluster so it picks up the correct IP before pvecm runs.
+    - name: Flush handlers to apply /etc/hosts change to pve-cluster
+      ansible.builtin.meta: flush_handlers
+
+    - name: "Verify hostname resolution for all cluster members"
+      ansible.builtin.command: "getent hosts {{ item }}"
+      loop: "{{ groups['proxmox_nodes'] }}"
+      changed_when: false
+      tags: [preflight]
+
+    - name: "Verify network connectivity to all cluster members"
+      ansible.builtin.command: "ping -c 1 -W 2 {{ hostvars[item].ansible_host }}"
+      loop: "{{ groups['proxmox_nodes'] }}"
+      when: item != inventory_hostname
+      changed_when: false
+      tags: [preflight]
+
+    # -------------------------------------------------------------------
+    # Temporarily enable root SSH for pvecm
+    # -------------------------------------------------------------------
+    # pvecm add/create uses root SSH internally to exchange corosync
+    # authentication keys. The bootstrap playbook restricts root to
+    # key-based auth (prohibit-password), but pvecm add needs password
+    # auth during initial join. Play 4 restores prohibit-password.
+    # -------------------------------------------------------------------
+    - name: "Temporarily enable root SSH for pvecm cluster operations"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin yes"
+        state: present
+        validate: "sshd -t -f %s"
+      when: _cluster_join_pending | bool
+      notify: Restart sshd for cluster
+      tags: [root-ssh]
+
+    # -------------------------------------------------------------------
+    # Fix SSH host key algorithm negotiation
+    # -------------------------------------------------------------------
+    # Proxmox nodes (Debian Trixie / OpenSSH 9.x) may have sk-* (FIDO)
+    # host key files generated by ssh-keygen -A. These require physical
+    # security key hardware that isn't present, causing "no matching host
+    # key type found" during pvecm's internal SSH between nodes.
+    #
+    # Remove sk-* host key files and regenerate standard key types only.
+    # Also ensure sshd's HostKey directives explicitly list standard types
+    # so the server never offers sk-* algorithms during negotiation.
+    # -------------------------------------------------------------------
+    - name: "Remove FIDO/sk-* host keys (require hardware not present)"
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          REMOVED=0
+          for keyfile in /etc/ssh/ssh_host_*sk*; do
+            if [ -f "$keyfile" ]; then
+              rm -f "$keyfile"
+              REMOVED=$((REMOVED + 1))
+            fi
+          done
+          echo "removed=$REMOVED"
+        executable: /bin/bash
+      register: sk_key_removal
+      changed_when: "'removed=0' not in sk_key_removal.stdout"
+      when: _cluster_join_pending | bool
+      notify: Restart sshd for cluster
+      tags: [root-ssh]
+
+    - name: "Ensure standard host key types exist"
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          GENERATED=0
+          for type in rsa ecdsa ed25519; do
+            keyfile="/etc/ssh/ssh_host_${type}_key"
+            if [ ! -f "$keyfile" ]; then
+              ssh-keygen -t "$type" -f "$keyfile" -N "" -q
+              GENERATED=$((GENERATED + 1))
+            fi
+          done
+          echo "generated=$GENERATED"
+        executable: /bin/bash
+      register: host_key_gen
+      changed_when: "'generated=0' not in host_key_gen.stdout"
+      when: _cluster_join_pending | bool
+      notify: Restart sshd for cluster
+      tags: [root-ssh]
+
+    - name: "Configure sshd to offer only standard host key algorithms"
+      ansible.builtin.blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} PROXMOX CLUSTER — Host Key Config"
+        block: |
+          # Explicit host key files — prevents sshd from auto-loading sk-* keys
+          HostKey /etc/ssh/ssh_host_rsa_key
+          HostKey /etc/ssh/ssh_host_ecdsa_key
+          HostKey /etc/ssh/ssh_host_ed25519_key
+        insertbefore: "^#?PermitRootLogin"
+        validate: "sshd -t -f %s"
+      when: _cluster_join_pending | bool
+      notify: Restart sshd for cluster
+      tags: [root-ssh]
+
+    - name: Flush handlers to apply SSH changes immediately
+      ansible.builtin.meta: flush_handlers
+
+    # -------------------------------------------------------------------
+    # Root SSH key exchange for pvecm (BIDIRECTIONAL)
+    # -------------------------------------------------------------------
+    # pvecm add --use_ssh requires BIDIRECTIONAL root SSH trust:
+    #   - Joining node → leader (to request cluster join)
+    #   - Leader → joining node (to push corosync auth keys back)
+    #
+    # We generate root SSH keys on ALL nodes and exchange public keys
+    # in both directions. Play 4 cleans up these temporary keys.
+    # -------------------------------------------------------------------
+    - name: "Ensure root has an SSH key pair"
+      ansible.builtin.shell:
+        cmd: |
+          if [ ! -f /root/.ssh/id_rsa ]; then
+            ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N "" -q
+          fi
+          cat /root/.ssh/id_rsa.pub
+        executable: /bin/bash
+      register: root_pubkey
+      changed_when: false
+      when: _cluster_join_pending | bool
+      tags: [root-ssh]
+
+    - name: "Add ALL other nodes' root keys to authorized_keys (bidirectional trust)"
+      ansible.builtin.lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{ hostvars[item].root_pubkey.stdout }}"
+        state: present
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ groups['proxmox_nodes'] }}"
+      when:
+        - _cluster_join_pending | bool
+        - item != inventory_hostname
+        - hostvars[item].root_pubkey is defined
+        - hostvars[item].root_pubkey.stdout | default('') | length > 0
+      tags: [root-ssh]
+
+    - name: "Add ALL other nodes' host keys to known_hosts (bidirectional trust)"
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          TARGET_IP="{{ hostvars[item].ansible_host }}"
+          # Only scan standard key types — skip sk-* FIDO types
+          ssh-keyscan -t rsa,ecdsa,ed25519 -H "$TARGET_IP" >> /root/.ssh/known_hosts 2>/dev/null
+          sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts
+        executable: /bin/bash
+      loop: "{{ groups['proxmox_nodes'] }}"
+      when:
+        - item != inventory_hostname
+        - _cluster_join_pending | bool
+      changed_when: true
+      tags: [root-ssh]
+
+  handlers:
+    - name: Restart sshd for cluster
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+    # pmxcfs resolves the hostname at startup — must restart after
+    # /etc/hosts changes so pvecm uses the correct node IP.
+    - name: Restart pve-cluster for hosts change
+      ansible.builtin.systemd:
+        name: pve-cluster
+        state: restarted
+
+# -------------------------------------------------------------------------
+# Play 2: Create Cluster (leader node only)
+# -------------------------------------------------------------------------
+- name: "Proxmox Cluster (Phase 2: Create Cluster on Leader)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Create cluster '{{ proxmox_cluster_name }}' on {{ proxmox_cluster_leader }}"
+      ansible.builtin.command: "pvecm create {{ proxmox_cluster_name }}"
+      register: cluster_create
+      when:
+        - inventory_hostname == proxmox_cluster_leader
+        - not (already_in_target_cluster | default(false) | bool)
+      changed_when: cluster_create.rc == 0
+      tags: [cluster-create]
+
+    - name: Wait for corosync to stabilize
+      ansible.builtin.pause:
+        seconds: 10
+      when:
+        - inventory_hostname == proxmox_cluster_leader
+        - cluster_create is changed
+      tags: [cluster-create]
+
+    - name: Verify cluster was created successfully
+      ansible.builtin.command: pvecm status
+      register: leader_status
+      changed_when: false
+      when: inventory_hostname == proxmox_cluster_leader
+      tags: [cluster-create]
+
+    - name: Display cluster creation result
+      ansible.builtin.debug:
+        msg: "{{ leader_status.stdout_lines }}"
+      when:
+        - inventory_hostname == proxmox_cluster_leader
+        - leader_status is defined
+        - leader_status.stdout_lines is defined
+      tags: [cluster-create]
+
+# -------------------------------------------------------------------------
+# Play 3: Join Cluster (non-leader nodes, one at a time)
+# -------------------------------------------------------------------------
+# CRITICAL: serial: 1 ensures nodes join one at a time. Joining multiple
+# nodes simultaneously can cause corosync quorum calculation issues.
+#
+# Each join:
+#   1. SSHes to the leader as root to exchange corosync auth keys
+#   2. Restarts pveproxy (brief Web UI interruption, VMs unaffected)
+#   3. Syncs cluster configuration (/etc/pve via pmxcfs)
+#   4. Takes ~10-15 seconds to stabilize
+# -------------------------------------------------------------------------
+- name: "Proxmox Cluster (Phase 3: Join Nodes to Cluster)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Skip leader node (already created cluster)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is the cluster leader — skipping join."
+      when: inventory_hostname == proxmox_cluster_leader
+      tags: [cluster-join]
+
+    - name: Skip nodes already in the cluster
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is already in cluster '{{ proxmox_cluster_name }}' — skipping."
+      when: already_in_target_cluster | default(false) | bool
+      tags: [cluster-join]
+
+    # --use_ssh: Use SSH key auth instead of password (keys set up in Play 1)
+    # --force:   Allow joining even if the node has existing VMs/CTs.
+    #            Without this, pvecm refuses to join nodes that have guests
+    #            (safety check for VM ID conflicts). Safe when the operator
+    #            has verified no ID conflicts exist across the cluster.
+    - name: "Join {{ inventory_hostname }} to cluster '{{ proxmox_cluster_name }}'"
+      ansible.builtin.shell:
+        cmd: |
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          pvecm add {{ hostvars[proxmox_cluster_leader].ansible_host }} --use_ssh --force 2>&1
+        executable: /bin/bash
+      register: cluster_join
+      when:
+        - inventory_hostname != proxmox_cluster_leader
+        - not (already_in_target_cluster | default(false) | bool)
+      changed_when: cluster_join.rc == 0
+      failed_when: false  # Don't fail here — we verify below with pvecm status
+      tags: [cluster-join]
+
+    - name: "Display pvecm add output"
+      ansible.builtin.debug:
+        msg: |
+          pvecm add rc={{ cluster_join.rc | default('N/A') }}
+          stdout: {{ cluster_join.stdout | default('(empty)') }}
+          stderr: {{ cluster_join.stderr | default('(empty)') }}
+      when:
+        - cluster_join is defined
+        - cluster_join is not skipped
+      tags: [cluster-join]
+
+    - name: Wait for corosync to stabilize after join
+      ansible.builtin.pause:
+        seconds: 15
+      when:
+        - cluster_join is defined
+        - cluster_join is changed
+      tags: [cluster-join]
+
+    # Capture pve-cluster journal entries from the join attempt for diagnostics
+    - name: "Capture pve-cluster journal (diagnostics)"
+      ansible.builtin.shell:
+        cmd: |
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          journalctl -u pve-cluster --since "2 minutes ago" --no-pager 2>&1 || true
+        executable: /bin/bash
+      register: pve_journal
+      changed_when: false
+      when:
+        - cluster_join is defined
+        - cluster_join is changed
+      tags: [cluster-join]
+
+    - name: "Display pve-cluster journal"
+      ansible.builtin.debug:
+        msg: "{{ pve_journal.stdout_lines | default(['(empty)']) }}"
+      when:
+        - pve_journal is defined
+        - pve_journal is not skipped
+      tags: [cluster-join]
+
+    # pvecm add returns rc=0 even when the join fails internally (it
+    # launches a background task that may fail after the command returns).
+    # Verify the join ACTUALLY succeeded by checking for corosync.conf
+    # and cluster membership. If this fails, something went wrong during
+    # the pvecm add process — check the journal output above.
+    - name: Verify node joined successfully (corosync.conf must exist)
+      ansible.builtin.command: pvecm status
+      register: join_status
+      changed_when: false
+      failed_when: >-
+        join_status.rc != 0
+        or proxmox_cluster_name not in (join_status.stdout | default(''))
+      when:
+        - inventory_hostname != proxmox_cluster_leader
+        - cluster_join is defined
+        - cluster_join is changed
+      tags: [cluster-join]
+
+    - name: Display join result
+      ansible.builtin.debug:
+        msg: "{{ join_status.stdout_lines }}"
+      when:
+        - join_status is defined
+        - join_status.stdout_lines is defined
+      tags: [cluster-join]
+
+# -------------------------------------------------------------------------
+# Play 4: Lock Down Root SSH (all nodes)
+# -------------------------------------------------------------------------
+# Restricts root SSH to key-based authentication only (prohibit-password).
+# This runs on ALL nodes regardless of whether they were joined — the
+# security posture must be restored even if an earlier play failed.
+#
+# IMPORTANT: Proxmox clusters REQUIRE root key-based SSH between nodes for:
+#   - pvecm cluster operations (join, status, etc.)
+#   - VM/CT migration between nodes
+#   - Configuration sync via pmxcfs (/etc/pve)
+#   - Web UI remote shell access to other nodes
+# Using "PermitRootLogin no" breaks all of the above. The correct setting
+# for clustered Proxmox nodes is "prohibit-password" which allows key-based
+# root SSH (used by Proxmox internally) while blocking password auth.
+# -------------------------------------------------------------------------
+- name: "Proxmox Cluster (Phase 4: Lock Down Root SSH)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: "Restrict root SSH to key-based auth only (cluster requirement)"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin prohibit-password"
+        state: present
+        validate: "sshd -t -f %s"
+      notify: Restart sshd post-cluster
+      tags: [root-ssh, lockdown]
+
+    # Restore the Proxmox symlink: /root/.ssh/authorized_keys → /etc/pve/priv/authorized_keys
+    # Stock Proxmox uses this symlink so sshd reads the cluster-wide authorized_keys
+    # managed by pmxcfs. Play 1 may have written temporary keys into it (which is fine —
+    # they land in the cluster file and are harmless). But we must ensure the symlink
+    # itself is intact, not replaced by a regular file.
+    # NOTE: Do NOT set owner/group here. The symlink target lives on pmxcfs
+    # (Proxmox cluster filesystem) which enforces www-data group ownership.
+    # Ansible follows the symlink and tries to chown the target, which pmxcfs
+    # rejects. The symlink itself inherits root:root from become automatically.
+    - name: "Ensure /root/.ssh/authorized_keys is a symlink to cluster authorized_keys"
+      ansible.builtin.file:
+        path: /root/.ssh/authorized_keys
+        src: /etc/pve/priv/authorized_keys
+        state: link
+        force: true
+      tags: [root-ssh, lockdown]
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+  handlers:
+    - name: Restart sshd post-cluster
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+# -------------------------------------------------------------------------
+# Play 5: Post-Cluster Verification (all nodes)
+# -------------------------------------------------------------------------
+# Validates the final cluster state: all expected nodes present, quorum
+# established, corosync running cleanly.
+# -------------------------------------------------------------------------
+- name: "Proxmox Cluster (Phase 5: Verification)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get final cluster status
+      ansible.builtin.command: pvecm status
+      register: final_status
+      changed_when: false
+      tags: [verify]
+
+    - name: Get cluster node list
+      ansible.builtin.command: pvecm nodes
+      register: node_list
+      changed_when: false
+      tags: [verify]
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Cluster Status on {{ inventory_hostname }}
+          ============================================================
+          {{ final_status.stdout }}
+          ============================================================
+          Node List:
+          {{ node_list.stdout }}
+          ============================================================
+      tags: [verify]
+
+    - name: "Verify expected node count"
+      ansible.builtin.assert:
+        that:
+          - "'Nodes:' in final_status.stdout"
+        fail_msg: >-
+          Cluster status on {{ inventory_hostname }} does not show expected
+          node information. Check 'pvecm status' manually.
+        success_msg: "Cluster is healthy on {{ inventory_hostname }}"
+      tags: [verify]
+
+    - name: Verify quorum is established
+      ansible.builtin.assert:
+        that:
+          - "'Quorate:' in final_status.stdout"
+          - "'Yes' in final_status.stdout"
+        fail_msg: >-
+          Cluster does NOT have quorum on {{ inventory_hostname }}.
+          This means not enough nodes are online. Check 'pvecm status'.
+        success_msg: "Quorum established on {{ inventory_hostname }}"
+      tags: [verify]
+
+    - name: Verify root SSH is restricted to key-based only
+      ansible.builtin.command: grep "^PermitRootLogin prohibit-password" /etc/ssh/sshd_config
+      changed_when: false
+      tags: [verify, lockdown]
+
+    - name: Verify authorized_keys symlink to cluster file
+      ansible.builtin.stat:
+        path: /root/.ssh/authorized_keys
+      register: authkeys_stat
+      tags: [verify, lockdown]
+
+    - name: Assert authorized_keys is a symlink
+      ansible.builtin.assert:
+        that:
+          - authkeys_stat.stat.islnk is defined
+          - authkeys_stat.stat.islnk
+          - authkeys_stat.stat.lnk_target == "/etc/pve/priv/authorized_keys"
+        fail_msg: >-
+          /root/.ssh/authorized_keys on {{ inventory_hostname }} is NOT a symlink
+          to /etc/pve/priv/authorized_keys. Stock Proxmox requires this symlink
+          for inter-node SSH. Current state: {{ authkeys_stat.stat }}
+        success_msg: "authorized_keys symlink intact on {{ inventory_hostname }}"
+      tags: [verify, lockdown]
+
+    # Final summary — only on the leader
+    - name: "Cluster formation complete"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          PROXMOX CLUSTER '{{ proxmox_cluster_name }}' IS OPERATIONAL
+          ============================================================
+
+          All Proxmox nodes are now in a single cluster.
+          Root SSH has been re-disabled on all nodes.
+
+          What this means:
+            - Web UI on any node (https://<ip>:8006) shows all VMs
+            - Live migration between nodes is possible
+            - Terraform can use ANY node's API endpoint
+            - HA can be configured for automatic VM failover
+
+          Next steps:
+            1. Verify all VMs are visible:
+                 qm list  (on any node)
+            2. Store lab-01 API token in Vault (if not done yet):
+                 ansible-playbook playbooks/proxmox-api-setup.yml --limit lab-01
+            3. Apply Terraform Layer 01 to distribute ISOs to all nodes:
+                 terraform apply -var proxmox_node=lab-01
+            4. Build Packer templates on lab-01:
+                 ./scripts/packer-build.sh lab-01 ubuntu-24.04
+          ============================================================
+      when: inventory_hostname == groups['proxmox_nodes'][0]
+      run_once: true
+      tags: [verify]

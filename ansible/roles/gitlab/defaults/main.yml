@@ -1,0 +1,100 @@
+---
+# =============================================================================
+# GitLab Role - Default Variables
+# =============================================================================
+# Override these in group_vars/core_infra.yml or host_vars/gitlab.yml.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# GitLab Edition and Version
+# ---------------------------------------------------------------------------
+gitlab_edition: "gitlab-ce"
+# GitLab CE version — pinned for reproducibility and safe upgrades.
+# GitLab requires sequential major version upgrades with required stops.
+# Check https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/ before bumping.
+# renovate: datasource=docker depName=gitlab/gitlab-ce
+gitlab_version: "18.9.0-ce.0"
+gitlab_external_url: "http://gitlab.example-lab.local"
+
+# ---------------------------------------------------------------------------
+# TLS (disabled by default — reverse proxy or Vault PKI handles TLS)
+# ---------------------------------------------------------------------------
+gitlab_ssl_enabled: false
+
+# ---------------------------------------------------------------------------
+# Data Disk
+# ---------------------------------------------------------------------------
+# Mount point for the data disk (scsi1 → /dev/sdb).
+# GitLab git-data directory lives on this disk for storage tiering.
+gitlab_data_mount_point: "/mnt/gitlab-data"
+
+# ---------------------------------------------------------------------------
+# Git Data Directory
+# ---------------------------------------------------------------------------
+# Override to place on data disk: /mnt/gitlab-data/git-data
+gitlab_git_data_dir: "/var/opt/gitlab/git-data"
+
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+gitlab_backup_keep_time: 604800  # 7 days in seconds
+gitlab_backup_path: "/var/opt/gitlab/backups"
+# Automated backup: cron schedule (daily at 02:00) + S3 off-site upload.
+# Set gitlab_backup_enabled: true and provide S3 + age variables to activate.
+gitlab_backup_enabled: false
+gitlab_backup_cron_hour: "2"
+gitlab_backup_cron_minute: "0"
+# S3 off-site backup target (Hetzner Object Storage)
+gitlab_backup_s3_bucket: "firblab-gitlab-backups"
+gitlab_backup_s3_retention_days: 30
+# Incremental backup: only backs up changes since last full backup.
+# Each incremental is independently restorable (no chain dependency).
+# A full backup is forced on gitlab_backup_full_day (0=Sunday).
+gitlab_backup_incremental: true
+gitlab_backup_full_day: 0
+
+# ---------------------------------------------------------------------------
+# SSH
+# ---------------------------------------------------------------------------
+gitlab_ssh_port: 22
+
+# ---------------------------------------------------------------------------
+# Performance Tuning
+# ---------------------------------------------------------------------------
+gitlab_puma_workers: 2
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+gitlab_prometheus_enabled: false
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+gitlab_email_enabled: true
+gitlab_smtp_enabled: false
+
+# ---------------------------------------------------------------------------
+# HTTP Port (for health checks)
+# ---------------------------------------------------------------------------
+gitlab_http_port: 80
+
+# ---------------------------------------------------------------------------
+# Kubernetes Agent Server (KAS)
+# ---------------------------------------------------------------------------
+# Enables GitLab's built-in KAS for agent-based K8s integration.
+# Set gitlab_kas_enabled: true and configure the external URL to activate.
+# External URL must use wss:// (WebSocket Secure) when behind a TLS proxy.
+gitlab_kas_enabled: false
+gitlab_kas_external_url: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
+
+# ---------------------------------------------------------------------------
+# OIDC Authentication (Authentik SSO)
+# ---------------------------------------------------------------------------
+# Set gitlab_oidc_enabled: true and provide client credentials to activate.
+# Credentials are read from Vault (secret/services/gitlab/oidc) by the
+# deploy playbook and set as facts before the role runs.
+gitlab_oidc_enabled: false
+gitlab_oidc_client_id: ""
+gitlab_oidc_client_secret: ""
+gitlab_oidc_issuer_url: "https://auth.home.example-lab.org/application/o/gitlab/"

@@ -1,0 +1,252 @@
+---
+# =============================================================================
+# NUT Role - Install and Configure Network UPS Tools
+# =============================================================================
+# Supports two modes:
+#
+#   netserver: Installs nut-server + nut-client, configures USB UPS driver,
+#     upsd listener, upsd.users, and upsmon as master. Serves UPS status to
+#     remote NUT clients on port 3493 for coordinated shutdown.
+#
+#   netclient: Installs nut-client only, configures upsmon as secondary
+#     pointing at a remote NUT server. No local UPS hardware needed. On low
+#     battery, the master signals FSD and this host shuts down gracefully.
+#
+# Mode is selected via nut_mode variable (default: netserver).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Validate mode
+# ---------------------------------------------------------------------------
+- name: Validate NUT mode
+  ansible.builtin.assert:
+    that:
+      - nut_mode in ['netserver', 'netclient', 'standalone']
+    fail_msg: "nut_mode must be one of: netserver, netclient, standalone. Got: {{ nut_mode }}"
+  tags:
+    - configure
+
+- name: Validate netclient requires server host
+  ansible.builtin.assert:
+    that:
+      - nut_server_host | length > 0
+    fail_msg: "nut_server_host must be set when nut_mode=netclient (IP of the NUT netserver)"
+  when: nut_mode == "netclient"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Install NUT Packages
+# ---------------------------------------------------------------------------
+- name: Install NUT packages (netserver)
+  ansible.builtin.apt:
+    name:
+      - nut
+      - nut-server
+      - nut-client
+    state: present
+    update_cache: true
+  when: nut_mode != "netclient"
+  tags:
+    - install
+
+- name: Install NUT packages (netclient)
+  ansible.builtin.apt:
+    name:
+      - nut-client
+    state: present
+    update_cache: true
+  when: nut_mode == "netclient"
+  tags:
+    - install
+
+# ===========================================================================
+# NETSERVER-ONLY TASKS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# USB Device Permissions (netserver only)
+# ---------------------------------------------------------------------------
+# NUT needs access to the UPS USB device. The nut user must be in the
+# correct groups, and a udev rule ensures the device is accessible.
+# ---------------------------------------------------------------------------
+- name: Add nut user to USB device groups
+  ansible.builtin.user:
+    name: nut
+    groups:
+      - dialout
+      - plugdev
+    append: true
+  when: nut_mode != "netclient"
+  tags:
+    - configure
+
+- name: Create udev rule for UPS USB device
+  ansible.builtin.copy:
+    dest: /etc/udev/rules.d/99-nut-ups.rules
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # NUT UPS USB device access — {{ nut_ups_desc }}
+      # Managed by Ansible — DO NOT EDIT MANUALLY
+      SUBSYSTEM=="usb", ATTR{idVendor}=="{{ nut_ups_vendorid }}", ATTR{idProduct}=="{{ nut_ups_productid }}", GROUP="nut", MODE="0660"
+  notify: Reload udev rules
+  when: nut_mode != "netclient"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# NUT Configuration Files — Server-specific
+# ---------------------------------------------------------------------------
+- name: Template UPS device configuration
+  ansible.builtin.template:
+    src: ups.conf.j2
+    dest: /etc/nut/ups.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify:
+    - Restart nut-server
+  when: nut_mode != "netclient"
+  tags:
+    - configure
+
+- name: Template upsd listener configuration
+  ansible.builtin.template:
+    src: upsd.conf.j2
+    dest: /etc/nut/upsd.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify: Restart nut-server
+  when: nut_mode != "netclient"
+  tags:
+    - configure
+
+- name: Template upsd user authentication
+  ansible.builtin.template:
+    src: upsd.users.j2
+    dest: /etc/nut/upsd.users
+    owner: root
+    group: nut
+    mode: "0640"
+  no_log: true
+  notify: Restart nut-server
+  when: nut_mode != "netclient"
+  tags:
+    - configure
+
+# ===========================================================================
+# SHARED TASKS (both netserver and netclient)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# NUT Configuration Files — Shared
+# ---------------------------------------------------------------------------
+- name: Template NUT mode configuration
+  ansible.builtin.template:
+    src: nut.conf.j2
+    dest: /etc/nut/nut.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  notify:
+    - Restart nut-server
+    - Restart nut-monitor
+  tags:
+    - configure
+
+- name: Template upsmon monitoring configuration
+  ansible.builtin.template:
+    src: upsmon.conf.j2
+    dest: /etc/nut/upsmon.conf
+    owner: root
+    group: nut
+    mode: "0640"
+  no_log: true
+  notify: Restart nut-monitor
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Enable and Start Services
+# ---------------------------------------------------------------------------
+- name: Enable and start nut-server
+  ansible.builtin.systemd:
+    name: nut-server.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: nut_mode != "netclient"
+  tags:
+    - service
+
+- name: Ensure nut-server is stopped and disabled (netclient)
+  ansible.builtin.systemd:
+    name: nut-server.service
+    enabled: false
+    state: stopped
+  when: nut_mode == "netclient"
+  failed_when: false
+  tags:
+    - service
+
+- name: Enable and start nut-monitor
+  ansible.builtin.systemd:
+    name: nut-monitor.service
+    enabled: true
+    state: started
+  tags:
+    - service
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
+- name: Verify UPS is detected by NUT (netserver)
+  ansible.builtin.command:
+    cmd: "upsc {{ nut_ups_name }}@localhost"
+  register: nut_verify
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 5
+  until: nut_verify.rc == 0
+  when: nut_mode != "netclient"
+  tags:
+    - verify
+
+- name: Display NUT UPS status (netserver)
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'UPS detected and monitoring active: ' ~ nut_ups_desc
+         if nut_verify.rc | default(1) == 0
+         else 'WARNING: UPS not detected. Check USB connection and run: upsc ' ~ nut_ups_name ~ '@localhost' }}
+  when: nut_mode != "netclient"
+  tags:
+    - verify
+
+- name: Verify remote UPS reachable (netclient)
+  ansible.builtin.command:
+    cmd: "upsc {{ nut_server_ups_name }}@{{ nut_server_host }}"
+  register: nut_client_verify
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 5
+  until: nut_client_verify.rc == 0
+  when: nut_mode == "netclient"
+  tags:
+    - verify
+
+- name: Display NUT client status (netclient)
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Remote UPS monitoring active: ' ~ nut_server_ups_name ~ '@' ~ nut_server_host
+         if nut_client_verify.rc | default(1) == 0
+         else 'WARNING: Remote UPS not reachable at ' ~ nut_server_ups_name ~ '@' ~ nut_server_host ~
+         '. Check: 1) NUT server is running on ' ~ nut_server_host ~
+         ', 2) Port 3493 is open, 3) Monitor password matches server.' }}
+  when: nut_mode == "netclient"
+  tags:
+    - verify

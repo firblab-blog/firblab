@@ -1,0 +1,34 @@
+---
+# =============================================================================
+# NetBox Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# NetBox application
+# renovate: datasource=docker depName=netboxcommunity/netbox
+netbox_version: "v4.5.3"
+netbox_port: 8080
+netbox_base_path: /opt/netbox
+
+# Database
+netbox_db_name: netbox
+netbox_db_user: netbox
+
+# PostgreSQL image
+netbox_pg_image: "postgres:16-alpine"
+
+# Redis image
+netbox_redis_image: "redis:7-alpine"
+
+# Superuser (created on first deploy)
+netbox_superuser_name: admin
+netbox_superuser_email: admin@example-lab.local
+
+# Plugins
+# renovate: datasource=pypi depName=netbox-topology-views
+netbox_topology_views_version: "4.5.0"
+netbox_proxmox_importer_enabled: true
+
+# Granian (NetBox ASGI server)
+netbox_workers: 3

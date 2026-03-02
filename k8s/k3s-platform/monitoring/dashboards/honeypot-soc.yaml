@@ -1,0 +1,238 @@
+# =============================================================================
+# Honeypot SOC Dashboard — ConfigMap for Grafana Sidecar
+# =============================================================================
+# Auto-loaded by the Grafana sidecar (kube-prometheus-stack) via the
+# grafana_dashboard label. Queries Loki for OpenCanary + Cowrie JSON logs
+# shipped by Promtail from the Hetzner gateway.
+#
+# Log sources:
+#   {job="opencanary"} — FTP, MySQL, RDP, VNC, Redis honeypot events
+#   {job="cowrie"}      — SSH/Telnet session recordings, credential captures
+#
+# Prerequisites:
+#   - Loki datasource configured in Grafana (named "Loki")
+#   - Loki NodePort 31100 exposed + DMZ→Services zone policy
+#   - Promtail on Hetzner pushing to Loki
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: honeypot-soc-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Operations"
+data:
+  honeypot-soc.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "description": "Honeypot deception system — OpenCanary + Cowrie on Hetzner gateway",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "title": "Honeypot Attack Rate",
+          "description": "All honeypot events per minute (OpenCanary + Cowrie combined)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "sum(count_over_time({job=~\"opencanary|cowrie\"} [1m]))",
+              "legendFormat": "Total events/min",
+              "refId": "A"
+            },
+            {
+              "expr": "count_over_time({job=\"cowrie\"} [1m])",
+              "legendFormat": "Cowrie (SSH/Telnet)",
+              "refId": "B"
+            },
+            {
+              "expr": "count_over_time({job=\"opencanary\"} [1m])",
+              "legendFormat": "OpenCanary (FTP/MySQL/RDP/VNC/Redis)",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": {
+                "fillOpacity": 20,
+                "lineWidth": 2,
+                "spanNulls": false,
+                "drawStyle": "line",
+                "pointSize": 5
+              },
+              "unit": "short"
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          }
+        },
+        {
+          "title": "Attack Sources (Top 20 IPs)",
+          "description": "Most active attacker IPs across all honeypot protocols",
+          "type": "table",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "topk(20, sum by (src_host) (count_over_time({job=\"opencanary\"} | json | src_host != \"\" [$__range])))",
+              "legendFormat": "",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "transformations": [
+            {
+              "id": "sortBy",
+              "options": {
+                "fields": {},
+                "sort": [{ "field": "Value", "desc": true }]
+              }
+            }
+          ],
+          "fieldConfig": {
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "src_host" },
+                "properties": [{ "id": "displayName", "value": "Source IP" }]
+              },
+              {
+                "matcher": { "id": "byName", "options": "Value" },
+                "properties": [{ "id": "displayName", "value": "Event Count" }]
+              }
+            ]
+          }
+        },
+        {
+          "title": "Protocol Breakdown",
+          "description": "Honeypot events by protocol/service type",
+          "type": "piechart",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "sum by (job) (count_over_time({job=~\"opencanary|cowrie\"} [$__range]))",
+              "legendFormat": "{{job}}",
+              "refId": "A",
+              "instant": true
+            }
+          ],
+          "options": {
+            "legend": { "displayMode": "list", "placement": "right" },
+            "pieType": "donut",
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          }
+        },
+        {
+          "title": "Cowrie — SSH Credential Captures",
+          "description": "Username/password combinations attempted by attackers on the SSH honeypot",
+          "type": "table",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 18 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{job=\"cowrie\"} | json | eventid = \"cowrie.login.failed\" or eventid = \"cowrie.login.success\" | line_format \"{{.username}} {{.password}} {{.src_ip}}\"",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "extractFields",
+              "options": {
+                "source": "Line",
+                "format": "auto"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Cowrie — Session Timeline",
+          "description": "SSH/Telnet sessions recorded by Cowrie (logins, commands, file downloads)",
+          "type": "logs",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 18 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{job=\"cowrie\"} | json | eventid =~ \"cowrie.session.*|cowrie.login.*|cowrie.command.*|cowrie.direct-tcpip.*\"",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "showCommonLabels": false,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "dedupStrategy": "none",
+            "enableLogDetails": true
+          }
+        },
+        {
+          "title": "OpenCanary — Raw Events",
+          "description": "All OpenCanary honeypot events (FTP, MySQL, RDP, VNC, Redis)",
+          "type": "logs",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{job=\"opencanary\"}",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "showCommonLabels": false,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "dedupStrategy": "none",
+            "enableLogDetails": true
+          }
+        },
+        {
+          "title": "Cowrie — Malware Downloads",
+          "description": "Files downloaded/uploaded by attackers in SSH sessions",
+          "type": "logs",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "expr": "{job=\"cowrie\"} | json | eventid =~ \"cowrie.session.file_download.*|cowrie.session.file_upload\"",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "showCommonLabels": false,
+            "wrapLogMessage": true,
+            "sortOrder": "Descending",
+            "dedupStrategy": "none",
+            "enableLogDetails": true
+          }
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 39,
+      "tags": ["honeypot", "security", "cowrie", "opencanary"],
+      "templating": { "list": [] },
+      "time": { "from": "now-24h", "to": "now" },
+      "timepicker": {},
+      "timezone": "utc",
+      "title": "Honeypot SOC",
+      "uid": "honeypot-soc",
+      "version": 1
+    }

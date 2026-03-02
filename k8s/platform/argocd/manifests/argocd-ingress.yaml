@@ -1,0 +1,46 @@
+# =============================================================================
+# ArgoCD IngressRoute — Traefik TLS Termination
+# =============================================================================
+# Exposes ArgoCD UI at https://argocd.home.example-lab.org via Traefik.
+# DNS record already exists (Layer 00 dns.tf → Traefik VIP 10.0.20.220).
+#
+# ArgoCD server listens on both HTTP (8080) and HTTPS (8443) internally.
+# Since Traefik terminates TLS on the frontend, we connect to the backend
+# over HTTP (port 80 → pod 8080) to avoid self-signed cert verification.
+#
+# Required for OIDC — the redirect URI (argocd.home.example-lab.org/auth/callback)
+# must be accessible from the browser.
+# =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: argocd-tls
+  namespace: argocd
+spec:
+  secretName: argocd-tls
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  dnsNames:
+    - argocd.home.example-lab.org
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: argocd
+  namespace: argocd
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`argocd.home.example-lab.org`)
+      kind: Rule
+      services:
+        - name: argocd-server
+          port: 80
+      middlewares:
+        - name: default-headers
+          namespace: traefik
+  tls:
+    secretName: argocd-tls

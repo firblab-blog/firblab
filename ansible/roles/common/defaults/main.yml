@@ -1,0 +1,59 @@
+---
+# =============================================================================
+# Common Role Defaults
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Application Firewall Rules
+# ---------------------------------------------------------------------------
+# Override these in group_vars to open application-specific ports beyond the
+# baseline SSH rule. Both UFW (Debian) and firewalld (RedHat) consume these.
+#
+# Example (in group_vars/vault_cluster.yml):
+#   firewall_additional_ports:
+#     - { port: 8200, proto: tcp, comment: "Vault API" }
+#     - { port: 8201, proto: tcp, comment: "Vault cluster" }
+#   firewall_additional_sources:
+#     - 10.0.10.0/24
+#     - 10.0.50.0/24
+firewall_additional_ports: []
+firewall_additional_sources: []
+
+# Extra SSH sources — appended to the baseline SSH allow rules (management +
+# LAN networks). Use this to allow SSH from non-standard subnets, e.g. Docker
+# bridge on CI runner hosts that need to SSH back to themselves.
+firewall_extra_ssh_sources: []
+
+# Docker FORWARD chain fix: set true on Docker-in-LXC hosts.
+# Docker publishes ports via iptables FORWARD chain (NAT/DNAT), but UFW's
+# DEFAULT_FORWARD_POLICY="DROP" blocks forwarded traffic. Regular UFW allow
+# rules only apply to INPUT. Setting this to true adds `ufw route allow`
+# rules (FORWARD chain) alongside the normal INPUT rules, so Docker-published
+# ports are reachable from allowed source networks.
+firewall_docker_forwarding: false
+
+# ---------------------------------------------------------------------------
+# OS-Family Service Names
+# ---------------------------------------------------------------------------
+# Systemd service names differ between Debian/Ubuntu and RedHat/Rocky.
+# The binary names are the same (sshd, chronyd) — only the unit names differ.
+ssh_service_name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+chrony_service_name: "{{ 'chrony' if ansible_os_family == 'Debian' else 'chronyd' }}"
+
+# ---------------------------------------------------------------------------
+# Monitoring defaults (can be overridden per host/group)
+# ---------------------------------------------------------------------------
+# node_exporter and promtail versions are set globally in all.yml.
+# These defaults allow disabling per-host without changing all.yml.
+monitoring_node_exporter_enabled: true
+monitoring_promtail_enabled: true
+# Docker log collection: enable only on Docker hosts (set in group_vars)
+monitoring_promtail_docker_logs: false
+
+# ---------------------------------------------------------------------------
+# Storage Maintenance
+# ---------------------------------------------------------------------------
+# Enable weekly fstrim for SSD/NVMe TRIM. Automatically skipped on LXC
+# containers (host handles TRIM) and non-Linux systems. Safe and recommended
+# for all VMs on SSD/NVMe-backed LVM-thin storage.
+fstrim_enabled: true

@@ -1,0 +1,106 @@
+---
+# =============================================================================
+# Vault Unseal — TLS Certificate Deployment
+# =============================================================================
+# Copies pre-generated TLS certificates from the Ansible controller
+# (~/.lab/tls/unseal/) to the remote node at /opt/unseal-vault/tls/.
+#
+# Prerequisites:
+#   Run vault-tls-generate.yml first to create the certificates locally.
+# =============================================================================
+
+- name: Set unseal TLS source directory
+  ansible.builtin.set_fact:
+    vault_unseal_tls_source_dir: "{{ lookup('env', 'HOME') }}/.lab/tls/unseal"
+
+# ---------------------------------------------------------------------------
+# Validate source certificates exist on controller
+# ---------------------------------------------------------------------------
+- name: Check unseal TLS source files exist on controller
+  ansible.builtin.stat:
+    path: "{{ vault_unseal_tls_source_dir }}/{{ item }}"
+  delegate_to: localhost
+  become: false
+  register: unseal_tls_source_check
+  loop:
+    - ca.pem
+    - vault-cert.pem
+    - vault-key.pem
+  loop_control:
+    label: "{{ item }}"
+
+- name: Fail if unseal TLS source files are missing
+  ansible.builtin.fail:
+    msg: >
+      Unseal TLS certificate file not found: {{ vault_unseal_tls_source_dir }}/{{ item.item }}
+
+      Run the TLS generation playbook first:
+        ansible-playbook playbooks/vault-tls-generate.yml
+
+      Then re-run the vault deployment.
+  when: not item.stat.exists
+  loop: "{{ unseal_tls_source_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# ---------------------------------------------------------------------------
+# Ensure TLS directory exists on remote node
+# ---------------------------------------------------------------------------
+- name: Ensure unseal vault TLS directory exists
+  ansible.builtin.file:
+    path: "{{ vault_unseal_tls_dir }}"
+    state: directory
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "0750"
+  become: true
+
+# ---------------------------------------------------------------------------
+# Deploy certificates
+# ---------------------------------------------------------------------------
+- name: Deploy unseal CA certificate
+  ansible.builtin.copy:
+    src: "{{ vault_unseal_tls_source_dir }}/ca.pem"
+    dest: "{{ vault_unseal_tls_dir }}/ca.pem"
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "0644"
+  become: true
+  notify:
+    - Restart vault-unseal
+
+- name: Deploy unseal node certificate
+  ansible.builtin.copy:
+    src: "{{ vault_unseal_tls_source_dir }}/vault-cert.pem"
+    dest: "{{ vault_unseal_tls_dir }}/vault-cert.pem"
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "0644"
+  become: true
+  notify:
+    - Restart vault-unseal
+
+- name: Deploy unseal node private key
+  ansible.builtin.copy:
+    src: "{{ vault_unseal_tls_source_dir }}/vault-key.pem"
+    dest: "{{ vault_unseal_tls_dir }}/vault-key.pem"
+    owner: "{{ vault_unseal_user }}"
+    group: "{{ vault_unseal_group }}"
+    mode: "0600"
+  become: true
+  notify:
+    - Restart vault-unseal
+
+# ---------------------------------------------------------------------------
+# Verify deployed certificates
+# ---------------------------------------------------------------------------
+- name: Verify deployed unseal certificate matches CA
+  ansible.builtin.command: >
+    openssl verify -CAfile {{ vault_unseal_tls_dir }}/ca.pem {{ vault_unseal_tls_dir }}/vault-cert.pem
+  register: unseal_tls_verify
+  changed_when: false
+  become: true
+
+- name: Display unseal TLS verification result
+  ansible.builtin.debug:
+    msg: "Unseal TLS verification: {{ unseal_tls_verify.stdout }}"

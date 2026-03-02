@@ -1,0 +1,96 @@
+---
+# =============================================================================
+# Backup Role - Default Variables
+# =============================================================================
+# Generic backup role for Docker Compose services. Stops containers, tars
+# data, encrypts with age, uploads to Hetzner S3, restarts containers.
+#
+# Usage: Include this role in a service's deploy playbook and set
+# backup_services to define which services and data to back up.
+# =============================================================================
+
+# Enable/disable backup automation
+backup_enabled: false
+
+# ---------------------------------------------------------------------------
+# Service Definitions (override per host/playbook)
+# ---------------------------------------------------------------------------
+# List of services to back up. Each entry defines:
+#   name:          Service identifier (used in filenames)
+#   compose_path:  Path to docker-compose.yml (omit for non-Docker services)
+#   systemd_service: Name of systemd service to stop/start (alternative to compose_path)
+#   volumes:       List of Docker named volumes to back up (from /var/lib/docker/volumes/)
+#   paths:         List of host bind-mount paths to back up (absolute paths)
+#   pre_commands:  Shell commands to run AFTER stopping service, BEFORE tarring
+#                  (e.g., pg_dump, mysqldump). Each produces a file included via extra_paths.
+#   extra_paths:   Additional paths to include in the tar archive (e.g., dump files
+#                  created by pre_commands). Cleaned up after successful S3 upload.
+#   post_commands: Shell commands to run AFTER backup completes (e.g., cleanup dump files)
+#
+# Use 'volumes' for Docker named volumes, 'paths' for bind mounts. Can use both.
+# Use 'pre_commands' + 'extra_paths' for database dumps before tarring.
+#
+# Example (named volumes — Scanopy):
+#   backup_services:
+#     - name: scanopy
+#       compose_path: /opt/scanopy
+#       volumes:
+#         - postgres_data
+#         - scanopy_data
+#
+# Example (bind mounts — Ghost):
+#   backup_services:
+#     - name: ghost
+#       compose_path: /opt/ghost
+#       paths:
+#         - /opt/ghost/data
+#         - /opt/ghost/mysql
+#
+# Example (PostgreSQL dump — Authentik):
+#   backup_services:
+#     - name: authentik
+#       compose_path: /opt/authentik
+#       pre_commands:
+#         - "docker exec authentik-db pg_dump -U authentik authentik > /opt/authentik/authentik-dump.sql"
+#       paths:
+#         - /opt/authentik/media
+#       extra_paths:
+#         - /opt/authentik/authentik-dump.sql
+#       post_commands:
+#         - "rm -f /opt/authentik/authentik-dump.sql"
+#
+# Example (systemd service — FoundryVTT):
+#   backup_services:
+#     - name: foundryvtt
+#       systemd_service: foundryvtt
+#       paths:
+#         - /opt/foundryvtt/data
+backup_services: []
+
+# ---------------------------------------------------------------------------
+# Schedule (cron)
+# ---------------------------------------------------------------------------
+backup_cron_hour: "4"
+backup_cron_minute: "0"
+
+# ---------------------------------------------------------------------------
+# S3 Configuration (Hetzner Object Storage)
+# ---------------------------------------------------------------------------
+backup_s3_bucket: "firblab-service-backups"
+backup_s3_retention_days: 30
+# Set by playbook from Vault:
+# backup_s3_access_key
+# backup_s3_secret_key
+# backup_s3_endpoint
+
+# ---------------------------------------------------------------------------
+# Encryption (age)
+# ---------------------------------------------------------------------------
+# Set by playbook from Vault:
+# backup_age_recipient (age public key)
+
+# ---------------------------------------------------------------------------
+# Local Retention
+# ---------------------------------------------------------------------------
+backup_local_dir: "/backups"
+backup_local_retention_days: 7

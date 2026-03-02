@@ -1,0 +1,47 @@
+---
+# =============================================================================
+# System Hardening Playbook
+# =============================================================================
+# Applies baseline hardening across all managed hosts. Includes common system
+# configuration, OS-level hardening, and optional Wazuh agent enrollment.
+#
+# Usage:
+#   ansible-playbook playbooks/harden.yml
+#   ansible-playbook playbooks/harden.yml --limit vault_cluster
+#   ansible-playbook playbooks/harden.yml -e "wazuh_enabled=true"
+# =============================================================================
+
+- name: Apply System Hardening
+  hosts: all
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    # Skip macOS hosts — they use macos-bootstrap.yml instead
+    - name: Skip non-Linux hosts
+      ansible.builtin.meta: end_host
+      when: ansible_facts['os_family'] == "Darwin"
+
+  roles:
+    # Common baseline: packages, NTP, fail2ban, SSH hardening, firewall
+    # Supports Debian/Ubuntu (apt, UFW) and RedHat/Rocky (dnf, firewalld)
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    # OS-level hardening: kernel params, file permissions, audit logging
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+    # Wazuh agent for centralized SIEM/threat detection
+    # Default: enabled on all hosts. Set wazuh_enabled=false to skip
+    # (e.g., during initial bootstrap before Wazuh Manager exists).
+    - role: wazuh-agent
+      when: wazuh_enabled | default(true) | bool
+      tags:
+        - wazuh
+        - monitoring
+        - security

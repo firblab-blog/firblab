@@ -1,0 +1,152 @@
+# =============================================================================
+# Traefik Ingress Controller Helm Values — K3s RPi5 Cluster
+# =============================================================================
+# Sized for 3-node RPi5 cluster (8GB+8GB+4GB). Single replica to conserve
+# memory. Same TLS hardening and security context as RKE2.
+#
+# Install:
+#   helm repo add traefik https://traefik.github.io/charts
+#   helm install traefik traefik/traefik \
+#     -n traefik --create-namespace -f values.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Deployment — single replica (3-node cluster, conserve RAM)
+# ---------------------------------------------------------------------------
+deployment:
+  replicas: 1
+
+# ---------------------------------------------------------------------------
+# Service (MetalLB LoadBalancer)
+# ---------------------------------------------------------------------------
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.universe.tf/address-pool: k3s-services-pool
+
+# ---------------------------------------------------------------------------
+# Entrypoints
+# ---------------------------------------------------------------------------
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    protocol: TCP
+    # Redirect HTTP -> HTTPS
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    port: 8443
+    exposedPort: 443
+    protocol: TCP
+    tls:
+      enabled: true
+    # WebSocket connections (Grafana /api/live/ws) require unlimited timeouts
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s
+        writeTimeout: 0s
+
+# ---------------------------------------------------------------------------
+# TLS Hardening
+# ---------------------------------------------------------------------------
+tlsOptions:
+  default:
+    minVersion: VersionTLS12
+    cipherSuites:
+      - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+      - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+      - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+      - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+
+# ---------------------------------------------------------------------------
+# Cross-namespace middleware
+# ---------------------------------------------------------------------------
+providers:
+  kubernetesCRD:
+    allowCrossNamespace: true
+
+# ---------------------------------------------------------------------------
+# Security Headers (default middleware applied to ALL websecure routes)
+# ---------------------------------------------------------------------------
+additionalArguments:
+  - "--entryPoints.websecure.http.middlewares=traefik-default-headers@kubernetescrd"
+
+# ---------------------------------------------------------------------------
+# Prometheus Metrics — ServiceMonitor disabled (no prometheus-operator CRDs
+# at Traefik install time; monitoring deploys later). Prometheus will
+# scrape Traefik via additionalScrapeConfigs targeting the metrics service.
+# ---------------------------------------------------------------------------
+metrics:
+  prometheus:
+    entryPoint: metrics
+    service:
+      enabled: true
+    serviceMonitor:
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# Resource Limits — reduced for RPi5
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Security Context
+# ---------------------------------------------------------------------------
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+
+podSecurityContext:
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+    format: json
+
+# ---------------------------------------------------------------------------
+# IngressClass
+# ---------------------------------------------------------------------------
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+# ---------------------------------------------------------------------------
+# Dashboard (disabled for security)
+# ---------------------------------------------------------------------------
+ingressRoute:
+  dashboard:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Node placement — keep off 4GB node
+# ---------------------------------------------------------------------------
+nodeSelector:
+  example-lab.org/ram-tier: standard

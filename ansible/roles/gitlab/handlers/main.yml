@@ -1,0 +1,8 @@
+---
+# =============================================================================
+# GitLab Role Handlers
+# =============================================================================
+
+- name: Reconfigure gitlab
+  ansible.builtin.command:
+    cmd: gitlab-ctl reconfigure

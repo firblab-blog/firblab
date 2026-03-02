@@ -1,0 +1,49 @@
+# =============================================================================
+# FoundryVTT systemd Service Unit
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+# =============================================================================
+
+[Unit]
+Description=FoundryVTT - Virtual Tabletop Gaming Platform
+Documentation=https://foundryvtt.com/article/installation/
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=foundryvtt
+Group=foundryvtt
+WorkingDirectory=/opt/foundryvtt/app
+ExecStart=/usr/bin/node resources/app/main.js --dataPath=/opt/foundryvtt/data --port={{ foundryvtt_port | default('30000') }}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# ---------------------------------------------------------------------------
+# Security Hardening
+# ---------------------------------------------------------------------------
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ReadWritePaths=/opt/foundryvtt/data
+
+# ---------------------------------------------------------------------------
+# Resource Limits
+# ---------------------------------------------------------------------------
+LimitNOFILE=65536
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=foundryvtt
+
+[Install]
+WantedBy=multi-user.target

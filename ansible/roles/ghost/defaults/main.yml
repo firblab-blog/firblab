@@ -1,0 +1,23 @@
+---
+# =============================================================================
+# Ghost Role - Default Variables
+# =============================================================================
+# Ghost CMS deployed via Docker Compose with MySQL backend.
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Ghost image — pinned for reproducibility
+# https://hub.docker.com/_/ghost/tags
+ghost_image: "ghost:6.19.2-alpine"
+
+# MySQL image
+ghost_mysql_image: "mysql:8.0"
+
+# Site configuration
+ghost_site_url: "http://localhost:2368"
+ghost_port: 2368
+ghost_db_name: ghost
+ghost_db_user: ghost
+
+# Install directory
+ghost_install_dir: /opt/ghost

@@ -1,0 +1,280 @@
+---
+# =============================================================================
+# Register Proxmox Backup Server on All PVE Nodes
+# =============================================================================
+# Registers the PBS instance as a backup storage target on each Proxmox node
+# and creates scheduled backup jobs that replace the old per-node vzdump crons.
+#
+# This playbook:
+#   1. Reads PBS credentials from Vault (fingerprint, API token)
+#   2. Adds PBS as a storage target on each PVE node (pvesm add pbs)
+#   3. Creates backup jobs for each node's VMs/LXCs
+#   4. Removes old vzdump cron scripts (cleanup from proxmox-backup-setup.yml)
+#
+# Prerequisites:
+#   - PBS deployed and running (pbs-deploy.yml completed)
+#   - PBS credentials stored in Vault at secret/infra/pbs
+#   - vault CLI available on controller
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-pbs-register.yml
+#
+# Verify after running:
+#   ssh admin@lab-01 'sudo pvesm status'   # Should show pbs-backup
+#   # Or via PBS UI: https://10.0.10.15:8007
+# =============================================================================
+
+- name: Register PBS on Proxmox nodes and configure backup jobs
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    # PBS connection details (overridden from Vault in pre_tasks)
+    pbs_server: "10.0.10.15"
+    pbs_datastore: "backups"
+    pbs_storage_name: "pbs-backup"
+
+    # VM IDs to backup per node — authoritative backup target list.
+    # Keep in sync with docs/CURRENT-STATE.md when adding/removing VMs.
+    proxmox_backup_vms:
+      lab-01:
+        - { vmid: 4000, name: "rke2-server-1" }
+        - { vmid: 4001, name: "rke2-server-2" }
+        - { vmid: 4002, name: "rke2-server-3" }
+        - { vmid: 4003, name: "rke2-agent-1" }
+        - { vmid: 4004, name: "rke2-agent-2" }
+        - { vmid: 4005, name: "rke2-agent-3" }
+        - { vmid: 5035, name: "ai-gpu" }
+      lab-02:
+        - { vmid: 2001, name: "vault-2" }
+        - { vmid: 3001, name: "gitlab" }
+        - { vmid: 3002, name: "gitlab-runner" }
+      lab-03:
+        - { vmid: 5010, name: "ghost" }
+        - { vmid: 5011, name: "foundryvtt" }
+        - { vmid: 5013, name: "roundcube" }
+        - { vmid: 5014, name: "mealie" }
+        - { vmid: 5015, name: "actual-budget" }
+        - { vmid: 5020, name: "wireguard" }
+        - { vmid: 5033, name: "traefik-proxy" }
+        - { vmid: 5036, name: "vaultwarden" }
+      lab-04:
+        - { vmid: 5021, name: "authentik" }
+        - { vmid: 5030, name: "netbox" }
+        - { vmid: 5031, name: "pbs" }
+        - { vmid: 5032, name: "patchmon" }
+
+    # Backup schedule
+    pbs_backup_schedule: "01:00"
+    pbs_backup_mode: "snapshot"
+    pbs_backup_compress: "zstd"
+
+  pre_tasks:
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Read PBS Credentials from Vault
+    # -----------------------------------------------------------------
+    - name: Read PBS credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/pbs
+      environment:
+        VAULT_ADDR: "https://10.0.10.10:8200"
+        VAULT_CACERT: "{{ lookup('env', 'VAULT_CACERT') | default('~/.lab/tls/ca/ca.pem', true) }}"
+        VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+      register: vault_pbs_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Set PBS credentials from Vault
+      ansible.builtin.set_fact:
+        pbs_fingerprint: "{{ (vault_pbs_read.stdout | from_json).data.data.fingerprint }}"
+        pbs_token_id: "{{ (vault_pbs_read.stdout | from_json).data.data.api_token_id }}"
+        pbs_token_secret: "{{ (vault_pbs_read.stdout | from_json).data.data.api_token_secret }}"
+      no_log: true
+      run_once: true
+      tags:
+        - always
+
+    - name: Validate PBS credentials are available
+      ansible.builtin.assert:
+        that:
+          - pbs_fingerprint is defined and pbs_fingerprint | length > 0
+          - pbs_token_id is defined and pbs_token_id | length > 0
+          - pbs_token_secret is defined and pbs_token_secret | length > 0
+        fail_msg: >
+          PBS credentials not available from Vault. Ensure pbs-deploy.yml
+          has been run and credentials are stored at secret/infra/pbs.
+      tags:
+        - always
+
+    - name: Get this node's backup list
+      ansible.builtin.set_fact:
+        node_backup_vms: "{{ proxmox_backup_vms[inventory_hostname] | default([]) }}"
+
+    - name: Display registration plan
+      ansible.builtin.debug:
+        msg: >
+          {{ inventory_hostname }}: registering PBS storage and configuring
+          backups for {{ node_backup_vms | length }} VMs:
+          {{ node_backup_vms | map(attribute='name') | join(', ') }}
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Register PBS Storage on PVE Node
+    # -----------------------------------------------------------------
+    - name: Check if PBS storage is already registered
+      ansible.builtin.command:
+        cmd: pvesm status --storage {{ pbs_storage_name }}
+      register: pbs_storage_check
+      changed_when: false
+      failed_when: false
+      tags: [pbs, storage]
+
+    - name: Add PBS storage target
+      ansible.builtin.command:
+        cmd: >-
+          pvesm add pbs {{ pbs_storage_name }}
+          --server {{ pbs_server }}
+          --datastore {{ pbs_datastore }}
+          --fingerprint {{ pbs_fingerprint }}
+          --username {{ pbs_token_id }}
+          --password {{ pbs_token_secret }}
+          --content backup
+      when: pbs_storage_check.rc != 0
+      no_log: true
+      tags: [pbs, storage]
+
+    - name: Verify PBS storage is accessible
+      ansible.builtin.command:
+        cmd: pvesm status --storage {{ pbs_storage_name }}
+      register: pbs_verify
+      changed_when: false
+      tags: [pbs, storage]
+
+    - name: Display PBS storage status
+      ansible.builtin.debug:
+        msg: "{{ pbs_verify.stdout }}"
+      tags: [pbs, storage]
+
+    # -----------------------------------------------------------------
+    # Create or Update Backup Jobs via PVE API
+    # -----------------------------------------------------------------
+    # PBS backup jobs are cluster-wide (stored in /etc/pve/jobs.cfg).
+    # Only manage them once (on the first node via run_once).
+    - name: Check existing backup jobs
+      ansible.builtin.command:
+        cmd: pvesh get /cluster/backup --output-format json
+      register: existing_jobs
+      changed_when: false
+      run_once: true
+      tags: [pbs, jobs]
+
+    - name: Parse existing job IDs by node
+      ansible.builtin.set_fact:
+        existing_job_map: >-
+          {{
+            (existing_jobs.stdout | from_json)
+            | selectattr('comment', 'defined')
+            | items2dict(key_name='comment', value_name='id')
+          }}
+      run_once: true
+      tags: [pbs, jobs]
+
+    - name: Create backup job for new nodes
+      ansible.builtin.command:
+        cmd: >-
+          pvesh create /cluster/backup
+          --enabled 1
+          --schedule "{{ pbs_backup_schedule }}"
+          --storage {{ pbs_storage_name }}
+          --mode {{ pbs_backup_mode }}
+          --compress {{ pbs_backup_compress }}
+          --node {{ item.key }}
+          --vmid {{ item.value | map(attribute='vmid') | join(',') }}
+          --mailnotification failure
+          --notes-template "{{'{{'}}guestname{{'}}'}} on {{'{{'}}node{{'}}'}}"
+          --comment "PBS daily backup - {{ item.key }}"
+      loop: "{{ proxmox_backup_vms | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}: {{ item.value | map(attribute='name') | join(', ') }} (CREATE)"
+      when: >-
+        ('PBS daily backup - ' + item.key) not in existing_job_map
+      run_once: true
+      tags: [pbs, jobs]
+
+    - name: Update backup job VM selection for existing nodes
+      ansible.builtin.command:
+        cmd: >-
+          pvesh set /cluster/backup/{{ existing_job_map['PBS daily backup - ' + item.key] }}
+          --vmid {{ item.value | map(attribute='vmid') | join(',') }}
+      loop: "{{ proxmox_backup_vms | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}: {{ item.value | map(attribute='name') | join(', ') }} (UPDATE)"
+      when: >-
+        ('PBS daily backup - ' + item.key) in existing_job_map
+      run_once: true
+      tags: [pbs, jobs]
+
+    # -----------------------------------------------------------------
+    # Remove Old vzdump Cron Scripts
+    # -----------------------------------------------------------------
+    - name: Remove old vzdump backup script
+      ansible.builtin.file:
+        path: /opt/firblab/scripts/proxmox-backup.sh
+        state: absent
+      tags: [pbs, cleanup]
+
+    - name: Remove old vzdump daily cron job
+      ansible.builtin.cron:
+        name: "proxmox-vzdump-daily"
+        state: absent
+        user: root
+      tags: [pbs, cleanup]
+
+    - name: Remove old vzdump log file
+      ansible.builtin.file:
+        path: /var/log/proxmox-backup.log
+        state: absent
+      tags: [pbs, cleanup]
+
+    # Also clean up legacy S3 upload artifacts (already removed but belt-and-suspenders)
+    - name: Remove legacy S3 upload script (if exists)
+      ansible.builtin.file:
+        path: /opt/firblab/scripts/proxmox-backup-s3.sh
+        state: absent
+      tags: [pbs, cleanup]
+
+    - name: Remove legacy S3 upload cron job (if exists)
+      ansible.builtin.cron:
+        name: "proxmox-vzdump-s3-weekly"
+        state: absent
+        user: root
+      tags: [pbs, cleanup]
+
+  post_tasks:
+    - name: Display registration summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "PBS Registered: {{ inventory_hostname }}"
+          - "=========================================="
+          - "PBS storage: {{ pbs_storage_name }}"
+          - "PBS server: {{ pbs_server }}"
+          - "VMs: {{ node_backup_vms | map(attribute='name') | join(', ') }}"
+          - "Schedule: daily at {{ pbs_backup_schedule }}"
+          - "Old vzdump cron: REMOVED"
+          - ""
+          - "Verify:"
+          - "  pvesm status --storage {{ pbs_storage_name }}"
+          - "  pvesh get /cluster/backup --output-format json"
+          - "  PBS UI: https://{{ pbs_server }}:8007"
+          - "=========================================="

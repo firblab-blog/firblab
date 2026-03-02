@@ -1,0 +1,123 @@
+---
+# =============================================================================
+# Firewalld Firewall — RedHat/Rocky
+# =============================================================================
+
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+  tags:
+    - firewall
+
+- name: Enable and start firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    enabled: true
+    state: started
+  tags:
+    - firewall
+
+- name: Set default zone to drop
+  ansible.builtin.command: firewall-cmd --set-default-zone=drop
+  register: firewalld_zone_result
+  changed_when: "'ZONE_ALREADY_SET' not in firewalld_zone_result.stderr"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Loopback Interface
+# ---------------------------------------------------------------------------
+# Allow all traffic on loopback (required for local services, health checks,
+# and inter-process communication). CIS Benchmark 3.5.1.4.
+- name: Allow all traffic on loopback interface
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="127.0.0.0/8" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# SSH Access
+# ---------------------------------------------------------------------------
+- name: Allow SSH from admin networks
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="{{ item }}" port port="{{ ssh_port }}" protocol="tcp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ [management_network, lan_network] + firewall_extra_ssh_sources }}"
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Application-Specific Port Rules
+# ---------------------------------------------------------------------------
+# Override firewall_additional_ports and firewall_additional_sources in
+# group_vars to open application ports (e.g., Vault 8200/8201).
+- name: Allow application-specific ports from allowed sources
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item.1 }}"
+      port port="{{ item.0.port }}" protocol="{{ item.0.proto }}" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ firewall_additional_ports | product(firewall_additional_sources) | list }}"
+  loop_control:
+    label: "{{ item.0.comment | default(item.0.port) }} from {{ item.1 }}"
+  when: firewall_additional_ports | length > 0
+  tags:
+    - firewall
+
+# ---------------------------------------------------------------------------
+# Egress Rules (when firewalld_restrict_egress=true)
+# ---------------------------------------------------------------------------
+- name: Allow outbound DNS (egress-restricted hosts)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" port port="53" protocol="udp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  when: firewalld_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound NTP (egress-restricted hosts)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" port port="123" protocol="udp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  when: firewalld_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound HTTP/HTTPS (egress-restricted hosts)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" port port="{{ item }}" protocol="tcp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "80"
+    - "443"
+  when: firewalld_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress
+
+- name: Allow outbound to management network (egress-restricted hosts)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" destination address="{{ management_network }}" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  when: firewalld_restrict_egress | default(false) | bool
+  tags:
+    - firewall
+    - egress

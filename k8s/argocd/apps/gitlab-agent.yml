@@ -1,0 +1,46 @@
+# GitLab Agent for Kubernetes — cluster agent connecting to GitLab KAS
+# Wave 0: Platform Helm chart (must be running before CI/CD can use it)
+# Requires: External Secrets config (wave 1) for token sync from Vault
+#
+# The agent maintains an outbound WebSocket tunnel to GitLab's KAS service.
+# Enables CI/CD pipeline access to the cluster, GitOps sync, and workload
+# vulnerability scanning — all without inbound firewall rules.
+#
+# Chart: https://charts.gitlab.io (gitlab/gitlab-agent)
+# Agent config: .gitlab/agents/firblab-rke2/config.yaml
+# Token source: Vault secret/k8s/gitlab-agent → ESO → K8s Secret
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitlab-agent
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.gitlab.io
+      chart: gitlab-agent
+      targetRevision: "2.*"
+      helm:
+        releaseName: gitlab-agent
+        valueFiles:
+          - $values/k8s/platform/gitlab-agent/helm/values.yaml
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitlab-agent
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

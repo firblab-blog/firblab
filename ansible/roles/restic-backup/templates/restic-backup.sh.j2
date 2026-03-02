@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Restic Backup Script — {{ item.name }} on {{ inventory_hostname }}
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+#
+# Backs up {{ item.name }} data to the Restic REST server (hdd-mirror-0).
+# Includes database dumps, service stop/start, and retention pruning.
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+export RESTIC_REPOSITORY="{{ restic_repo_url }}"
+export RESTIC_PASSWORD="{{ restic_repo_password }}"
+
+SERVICE_NAME="{{ item.name }}"
+HOSTNAME="{{ inventory_hostname }}"
+RESTIC="{{ restic_binary }}"
+
+# ---------------------------------------------------------
+# Functions
+# ---------------------------------------------------------
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${SERVICE_NAME}] $*"
+}
+
+cleanup() {
+{% if item.post_commands is defined and item.post_commands %}
+  log "Running post-backup cleanup..."
+{% for cmd in item.post_commands %}
+  {{ cmd }} || true
+{% endfor %}
+{% endif %}
+{% if item.stop_compose is defined %}
+  # Ensure containers are running even if backup failed
+  log "Ensuring {{ item.name }} containers are running..."
+  docker compose -f "{{ item.stop_compose }}/docker-compose.yml" start 2>&1 || \
+    docker compose -f "{{ item.stop_compose }}/docker-compose.yml" up -d 2>&1
+{% elif item.stop_systemd is defined %}
+  log "Ensuring {{ item.name }} service is running..."
+  systemctl start {{ item.stop_systemd }} 2>&1 || true
+{% endif %}
+}
+
+# Always run cleanup on exit (ensures service restarts even on failure)
+trap cleanup EXIT
+
+log "=== Starting Restic backup: ${SERVICE_NAME} ==="
+
+{% if item.pre_commands is defined and item.pre_commands %}
+# ---------------------------------------------------------
+# Step 1: Pre-backup commands (database dumps, etc.)
+# Run BEFORE stopping the service — database daemons must be
+# running for consistent dumps (mysqldump, pg_dump, etc.).
+# ---------------------------------------------------------
+{% for cmd in item.pre_commands %}
+log "Running pre-backup: {{ cmd | truncate(80) }}..."
+{{ cmd }}
+{% endfor %}
+{% endif %}
+
+{% if item.stop_compose is defined %}
+# ---------------------------------------------------------
+# Step 2: Stop Docker Compose service
+# ---------------------------------------------------------
+log "Stopping {{ item.name }} containers..."
+docker compose -f "{{ item.stop_compose }}/docker-compose.yml" stop 2>&1 || true
+{% elif item.stop_systemd is defined %}
+# ---------------------------------------------------------
+# Step 2: Stop systemd service
+# ---------------------------------------------------------
+log "Stopping {{ item.name }} service..."
+systemctl stop {{ item.stop_systemd }} 2>&1 || true
+{% endif %}
+
+# ---------------------------------------------------------
+# Step 3: Restic backup
+# ---------------------------------------------------------
+log "Running Restic backup..."
+BACKUP_PATHS=(
+{% for path in item.paths | default([]) %}
+  "{{ path }}"
+{% endfor %}
+{% for path in item.extra_paths | default([]) %}
+  "{{ path }}"
+{% endfor %}
+)
+
+${RESTIC} backup \
+  --host "${HOSTNAME}" \
+{% if item.tags is defined and item.tags %}
+{% for tag in item.tags %}
+  --tag "{{ tag }}" \
+{% endfor %}
+{% endif %}
+  --tag "${SERVICE_NAME}" \
+  "${BACKUP_PATHS[@]}"
+
+log "Backup snapshot created successfully."
+
+{% if item.stop_compose is defined %}
+# ---------------------------------------------------------
+# Step 4: Restart service immediately (minimize downtime)
+# ---------------------------------------------------------
+log "Restarting {{ item.name }} containers..."
+docker compose -f "{{ item.stop_compose }}/docker-compose.yml" start 2>&1 || \
+  docker compose -f "{{ item.stop_compose }}/docker-compose.yml" up -d 2>&1
+{% elif item.stop_systemd is defined %}
+log "Restarting {{ item.name }} service..."
+systemctl start {{ item.stop_systemd }} 2>&1 || true
+{% endif %}
+
+{% if item.post_commands is defined and item.post_commands %}
+# ---------------------------------------------------------
+# Step 5: Post-backup cleanup
+# ---------------------------------------------------------
+{% for cmd in item.post_commands %}
+log "Post-backup: {{ cmd | truncate(80) }}..."
+{{ cmd }} || true
+{% endfor %}
+{% endif %}
+
+# ---------------------------------------------------------
+# Step 6: Prune old snapshots (retention policy)
+# ---------------------------------------------------------
+log "Pruning old snapshots..."
+${RESTIC} forget \
+  --host "${HOSTNAME}" \
+  --tag "${SERVICE_NAME}" \
+  --keep-daily {{ restic_retention_keep_daily }} \
+  --keep-weekly {{ restic_retention_keep_weekly }} \
+  --keep-monthly {{ restic_retention_keep_monthly }} \
+  --keep-yearly {{ restic_retention_keep_yearly }} \
+  --prune
+
+# ---------------------------------------------------------
+# Step 7: Integrity check (weekly — expensive operation)
+# ---------------------------------------------------------
+if [ "$(date +%w)" = "{{ restic_check_day }}" ]; then
+  log "Running weekly integrity check..."
+  ${RESTIC} check || log "WARNING: Integrity check failed!"
+else
+  log "Skipping integrity check (runs on day {{ restic_check_day }} only)."
+fi
+
+# Remove the trap since we completed successfully (cleanup already done)
+trap - EXIT
+
+log "=== Restic backup complete: ${SERVICE_NAME} ==="

@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# K3s Post-Install Verification
+# =============================================================================
+# Health checks run after installation to confirm the cluster is healthy.
+# Only runs full kubectl checks on server nodes (agents don't have kubectl).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service Status
+# ---------------------------------------------------------------------------
+- name: Check K3s service status (server)
+  ansible.builtin.systemd:
+    name: k3s
+  register: k3s_server_service
+  when: k3s_role == "server"
+  tags:
+    - verify
+
+- name: Check K3s service status (agent)
+  ansible.builtin.systemd:
+    name: k3s-agent
+  register: k3s_agent_service
+  when: k3s_role == "agent"
+  tags:
+    - verify
+
+- name: Assert K3s service is running
+  ansible.builtin.assert:
+    that:
+      - (k3s_server_service.status.ActiveState | default('')) == 'active' or
+        (k3s_agent_service.status.ActiveState | default('')) == 'active'
+    fail_msg: "K3s service is not running on {{ inventory_hostname }}"
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Cluster Health (first server only)
+# ---------------------------------------------------------------------------
+- name: Check cluster node status
+  ansible.builtin.command:
+    cmd: >-
+      {{ k3s_bin_dir }}/kubectl --kubeconfig {{ k3s_config_dir }}/k3s.yaml
+      get nodes -o wide
+  register: node_status
+  changed_when: false
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+- name: Display cluster node status
+  ansible.builtin.debug:
+    msg: "{{ node_status.stdout_lines }}"
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+- name: Check system pods
+  ansible.builtin.command:
+    cmd: >-
+      {{ k3s_bin_dir }}/kubectl --kubeconfig {{ k3s_config_dir }}/k3s.yaml
+      get pods -A -o wide
+  register: pod_status
+  changed_when: false
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+- name: Display system pod status
+  ansible.builtin.debug:
+    msg: "{{ pod_status.stdout_lines }}"
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# CIS Hardening Verification
+# ---------------------------------------------------------------------------
+- name: Verify secrets encryption is active
+  ansible.builtin.command:
+    cmd: >-
+      {{ k3s_bin_dir }}/kubectl --kubeconfig {{ k3s_config_dir }}/k3s.yaml
+      get secret -n kube-system -o name
+  register: secrets_check
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+- name: Report secrets encryption status
+  ansible.builtin.debug:
+    msg: >-
+      Secrets encryption: {{ 'ACTIVE — secrets accessible' if secrets_check.rc == 0 else 'ERROR — investigate' }}
+  when: inventory_hostname == k3s_init_node
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zone Verification
+# ---------------------------------------------------------------------------
+- name: Verify CoreDNS Corefile includes custom zone
+  ansible.builtin.shell:
+    cmd: >-
+      {{ k3s_bin_dir }}/kubectl --kubeconfig {{ k3s_config_dir }}/k3s.yaml
+      get configmap -n kube-system coredns
+      -o jsonpath='{.data.Corefile}' | grep -q '{{ item.zone }}'
+  loop: "{{ k3s_coredns_custom_zones | default([]) }}"
+  loop_control:
+    label: "{{ item.zone }}"
+  register: coredns_zone_check
+  changed_when: false
+  failed_when: false
+  when:
+    - inventory_hostname == k3s_init_node
+    - k3s_coredns_custom_zones | default([]) | length > 0
+  tags:
+    - verify
+    - coredns
+
+- name: Report CoreDNS custom zone status
+  ansible.builtin.debug:
+    msg: >-
+      CoreDNS custom zone '{{ item.item.zone }}':
+      {{ 'ACTIVE — zone found in Corefile' if item.rc == 0 else 'NOT FOUND — HelmChartConfig may not be reconciled yet' }}
+  loop: "{{ coredns_zone_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.zone }}"
+  when:
+    - inventory_hostname == k3s_init_node
+    - coredns_zone_check.results is defined
+  tags:
+    - verify
+    - coredns

@@ -1,0 +1,39 @@
+# =============================================================================
+# Terraform S3 Backend Configuration (Hetzner Object Storage)
+# =============================================================================
+# After Vault and Hetzner are bootstrapped (Phases 3+), migrate layers 03-06
+# to remote state on Hetzner Object Storage.
+#
+# Layers 00-02 remain local+Git (foundational layers should not depend on
+# remote state that they themselves create).
+#
+# Usage:
+#   1. Copy this file to the target layer directory as backend.tf
+#   2. Update the key to match the layer name
+#   3. Run: terraform init -migrate-state
+#
+# Fallback: Delete backend.tf and run terraform init -migrate-state to revert
+# to local state.
+# =============================================================================
+
+terraform {
+  backend "s3" {
+    bucket = "firblab-tfstate"
+    key    = "layers/LAYER_NAME/terraform.tfstate"
+
+    endpoints = {
+      s3 = "https://fsn1.your-objectstorage.com"
+    }
+
+    region = "fsn1"
+
+    skip_credentials_validation = true
+    skip_metadata_api_check     = true
+    skip_requesting_account_id  = true
+    use_path_style              = true
+
+    # Credentials via environment variables:
+    #   export AWS_ACCESS_KEY_ID="your-hetzner-s3-access-key"
+    #   export AWS_SECRET_ACCESS_KEY="your-hetzner-s3-secret-key"
+  }
+}

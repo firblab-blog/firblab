@@ -1,0 +1,62 @@
+# =============================================================================
+# UniFi Config Role — Default Variables
+# =============================================================================
+# Manages UniFi controller settings that the Terraform provider (filipowm/unifi)
+# cannot handle due to missing resources or provider bugs. Uses the UniFi
+# local REST API directly via the uri module.
+#
+# This role is triggered from Terraform Layer 00 via terraform_data + local-exec,
+# keeping `terraform apply` as the single entry point for network changes.
+#
+# Provider Gap Inventory (filipowm/unifi v1.0.0):
+#   - STP priority per device      → No attribute on unifi_device
+#   - DNS content filters           → Provider bug: Read returns [], causes drift
+#   - Ad blocking per network       → Provider bug: Read returns [], causes drift
+#   - Region/country blocking       → No provider resource
+#   - Encrypted DNS (DoH/DoT)       → No provider resource
+#   - Per-app blocking rules        → No provider resource
+#
+# TODO: Migrate back to Terraform if/when the provider adds support for these.
+# =============================================================================
+
+# ---------------------------------------------------------
+# UniFi Controller Connection
+# ---------------------------------------------------------
+
+# Controller address (no trailing slash)
+unifi_controller_url: "https://10.0.4.1"
+
+# API base path for the default site
+unifi_api_base: "{{ unifi_controller_url }}/proxy/network/api/s/default"
+
+# API key — must be provided via extra-vars or Vault lookup (never hardcoded)
+unifi_api_key: ""
+
+# Skip TLS verification (self-signed cert on gw-01)
+unifi_validate_certs: false
+
+# ---------------------------------------------------------
+# STP Priority
+# ---------------------------------------------------------
+# Map of device MAC address (lowercase, colon-separated) to STP bridge priority.
+# Valid priorities: multiples of 4096, range 0-61440. Default is 32768.
+# Lower value = higher priority = more likely to become root bridge.
+#
+# The gateway (gw-01) manages its own STP priority — don't set it here.
+#
+# Example:
+#   unifi_stp_priorities:
+#     "52:54:00:11:22:01": 8192   # switch-01 (closet)
+#     "52:54:00:11:22:02": 12288  # switch-02 (minilab)
+
+unifi_stp_priorities: {}
+
+# ---------------------------------------------------------
+# Feature Toggles
+# ---------------------------------------------------------
+# Enable/disable individual gap-filling features.
+# Terraform passes these based on which resources are configured.
+
+unifi_manage_stp: true
+unifi_manage_dns_filters: false    # Future: Phase 2
+unifi_manage_ad_blocking: false    # Future: Phase 2

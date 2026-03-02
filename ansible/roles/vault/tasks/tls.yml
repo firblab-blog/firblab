@@ -1,0 +1,111 @@
+---
+# =============================================================================
+# Vault TLS Certificate Deployment
+# =============================================================================
+# Copies pre-generated TLS certificates from the Ansible controller
+# (~/.lab/tls/<node_id>/) to the remote node at /etc/vault.d/tls/.
+#
+# Prerequisites:
+#   Run vault-tls-generate.yml first to create the certificates locally.
+#
+# Files deployed:
+#   ca.pem          → 0644 (public CA certificate)
+#   vault-cert.pem  → 0644 (node certificate)
+#   vault-key.pem   → 0600 (private key — restricted)
+# =============================================================================
+
+- name: Set TLS source directory
+  ansible.builtin.set_fact:
+    vault_tls_source_dir: "{{ lookup('env', 'HOME') }}/.lab/tls/{{ vault_node_id }}"
+
+# ---------------------------------------------------------------------------
+# Validate source certificates exist on controller
+# ---------------------------------------------------------------------------
+- name: Check TLS source files exist on controller
+  ansible.builtin.stat:
+    path: "{{ vault_tls_source_dir }}/{{ item }}"
+  delegate_to: localhost
+  become: false
+  register: tls_source_check
+  loop:
+    - ca.pem
+    - vault-cert.pem
+    - vault-key.pem
+  loop_control:
+    label: "{{ item }}"
+
+- name: Fail if TLS source files are missing
+  ansible.builtin.fail:
+    msg: >
+      TLS certificate file not found: {{ vault_tls_source_dir }}/{{ item.item }}
+
+      Run the TLS generation playbook first:
+        ansible-playbook playbooks/vault-tls-generate.yml
+
+      Then re-run the vault deployment.
+  when: not item.stat.exists
+  loop: "{{ tls_source_check.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# ---------------------------------------------------------------------------
+# Ensure TLS directory exists on remote node
+# ---------------------------------------------------------------------------
+- name: Ensure Vault TLS directory exists
+  ansible.builtin.file:
+    path: "{{ vault_tls_dir }}"
+    state: directory
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0750"
+  become: true
+
+# ---------------------------------------------------------------------------
+# Deploy certificates
+# ---------------------------------------------------------------------------
+- name: Deploy CA certificate
+  ansible.builtin.copy:
+    src: "{{ vault_tls_source_dir }}/ca.pem"
+    dest: "{{ vault_tls_ca_file }}"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0644"
+  become: true
+  notify:
+    - Restart vault
+
+- name: Deploy node certificate
+  ansible.builtin.copy:
+    src: "{{ vault_tls_source_dir }}/vault-cert.pem"
+    dest: "{{ vault_tls_cert_file }}"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0644"
+  become: true
+  notify:
+    - Restart vault
+
+- name: Deploy node private key
+  ansible.builtin.copy:
+    src: "{{ vault_tls_source_dir }}/vault-key.pem"
+    dest: "{{ vault_tls_key_file }}"
+    owner: "{{ vault_user }}"
+    group: "{{ vault_group }}"
+    mode: "0600"
+  become: true
+  notify:
+    - Restart vault
+
+# ---------------------------------------------------------------------------
+# Verify deployed certificates
+# ---------------------------------------------------------------------------
+- name: Verify deployed certificate matches CA
+  ansible.builtin.command: >
+    openssl verify -CAfile {{ vault_tls_ca_file }} {{ vault_tls_cert_file }}
+  register: tls_verify
+  changed_when: false
+  become: true
+
+- name: Display TLS verification result
+  ansible.builtin.debug:
+    msg: "TLS verification: {{ tls_verify.stdout }}"

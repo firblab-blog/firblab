@@ -1,0 +1,80 @@
+---
+# =============================================================================
+# Proxmox Disk Bootstrap — Initialize Additional Storage
+# =============================================================================
+# Discovers and configures uninitialized disks on Proxmox nodes as storage
+# pools. Proxmox only initializes the OS disk during installation; any
+# additional drives must be configured manually or via this playbook.
+#
+# The proxmox-disks role auto-detects disk type (NVMe/SSD/HDD) and applies
+# the appropriate storage strategy:
+#   NVMe / SSD  → LVM-Thin (VM disk images, thin provisioning, snapshots)
+#   HDD         → Directory (backups, ISOs, templates, bulk storage)
+#
+# SAFETY: By default this playbook runs in discovery-only mode. It reports
+# what disks were found and what it would do, but makes NO changes.
+# Pass -e proxmox_disks_initialize=true to actually format and register disks.
+#
+# Usage:
+#   # Discovery only (safe — just reports what it finds):
+#   ansible-playbook ansible/playbooks/proxmox-disk-bootstrap.yml --limit lab-02
+#
+#   # Initialize disks (formats disks and creates Proxmox storage pools):
+#   ansible-playbook ansible/playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true
+#
+#   # Override auto-detection for a specific disk:
+#   ansible-playbook ansible/playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true \
+#     -e '{"proxmox_disk_overrides": {"/dev/sdb": {"strategy": "lvmthin", "pool_name": "fast-data"}}}'
+#
+#   # Wipe a disk and reinitialize from scratch (DESTROYS ALL DATA):
+#   ansible-playbook ansible/playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true \
+#     -e '{"proxmox_disks_wipe": ["/dev/sda"]}'
+#
+#   # Wipe multiple disks:
+#   ansible-playbook ansible/playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true \
+#     -e '{"proxmox_disks_wipe": ["/dev/sda", "/dev/sdb"]}'
+#
+# Prerequisites:
+#   - Target node is a bootstrapped Proxmox host (in proxmox_nodes group)
+#   - SSH access as admin user with sudo
+#   - lvm2, parted packages (auto-installed by pre_tasks if missing)
+# =============================================================================
+
+- name: "Bootstrap additional disks on Proxmox nodes"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  environment:
+    # Ensure /usr/sbin is in PATH — Proxmox admin tools (parted, partprobe,
+    # pvcreate, vgcreate, etc.) live in /usr/sbin which may not be in PATH
+    # when Ansible connects via SSH with become.
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  pre_tasks:
+    - name: "Verify this is a Proxmox node"
+      ansible.builtin.command: pveversion
+      register: pve_version
+      changed_when: false
+      failed_when: pve_version.rc != 0
+      tags: [proxmox-disks]
+
+    - name: "Display Proxmox version"
+      ansible.builtin.debug:
+        msg: "{{ pve_version.stdout }}"
+      tags: [proxmox-disks]
+
+    - name: "Ensure required packages are installed"
+      ansible.builtin.apt:
+        name:
+          - parted
+          - lvm2
+        state: present
+      tags: [proxmox-disks]
+
+  roles:
+    - role: proxmox-disks
+      tags: [proxmox-disks]

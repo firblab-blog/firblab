@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# PatchMon Agent Dependencies — Debian/Ubuntu
+# =============================================================================
+
+- name: Install PatchMon agent dependencies (Debian)
+  ansible.builtin.apt:
+    name: "{{ patchmon_agent_deps_debian }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - install

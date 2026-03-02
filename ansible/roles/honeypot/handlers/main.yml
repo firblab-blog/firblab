@@ -1,0 +1,15 @@
+---
+# =============================================================================
+# Honeypot Role - Handlers
+# =============================================================================
+
+- name: Restart honeypot
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ honeypot_install_dir }}"
+
+- name: Restart ssh socket
+  ansible.builtin.systemd:
+    name: ssh.socket
+    state: restarted
+    daemon_reload: true

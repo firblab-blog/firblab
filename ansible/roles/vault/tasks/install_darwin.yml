@@ -1,0 +1,102 @@
+---
+# =============================================================================
+# Vault — macOS User and Group Creation
+# =============================================================================
+# Creates a dedicated service account for Vault on macOS using dscl.
+# macOS convention: service accounts are prefixed with _, UID/GID < 500,
+# shell set to /usr/bin/false.
+# =============================================================================
+
+- name: Check if vault group exists (macOS)
+  ansible.builtin.command: dscl . -read /Groups/_{{ vault_group }}
+  register: vault_group_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Find next available GID for vault group (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # Find highest GID in 400-499 range and add 1, default to 450
+    max_gid=$(dscl . -list /Groups PrimaryGroupID | awk '$2 >= 400 && $2 < 500 {print $2}' | sort -n | tail -1)
+    if [ -z "$max_gid" ]; then
+      echo 450
+    else
+      echo $((max_gid + 1))
+    fi
+  register: next_gid
+  changed_when: false
+  when: vault_group_check.rc != 0
+  tags:
+    - install
+
+- name: Create vault group (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    GID={{ next_gid.stdout | default('450') }}
+    dscl . -create /Groups/_{{ vault_group }}
+    dscl . -create /Groups/_{{ vault_group }} PrimaryGroupID $GID
+    dscl . -create /Groups/_{{ vault_group }} RealName "HashiCorp Vault"
+    dscl . -create /Groups/_{{ vault_group }} Password "*"
+  when: vault_group_check.rc != 0
+  tags:
+    - install
+
+- name: Check if vault user exists (macOS)
+  ansible.builtin.command: dscl . -read /Users/_{{ vault_user }}
+  register: vault_user_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Find next available UID for vault user (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    # Find highest UID in 400-499 range and add 1, default to 450
+    max_uid=$(dscl . -list /Users UniqueID | awk '$2 >= 400 && $2 < 500 {print $2}' | sort -n | tail -1)
+    if [ -z "$max_uid" ]; then
+      echo 450
+    else
+      echo $((max_uid + 1))
+    fi
+  register: next_uid
+  changed_when: false
+  when: vault_user_check.rc != 0
+  tags:
+    - install
+
+- name: Get vault group GID (macOS)
+  ansible.builtin.shell: |
+    dscl . -read /Groups/_{{ vault_group }} PrimaryGroupID | awk '{print $2}'
+  register: vault_gid
+  changed_when: false
+  tags:
+    - install
+
+- name: Create vault user (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    UID_VAL={{ next_uid.stdout | default('450') }}
+    GID_VAL={{ vault_gid.stdout }}
+    dscl . -create /Users/_{{ vault_user }}
+    dscl . -create /Users/_{{ vault_user }} UniqueID $UID_VAL
+    dscl . -create /Users/_{{ vault_user }} PrimaryGroupID $GID_VAL
+    dscl . -create /Users/_{{ vault_user }} UserShell /usr/bin/false
+    dscl . -create /Users/_{{ vault_user }} NFSHomeDirectory {{ vault_data_dir }}
+    dscl . -create /Users/_{{ vault_user }} RealName "HashiCorp Vault"
+    dscl . -create /Users/_{{ vault_user }} Password "*"
+  when: vault_user_check.rc != 0
+  tags:
+    - install
+
+# Override vault_user/vault_group for directory/file ownership on macOS.
+# macOS convention: service accounts use _ prefix.
+- name: Set macOS vault user/group names with _ prefix
+  ansible.builtin.set_fact:
+    vault_user: "_{{ vault_user }}"
+    vault_group: "_{{ vault_group }}"
+  when: vault_user is not match('^_')
+  tags:
+    - install

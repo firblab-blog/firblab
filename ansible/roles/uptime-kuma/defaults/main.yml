@@ -1,0 +1,21 @@
+---
+# =============================================================================
+# Uptime Kuma Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Uptime Kuma image — pinned for reproducibility
+# https://github.com/louislam/uptime-kuma/releases
+# configure-uptime-kuma.py uses raw Socket.IO (login, monitorList, add, etc.)
+# The 2.x Socket.IO API is compatible with 1.23.x for these events.
+uptime_kuma_image: "louislam/uptime-kuma:2.1.3"
+
+# Port exposed on the host (maps to container port 3001)
+uptime_kuma_port: 3001
+
+# Data directory (bind-mounted into container for persistent storage)
+uptime_kuma_data_dir: /opt/uptime-kuma/data
+
+# Install directory (Docker Compose file location)
+uptime_kuma_install_dir: /opt/uptime-kuma

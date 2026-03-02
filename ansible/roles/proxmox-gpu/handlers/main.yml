@@ -1,0 +1,14 @@
+---
+# =============================================================================
+# Proxmox GPU Passthrough — Handlers
+# =============================================================================
+
+- name: Update GRUB
+  ansible.builtin.command:
+    cmd: update-grub
+  listen: "update grub"
+
+- name: Update initramfs
+  ansible.builtin.command:
+    cmd: update-initramfs -u -k all
+  listen: "update initramfs"

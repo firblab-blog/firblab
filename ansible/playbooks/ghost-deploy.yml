@@ -1,0 +1,323 @@
+---
+# =============================================================================
+# Ghost Blog Deployment Playbook
+# =============================================================================
+# Deploys Ghost CMS with MySQL backend via Docker Compose on an LXC container.
+#
+# Prerequisites:
+#   - Ghost LXC provisioned by Terraform Layer 05
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Secrets are managed automatically:
+#   - First run: generates random DB passwords and stores them in Vault
+#     at secret/services/ghost (db_password, mysql_root_password)
+#   - Subsequent runs: reads existing passwords from Vault
+#   - Override: pass -e ghost_db_password=xxx -e ghost_mysql_root_password=xxx
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/ghost-deploy.yml
+#
+# With recovery content (restores images + JSON export from previous instance):
+#   ansible-playbook -i inventory/hosts.yml playbooks/ghost-deploy.yml \
+#     -e ghost_recovery_path=../../ghost-recovery \
+#     -e ghost_recovery_json=../../ghost-recovery/json-exports/firblab.ghost.2025-12-11-02-18-00.json
+#
+# After playbook completes with recovery content:
+#   1. Go to Ghost Admin: http://<ghost_ip>:2368/ghost/
+#   2. Create admin account
+#   3. Settings -> Labs -> Import content -> upload /opt/ghost/data/ghost-import.json
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags ghost       # Only Ghost app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+#   ansible-playbook ... --tags backup      # Only backup automation
+# =============================================================================
+
+- name: Deploy Ghost blog platform
+  hosts: ghost
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Vault read → generate if missing → Vault write
+    # -----------------------------------------------------------------
+    - name: Try reading Ghost secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/ghost
+      register: vault_ghost_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: ghost_db_password is not defined
+      tags:
+        - always
+
+    - name: Set passwords from Vault (if secrets exist)
+      ansible.builtin.set_fact:
+        ghost_db_password: "{{ (vault_ghost_read.stdout | from_json).data.data.db_password }}"
+        ghost_mysql_root_password: "{{ (vault_ghost_read.stdout | from_json).data.data.mysql_root_password }}"
+      when:
+        - ghost_db_password is not defined
+        - vault_ghost_read.rc is defined
+        - vault_ghost_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Generate Ghost DB passwords (first deploy)
+      ansible.builtin.set_fact:
+        ghost_db_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+        ghost_mysql_root_password: "{{ lookup('ansible.builtin.password', '/dev/null chars=ascii_letters,digits length=32') }}"
+      when: ghost_db_password is not defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Store Ghost secrets in Vault (first deploy)
+      ansible.builtin.command:
+        cmd: >-
+          vault kv put -mount=secret services/ghost
+          db_password={{ ghost_db_password }}
+          mysql_root_password={{ ghost_mysql_root_password }}
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when:
+        - vault_ghost_read is defined
+        - vault_ghost_read.rc is defined
+        - vault_ghost_read.rc != 0
+      tags:
+        - always
+
+    - name: Validate Ghost secrets are available
+      ansible.builtin.assert:
+        that:
+          - ghost_db_password is defined
+          - ghost_db_password | length > 0
+          - ghost_mysql_root_password is defined
+          - ghost_mysql_root_password | length > 0
+        fail_msg: >
+          Ghost database passwords not available. Check Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/ghost
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Ghost on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    # Ghost configuration
+    # Canonical URL must match how users access the site — used for session
+    # cookies, CSRF tokens, and all generated links. Public access is via
+    # Hetzner Traefik (blog.example-lab.org); internal via standalone Traefik
+    # (ghost.home.example-lab.org). Ghost only supports ONE url, so we use the
+    # public production domain. Internal access still works for reading;
+    # admin login will redirect through the canonical domain.
+    ghost_site_url: "https://blog.example-lab.org"
+    ghost_port: 2368
+    ghost_db_name: ghost
+    ghost_db_user: ghost
+
+    # Backup configuration (S3 off-site for blog content)
+    backup_enabled: true
+    backup_cron_hour: "3"
+    backup_cron_minute: "30"
+    backup_services:
+      - name: ghost
+        compose_path: /opt/ghost
+        pre_commands:
+          - "docker exec ghost-mysql mysqldump -u root -p'{{ ghost_mysql_root_password }}' --all-databases > /opt/ghost/mysql-dump.sql"
+        paths:
+          - /opt/ghost/data
+          - /opt/ghost/mysql
+        extra_paths:
+          - /opt/ghost/mysql-dump.sql
+        post_commands:
+          - "rm -f /opt/ghost/mysql-dump.sql"
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: ghost
+        stop_compose: /opt/ghost
+        pre_commands:
+          - "docker exec ghost-mysql mysqldump -u root -p'{{ ghost_mysql_root_password }}' --all-databases > /opt/ghost/mysql-dump.sql"
+        paths:
+          - /opt/ghost/data
+          - /opt/ghost/mysql
+        extra_paths:
+          - /opt/ghost/mysql-dump.sql
+        post_commands:
+          - "rm -f /opt/ghost/mysql-dump.sql"
+        tags: ["ghost", "blog"]
+        cron_hour: "1"
+        cron_minute: "0"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Ghost (Docker Compose: Ghost + MySQL)
+    - role: ghost
+      tags:
+        - ghost
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for Ghost to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ghost_port }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: ghost_health
+      retries: 15
+      delay: 10
+      until: ghost_health.status is defined and ghost_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if Ghost never became accessible
+      ansible.builtin.fail:
+        msg: "Ghost failed to respond after 150 seconds. Last status: {{ ghost_health.status | default('connection refused') }}"
+      when: ghost_health.status is not defined or ghost_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Ghost Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: {{ ghost_site_url }}"
+          - "Admin: http://{{ ansible_host }}:{{ ghost_port }}/ghost/"
+          - "Port: {{ ghost_port }}"
+          - "Secrets: vault kv get -mount=secret services/ghost"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/ghost/docker-compose.yml ps"
+          - "  docker compose -f /opt/ghost/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

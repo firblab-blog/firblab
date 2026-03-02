@@ -1,0 +1,11 @@
+---
+# =============================================================================
+# PatchMon Agent Dependencies — RedHat/Rocky
+# =============================================================================
+
+- name: Install PatchMon agent dependencies (RedHat)
+  ansible.builtin.dnf:
+    name: "{{ patchmon_agent_deps_redhat }}"
+    state: present
+  tags:
+    - install

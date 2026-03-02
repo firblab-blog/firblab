@@ -1,0 +1,30 @@
+# =============================================================================
+# Wazuh Dashboard — Configuration
+# =============================================================================
+# OpenSearch Dashboards fork configured to connect to the local indexer.
+# Security is disabled (matches indexer config). External TLS via Traefik.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wazuh-dashboard-config
+  namespace: wazuh
+data:
+  opensearch_dashboards.yml: |
+    # Server
+    server.host: "0.0.0.0"
+    server.port: 5601
+    server.name: "wazuh-dashboard"
+
+    # OpenSearch connection (no TLS — security plugin disabled)
+    opensearch.hosts: ["http://wazuh-indexer:9200"]
+
+    # Disable security (matches indexer config)
+    opensearch_security.enabled: false
+
+    # Wazuh API connection configured via Dashboard UI on first login.
+    # Legacy wazuh.api.* keys removed in 4.14.x.
+
+    # Logging
+    logging.dest: stdout
+    logging.verbose: false

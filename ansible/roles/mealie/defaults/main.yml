@@ -1,0 +1,27 @@
+---
+# =============================================================================
+# Mealie Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# Mealie image — pinned for reproducibility
+# https://github.com/mealie-recipes/mealie/releases
+mealie_image: "ghcr.io/mealie-recipes/mealie:v3.10.1"
+
+# Port exposed on the host (maps to container port 9000)
+mealie_port: 9000
+
+# Install directory
+mealie_install_dir: /opt/mealie
+
+# Database engine: sqlite (default) or postgres
+mealie_db_engine: sqlite
+
+# Application settings
+mealie_allow_signup: "false"
+mealie_log_level: info
+mealie_auto_backup: "true"
+
+# Timezone (passed to container TZ env var)
+mealie_timezone: "America/Chicago"

@@ -1,0 +1,26 @@
+# =============================================================================
+# Add these blocks to your existing /config/configuration.yaml on HAOS
+# =============================================================================
+
+# --- Ensure packages directory is included (may already be present) ---
+homeassistant:
+  packages: !include_dir_named packages
+
+# --- Register the YAML dashboard alongside the default UI dashboard ---
+lovelace:
+  mode: storage
+  dashboards:
+    homelab-monitoring:
+      mode: yaml
+      filename: dashboards/homelab_monitoring.yaml
+      title: Homelab
+      icon: mdi:server-network
+      show_in_sidebar: true
+
+# --- Reverse proxy support (Traefik) ---
+# Required for homeassistant.home.example-lab.org to work through Traefik.
+# Without trusted_proxies, HA rejects or mishandles proxied auth requests.
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 10.0.10.17  # traefik-proxy LXC (lab-04)

@@ -1,0 +1,23 @@
+---
+# =============================================================================
+# RKE2 Role Handlers
+# =============================================================================
+
+- name: Restart rke2-server
+  ansible.builtin.systemd:
+    name: rke2-server
+    state: restarted
+    daemon_reload: true
+  when: rke2_role == "server"
+
+- name: Restart rke2-agent
+  ansible.builtin.systemd:
+    name: rke2-agent
+    state: restarted
+    daemon_reload: true
+  when: rke2_role == "agent"
+
+- name: Reload sysctl
+  ansible.builtin.command:
+    cmd: sysctl --system
+  changed_when: true

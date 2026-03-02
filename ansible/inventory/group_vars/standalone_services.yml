@@ -1,0 +1,59 @@
+---
+# =============================================================================
+# Standalone Services Configuration
+# =============================================================================
+# Group variables for standalone services on lab-03 and lab-04:
+#   - Ghost (LXC)      : Blog platform — port 2368       — lab-03
+#   - Roundcube (LXC)  : Webmail client — port 8080      — lab-03
+#   - FoundryVTT (VM)  : Virtual tabletop — port 30000   — lab-03
+#   - Mealie (LXC)     : Recipe manager — port 9000      — lab-03
+#   - Actual Budget (LXC): Personal finance — port 5006  — lab-03
+#   - Vaultwarden (LXC): Password vault — port 8000      — lab-03
+#   - NetBox (VM)       : DCIM/IPAM — port 8080          — lab-04
+#   - Archive (VM)      : Archive hub — port 8080         — lab-04
+#   - PatchMon (VM)     : Patch monitoring — port 3000   — lab-04
+#   - AI GPU (VM)       : Ollama/OpenWebUI/n8n — 11434/3000/5678 — lab-01
+#
+# All on Services VLAN 20 (10.0.20.0/24).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# Ports needed by standalone services. SSH (22) is already handled by the
+# common role's base firewall rules. Extra ports on hosts that don't run
+# a given service are harmless UFW no-ops.
+standalone_services_firewall_ports:
+  - { port: "2368", proto: tcp, comment: "Ghost blog" }
+  - { port: "8080", proto: tcp, comment: "Roundcube webmail" }
+  - { port: "30000", proto: tcp, comment: "FoundryVTT" }
+  - { port: "9000", proto: tcp, comment: "Mealie recipe manager" }
+  - { port: "8080", proto: tcp, comment: "NetBox DCIM/IPAM" }
+  - { port: "3000", proto: tcp, comment: "PatchMon / Open WebUI" }
+  - { port: "5006", proto: tcp, comment: "Actual Budget finance" }
+  - { port: "8000", proto: tcp, comment: "Vaultwarden password vault" }
+  - { port: "11434", proto: tcp, comment: "Ollama LLM API" }
+  - { port: "5678", proto: tcp, comment: "n8n workflow automation" }
+
+standalone_services_firewall_sources:
+  - "{{ management_network }}"
+  - "{{ lan_network }}"
+  - "{{ services_network }}"      # VLAN 20 — intra-VLAN service access
+  - "{{ dmz_network }}"           # VLAN 30 — WireGuard tunnel traffic (NATted from 10.0.30.2)
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ standalone_services_firewall_ports }}"
+firewall_additional_sources: "{{ standalone_services_firewall_sources }}"
+
+# Docker-in-LXC hosts need FORWARD chain rules for Docker-published ports.
+# Docker uses iptables NAT/DNAT → FORWARD chain, but UFW blocks FORWARD by
+# default. This enables `ufw route allow` rules alongside the INPUT rules.
+# VMs (FoundryVTT, NetBox, PatchMon) also get this — harmless no-op if Docker
+# isn't using bridge networking (the rules just won't match any traffic).
+firewall_docker_forwarding: true
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "standalone-services"
+monitoring_promtail_docker_logs: true   # Ship Docker container logs to Loki

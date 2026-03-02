@@ -1,0 +1,23 @@
+# ArgoCD Config — OIDC authentication, RBAC policies, IngressRoute
+# Wave 1: Applied after ArgoCD controllers are running (wave 0)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://10.0.10.50/infrastructure/firblab.git
+    targetRevision: HEAD
+    path: k8s/platform/argocd/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

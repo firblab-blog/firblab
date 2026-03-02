@@ -1,0 +1,37 @@
+# =============================================================================
+# Environment: Hetzner VPS (Cloud Gateway)
+# =============================================================================
+# Copy to hetzner.tfvars and fill in real values.
+# NEVER commit the real .tfvars file to version control.
+# =============================================================================
+
+# Hetzner Cloud API
+hcloud_token = "CHANGE_ME"
+
+# Server configuration
+server_name = "lab-gateway"
+server_type = "cpx21"
+location    = "fsn1"
+image       = "ubuntu-24.04"
+
+# SSH
+ssh_public_key = "ssh-ed25519 AAAA... your-key-comment"
+
+# Cloudflare DNS
+cloudflare_api_token = "CHANGE_ME"
+cloudflare_zone_id   = "CHANGE_ME"
+domain               = "yourdomain.com"
+
+# Management access restriction (SSH + admin ports)
+# Set to your WireGuard tunnel subnet — never leave as 0.0.0.0/0
+mgmt_cidr = "10.0.0.0/24"
+
+# WireGuard tunnel
+wireguard_endpoint   = "10.0.30.10"
+wireguard_public_key = "CHANGE_ME"
+
+# Hetzner Object Storage (for TF state backend and backups)
+s3_endpoint     = "https://fsn1.your-objectstorage.com"
+s3_access_key   = "CHANGE_ME"
+s3_secret_key   = "CHANGE_ME"
+s3_state_bucket = "firblab-tfstate"

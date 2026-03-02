@@ -1,0 +1,481 @@
+---
+# =============================================================================
+# PatchMon Patch Monitoring Deployment Playbook
+# =============================================================================
+# Deploys PatchMon with PostgreSQL, Redis, backend, and frontend services via
+# Docker Compose on a CIS-hardened VM (Services VLAN 20).
+#
+# After deployment, performs automated onboarding:
+#   - Logs in with admin credentials from Vault (POST /api/v1/auth/login)
+#   - Creates auto-enrollment token for fleet-wide agent deployment
+#   - Stores enrollment token in Vault
+#
+# NOTE: Admin account must be created via web UI first (PatchMon v1.4.0
+# has no programmatic setup API). Store creds in Vault after first-time
+# setup: vault kv patch -mount=secret services/patchmon admin_email=<user> admin_password=<pass>
+#
+# Prerequisites:
+#   - PatchMon VM provisioned by Terraform Layer 05 (cloned from Packer template)
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - Vault secrets seeded by Layer 02-vault-config (secret/services/patchmon)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/patchmon-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags patchmon    # Only PatchMon app deployment
+#   ansible-playbook ... --tags onboarding  # Only admin + enrollment token setup
+#   ansible-playbook ... --tags verify      # Only health checks
+#   ansible-playbook ... --tags backup      # Only backup automation
+# =============================================================================
+
+- name: Deploy PatchMon patch monitoring
+  hosts: patchmon
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Read from Vault (seeded by Terraform Layer 02)
+    # -----------------------------------------------------------------
+    - name: Read PatchMon secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/patchmon
+      register: vault_patchmon_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: patchmon_db_password is not defined
+      tags:
+        - always
+
+    - name: Parse PatchMon Vault response
+      ansible.builtin.set_fact:
+        _patchmon_vault_data: "{{ (vault_patchmon_read.stdout | from_json).data.data }}"
+      when:
+        - patchmon_db_password is not defined
+        - vault_patchmon_read.rc is defined
+        - vault_patchmon_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Set secrets from Vault
+      ansible.builtin.set_fact:
+        patchmon_db_password: "{{ _patchmon_vault_data.postgres_password }}"
+        patchmon_redis_password: "{{ _patchmon_vault_data.redis_password }}"
+        patchmon_jwt_secret: "{{ _patchmon_vault_data.jwt_secret }}"
+        patchmon_admin_email: "{{ _patchmon_vault_data.admin_email | default('') }}"
+        patchmon_admin_password: "{{ _patchmon_vault_data.admin_password | default('') }}"
+        patchmon_enrollment_token_key: "{{ _patchmon_vault_data.enrollment_token_key | default('') }}"
+        patchmon_enrollment_token_secret: "{{ _patchmon_vault_data.enrollment_token_secret | default('') }}"
+      when:
+        - patchmon_db_password is not defined
+        - _patchmon_vault_data is defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate PatchMon secrets are available
+      ansible.builtin.assert:
+        that:
+          - patchmon_db_password is defined
+          - patchmon_db_password | length > 0
+          - patchmon_redis_password is defined
+          - patchmon_redis_password | length > 0
+          - patchmon_jwt_secret is defined
+          - patchmon_jwt_secret | length > 0
+        fail_msg: >
+          PatchMon secrets not available. Ensure Terraform Layer 02 has been applied:
+            terraform -chdir=terraform/layers/02-vault-config apply
+          Then verify Vault connectivity:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret services/patchmon
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Admin Credential Defaults
+    # -----------------------------------------------------------------
+    # Admin creds are stored in Vault after manual first-time setup.
+    # Set empty defaults so the playbook doesn't crash on undefined
+    # vars when run before onboarding (e.g., --tags common only).
+    # The onboarding tag validates these are non-empty before login.
+    # -----------------------------------------------------------------
+    - name: Set admin credential defaults (empty if not in Vault)
+      ansible.builtin.set_fact:
+        patchmon_admin_email: "{{ patchmon_admin_email | default('') }}"
+        patchmon_admin_password: "{{ patchmon_admin_password | default('') }}"
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # OIDC Secret Management (Authentik SSO)
+    # -----------------------------------------------------------------
+    # Credentials created by Terraform Layer 07-authentik-config,
+    # stored at secret/services/patchmon/oidc in Vault.
+    # If Layer 07 hasn't been applied yet, OIDC stays disabled (default).
+    # -----------------------------------------------------------------
+    - name: Read PatchMon OIDC credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/patchmon/oidc
+      register: vault_patchmon_oidc_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Set OIDC credentials from Vault
+      ansible.builtin.set_fact:
+        patchmon_oidc_enabled: true
+        patchmon_oidc_client_id: "{{ (vault_patchmon_oidc_read.stdout | from_json).data.data.client_id }}"
+        patchmon_oidc_client_secret: "{{ (vault_patchmon_oidc_read.stdout | from_json).data.data.client_secret }}"
+      when:
+        - vault_patchmon_oidc_read.rc is defined
+        - vault_patchmon_oidc_read.rc == 0
+      no_log: true
+      tags: [always]
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-04:{{ (vault_restic_read.stdout | from_json).data.data.firblab04_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-04/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying PatchMon on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  vars:
+    # Backup configuration (S3 off-site for PatchMon data)
+    backup_enabled: true
+    backup_cron_hour: "3"
+    backup_cron_minute: "30"
+    backup_services:
+      - name: patchmon
+        compose_path: /opt/patchmon
+        pre_commands:
+          - "docker exec patchmon-db pg_dump -U patchmon patchmon > /opt/patchmon/patchmon-dump.sql"
+        paths:
+          - /opt/patchmon
+        extra_paths:
+          - /opt/patchmon/patchmon-dump.sql
+        post_commands:
+          - "rm -f /opt/patchmon/patchmon-dump.sql"
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: patchmon
+        stop_compose: /opt/patchmon
+        pre_commands:
+          - "docker exec patchmon-db pg_dump -U patchmon patchmon > /opt/patchmon/patchmon-dump.sql"
+        paths:
+          - /opt/patchmon
+        extra_paths:
+          - /opt/patchmon/patchmon-dump.sql
+        post_commands:
+          - "rm -f /opt/patchmon/patchmon-dump.sql"
+        tags: ["patchmon", "monitoring"]
+        cron_hour: "2"
+        cron_minute: "10"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM, not LXC — has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # PatchMon (Docker Compose: PostgreSQL + Redis + backend + frontend)
+    - role: patchmon
+      tags:
+        - patchmon
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    # -----------------------------------------------------------------
+    # Admin Login + Onboarding
+    # -----------------------------------------------------------------
+    # PatchMon v1.4.0 API:
+    #   POST /api/v1/auth/login → { token, refresh_token, user }
+    #     Body: { username, password }
+    #
+    # Admin account must be created via web UI first (no setup API in
+    # v1.4.0). Credentials stored in Vault by the operator after
+    # first-time setup, or by this playbook on subsequent runs.
+    #
+    # The login field is "username" (NOT "email"), but accepts both
+    # usernames and email addresses for lookup.
+    # -----------------------------------------------------------------
+    - name: Validate admin credentials are available for onboarding
+      ansible.builtin.assert:
+        that:
+          - patchmon_admin_email | length > 0
+          - patchmon_admin_password | length > 0
+        fail_msg: >-
+          PatchMon admin credentials not found in Vault. Complete first-time
+          setup via the web UI at http://{{ ansible_host }}:{{ patchmon_port | default(3000) }}/
+          then store credentials:
+            vault kv patch -mount=secret services/patchmon
+              admin_email=<your-username> admin_password=<your-password>
+      tags:
+        - onboarding
+
+    - name: Login to PatchMon API
+      ansible.builtin.uri:
+        url: "http://localhost:{{ patchmon_port | default(3000) }}/api/v1/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ patchmon_admin_email }}"
+          password: "{{ patchmon_admin_password }}"
+        status_code: [200]
+        return_content: true
+      register: _patchmon_login
+      no_log: true
+      tags:
+        - onboarding
+
+    - name: Extract JWT token from login response
+      ansible.builtin.set_fact:
+        _patchmon_jwt: "{{ (_patchmon_login.content | from_json).token }}"
+      no_log: true
+      tags:
+        - onboarding
+
+    # -----------------------------------------------------------------
+    # Auto-Enrollment Token Creation
+    # -----------------------------------------------------------------
+    # Creates a reusable enrollment token for fleet-wide agent deployment.
+    # The token_key + token_secret are stored in Vault so the agent
+    # deployment playbook can read them.
+    #
+    # Skipped if enrollment token already exists in Vault (idempotent).
+    # -----------------------------------------------------------------
+    - name: Create auto-enrollment token
+      when: patchmon_enrollment_token_key is not defined or patchmon_enrollment_token_key | length == 0
+      tags:
+        - onboarding
+      block:
+        - name: "Enrollment: Create fleet enrollment token"
+          ansible.builtin.uri:
+            url: "http://localhost:{{ patchmon_port | default(3000) }}/api/v1/auto-enrollment/tokens"
+            method: POST
+            body_format: json
+            body:
+              token_name: "ansible-fleet-enrollment"
+              max_hosts_per_day: 100
+              allowed_ip_ranges:
+                - "10.0.4.0/24"
+                - "10.0.10.0/24"
+                - "10.0.20.0/24"
+                - "10.0.30.0/24"
+                - "10.0.40.0/24"
+                - "10.0.50.0/24"
+            headers:
+              Authorization: "Bearer {{ _patchmon_jwt }}"
+            status_code: [200, 201]
+            return_content: true
+          register: _enrollment_result
+
+        - name: Extract enrollment token credentials
+          ansible.builtin.set_fact:
+            _enrollment_parsed: "{{ _enrollment_result.content | from_json }}"
+
+        - name: Set enrollment token from parsed response
+          ansible.builtin.set_fact:
+            patchmon_enrollment_token_key: >-
+              {{ _enrollment_parsed.token.token_key
+                 | default(_enrollment_parsed.data.token_key
+                 | default(_enrollment_parsed.token_key
+                 | default(''))) }}
+            patchmon_enrollment_token_secret: >-
+              {{ _enrollment_parsed.token.token_secret
+                 | default(_enrollment_parsed.data.token_secret
+                 | default(_enrollment_parsed.token_secret
+                 | default(''))) }}
+          no_log: true
+
+        - name: Validate enrollment token was extracted
+          ansible.builtin.assert:
+            that:
+              - patchmon_enrollment_token_key | length > 0
+              - patchmon_enrollment_token_secret | length > 0
+            fail_msg: >-
+              Failed to extract enrollment token from API response.
+              Response top-level keys: {{ (_enrollment_result.content | from_json).keys() | list }}.
+              Please check the PatchMon auto-enrollment API response format.
+
+        - name: Display enrollment token creation result
+          ansible.builtin.debug:
+            msg: >-
+              Enrollment token created (key prefix: {{ patchmon_enrollment_token_key[:12] }}...).
+              Token allows {{ 100 }} hosts/day from all VLAN CIDRs.
+
+    # -----------------------------------------------------------------
+    # Store all secrets in Vault (merge with existing Layer 02 secrets)
+    # -----------------------------------------------------------------
+    # vault kv put replaces ALL keys — we must include the original
+    # postgres_password, redis_password, jwt_secret alongside new fields.
+    # -----------------------------------------------------------------
+    - name: Store PatchMon secrets in Vault (with admin + enrollment data)
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - -mount=secret
+          - services/patchmon
+          - "postgres_password={{ patchmon_db_password }}"
+          - "redis_password={{ patchmon_redis_password }}"
+          - "jwt_secret={{ patchmon_jwt_secret }}"
+          - "admin_email={{ patchmon_admin_email }}"
+          - "admin_password={{ patchmon_admin_password }}"
+          - "enrollment_token_key={{ patchmon_enrollment_token_key | default('') }}"
+          - "enrollment_token_secret={{ patchmon_enrollment_token_secret | default('') }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: true
+      when: >-
+        _patchmon_vault_data is not defined
+        or _patchmon_vault_data.enrollment_token_key | default('') | length == 0
+      tags:
+        - onboarding
+
+    # -----------------------------------------------------------------
+    # Deployment Summary
+    # -----------------------------------------------------------------
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "PatchMon Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ patchmon_port | default(3000) }}/"
+          - "DNS: http://patchmon.home.example-lab.org/"
+          - ""
+          - "Admin: {{ patchmon_admin_email }}"
+          - "Enrollment token: {{ 'configured' if (patchmon_enrollment_token_key | default('') | length > 0) else 'not yet created' }}"
+          - ""
+          - "Secrets: vault kv get -mount=secret services/patchmon"
+          - ""
+          - "Next step — deploy agents fleet-wide:"
+          - "  ansible-playbook playbooks/patchmon-agent-deploy.yml"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ patchmon_install_dir | default('/opt/patchmon') }}/docker-compose.yml ps"
+          - "  docker compose -f {{ patchmon_install_dir | default('/opt/patchmon') }}/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

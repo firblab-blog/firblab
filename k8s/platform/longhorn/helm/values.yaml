@@ -1,0 +1,79 @@
+# Helm values for Longhorn distributed storage
+#
+# Install:
+#   helm repo add longhorn https://charts.longhorn.io
+#   helm install longhorn longhorn/longhorn \
+#     -n longhorn-system --create-namespace \
+#     -f values.yaml
+
+# Default settings
+defaultSettings:
+  # Number of replicas for each volume (2 replicas across worker nodes)
+  defaultReplicaCount: 2
+
+  # Backup target — DISABLED to control Hetzner S3 costs.
+  # Longhorn PVCs (SonarQube 35Gi + Prometheus 55Gi + Loki 20Gi) are too large
+  # for off-site S3. Local 6-hourly snapshots (12 retained, 3-day window) provide
+  # sufficient protection. Re-enable if S3 budget allows.
+  # backupTarget: s3://firblab-longhorn-backups@nbg1/
+  # backupTargetCredentialSecret: longhorn-s3-credentials
+
+  # Storage over-provisioning percentage
+  storageOverProvisioningPercentage: 150
+
+  # Storage minimal available percentage (warn threshold)
+  storageMinimalAvailablePercentage: 15
+
+  # Default data path on worker nodes
+  defaultDataPath: /var/lib/longhorn
+
+  # Guaranteed instance manager CPU (millicores)
+  guaranteedInstanceManagerCPU: 12
+
+  # Auto-delete workload pod when volume is detached unexpectedly
+  autoDeletePodWhenVolumeDetachedUnexpectedly: true
+
+  # Create default disk on labeled nodes only (requires node label:
+  # node.longhorn.io/create-default-disk=true)
+  createDefaultDiskLabeledNodes: true
+
+  # Node drain policy
+  nodeDrainPolicy: block-if-contains-last-replica
+
+# Longhorn UI ingress (Traefik)
+# Auth handled via Authentik ForwardAuth middleware (Traefik namespace).
+# Users authenticate through Authentik before reaching the Longhorn dashboard.
+# Previous basic-auth middleware kept in manifests/ as emergency fallback.
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  host: longhorn.home.example-lab.org
+  tls: true
+  tlsSecret: longhorn-tls
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-authentik-forwardauth@kubernetescrd
+
+# Resource limits
+longhornManager:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+longhornDriver:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Prometheus ServiceMonitor
+metrics:
+  serviceMonitor:
+    enabled: true

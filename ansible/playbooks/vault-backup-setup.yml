@@ -1,0 +1,491 @@
+---
+# =============================================================================
+# Vault Backup Automation Playbook
+# =============================================================================
+# Deploys automated 3-2-1 Vault Raft backup on vault-1 (Mac Mini, macOS).
+# Runs every 6 hours via macOS LaunchDaemon.
+#
+# Backup strategy:
+#   1. Primary: Live Raft integrated storage (always current)
+#   2. Local:   Age-encrypted snapshot SCP'd to vault-3 (RPi5)
+#   3. Offsite: Age-encrypted snapshot uploaded to Hetzner S3
+#
+# RPO: 6 hours for Vault secrets.
+#
+# Play 1: Deploy backup script + LaunchDaemon on vault-1 (macOS)
+# Play 2: Prepare backup directory on vault-3 (RPi5, local backup target)
+#
+# Prerequisites:
+#   - vault-1 operational (Vault server running, Raft cluster healthy)
+#   - vault CLI on operator machine with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT
+#   - Hetzner S3 credentials in Vault: secret/infra/hetzner
+#   - Age public key in Vault: secret/backup/age-key
+#   - SSH access to vault-1 (admin@10.0.10.10) and vault-3 (admin@10.0.10.13)
+#
+# Vault secret requirements:
+#   secret/infra/hetzner:
+#     s3_access_key, s3_secret_key, s3_endpoint
+#   secret/backup/age-key:
+#     public_key   (age1...)
+#   secret/backup/vault:
+#     token         (Vault token with operator/raft snapshot permission)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/vault-backup-setup.yml
+#
+# First-time setup (seed required Vault secrets):
+#   # Generate age keypair (save private key securely!)
+#   age-keygen -o /tmp/age-key.txt
+#   vault kv put -mount=secret backup/age-key \
+#     public_key="$(grep 'public key:' /tmp/age-key.txt | awk '{print $NF}')" \
+#     private_key="$(grep 'AGE-SECRET-KEY' /tmp/age-key.txt)"
+#
+#   # Create a Vault token for backup automation (long-lived, minimal permissions)
+#   vault token create -policy=backup-operator -period=720h -display-name=vault-backup \
+#     -no-default-policy -orphan
+#   vault kv put -mount=secret backup/vault token=hvs.xxxxx
+# =============================================================================
+
+# =========================================================================
+# Play 1: Deploy backup automation on vault-1 (macOS)
+# =========================================================================
+- name: "Vault Backup: Deploy on vault-1 (Mac Mini)"
+  hosts: vault-1
+  become: true
+  gather_facts: true
+
+  vars:
+    backup_script_path: /opt/firblab/scripts/vault-backup.sh
+    backup_log_path: /var/log/vault-backup.log
+    backup_launchd_label: com.example-lab.vault-backup
+    backup_interval_seconds: 21600  # 6 hours
+    vault_cacert_path: /etc/vault.d/tls/ca.pem
+
+  pre_tasks:
+    - name: Verify this is macOS (vault-1)
+      ansible.builtin.assert:
+        that: ansible_os_family == "Darwin"
+        fail_msg: "This playbook targets vault-1 (macOS). Got: {{ ansible_os_family }}"
+
+    # -----------------------------------------------------------------
+    # Read secrets from Vault
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Read age public key from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Read backup Vault token from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/vault
+      register: vault_backup_token_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Parse Vault secrets
+      ansible.builtin.set_fact:
+        s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        age_public_key: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+        backup_vault_token: "{{ (vault_backup_token_read.stdout | from_json).data.data.token }}"
+      no_log: true
+      tags: [always]
+
+    - name: Validate all secrets are present
+      ansible.builtin.assert:
+        that:
+          - s3_access_key | length > 0
+          - s3_secret_key | length > 0
+          - s3_endpoint | length > 0
+          - age_public_key | length > 0
+          - backup_vault_token | length > 0
+        fail_msg: >
+          Missing backup secrets. Ensure these exist in Vault:
+            vault kv get -mount=secret infra/hetzner     (s3_access_key, s3_secret_key, s3_endpoint)
+            vault kv get -mount=secret backup/age-key    (public_key)
+            vault kv get -mount=secret backup/vault      (token)
+      tags: [always]
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Install prerequisites (age + aws CLI)
+    # -----------------------------------------------------------------
+    - name: Check if age is installed
+      ansible.builtin.command: which age
+      register: age_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install age (macOS ARM64 binary)
+      when: age_check.rc != 0
+      block:
+        - name: Download age release
+          ansible.builtin.get_url:
+            url: "https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-darwin-arm64.tar.gz"
+            dest: /tmp/age.tar.gz
+            mode: "0644"
+
+        - name: Extract age binary
+          ansible.builtin.shell: |
+            cd /tmp && tar xzf age.tar.gz
+            cp /tmp/age/age /usr/local/bin/age
+            cp /tmp/age/age-keygen /usr/local/bin/age-keygen
+            chmod 755 /usr/local/bin/age /usr/local/bin/age-keygen
+            rm -rf /tmp/age /tmp/age.tar.gz
+
+    - name: Check if aws CLI is installed
+      ansible.builtin.command: which aws
+      register: aws_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install AWS CLI (macOS pkg)
+      when: aws_check.rc != 0
+      block:
+        - name: Download AWS CLI installer
+          ansible.builtin.get_url:
+            url: "https://awscli.amazonaws.com/AWSCLIV2.pkg"
+            dest: /tmp/AWSCLIV2.pkg
+            mode: "0644"
+
+        - name: Install AWS CLI package
+          ansible.builtin.command: installer -pkg /tmp/AWSCLIV2.pkg -target /
+          register: aws_install
+
+        - name: Clean up installer
+          ansible.builtin.file:
+            path: /tmp/AWSCLIV2.pkg
+            state: absent
+
+    # -----------------------------------------------------------------
+    # Deploy backup script
+    # -----------------------------------------------------------------
+    - name: Create script directory
+      ansible.builtin.file:
+        path: "{{ backup_script_path | dirname }}"
+        state: directory
+        owner: root
+        group: wheel
+        mode: "0755"
+
+    - name: Deploy vault-backup.sh
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../scripts/vault-backup.sh"
+        dest: "{{ backup_script_path }}"
+        owner: root
+        group: wheel
+        mode: "0750"
+
+    # -----------------------------------------------------------------
+    # Configure AWS CLI for Hetzner S3
+    # -----------------------------------------------------------------
+    # AWS CLI config for root user (LaunchDaemon runs as root).
+    # Uses a dedicated profile 'hetzner' to avoid conflicts.
+    # -----------------------------------------------------------------
+    - name: Create root .aws directory
+      ansible.builtin.file:
+        path: /var/root/.aws
+        state: directory
+        owner: root
+        group: wheel
+        mode: "0700"
+
+    - name: Configure AWS CLI credentials for Hetzner S3
+      ansible.builtin.copy:
+        dest: /var/root/.aws/credentials
+        owner: root
+        group: wheel
+        mode: "0600"
+        content: |
+          [default]
+          aws_access_key_id = {{ s3_access_key }}
+          aws_secret_access_key = {{ s3_secret_key }}
+      no_log: true
+
+    - name: Configure AWS CLI config for Hetzner S3
+      ansible.builtin.copy:
+        dest: /var/root/.aws/config
+        owner: root
+        group: wheel
+        mode: "0600"
+        content: |
+          [default]
+          region = {{ s3_endpoint.split('.')[0] }}
+
+    # -----------------------------------------------------------------
+    # Create backup environment file
+    # -----------------------------------------------------------------
+    # Stores all environment variables for the backup script.
+    # Read by the LaunchDaemon via EnvironmentVariables.
+    # Kept as a separate file for easier secret rotation.
+    # -----------------------------------------------------------------
+    - name: Create backup config directory
+      ansible.builtin.file:
+        path: /etc/vault-backup.d
+        state: directory
+        owner: root
+        group: wheel
+        mode: "0700"
+
+    - name: Write backup environment config
+      ansible.builtin.copy:
+        dest: /etc/vault-backup.d/env
+        owner: root
+        group: wheel
+        mode: "0600"
+        content: |
+          # Vault Backup Environment — managed by Ansible
+          VAULT_ADDR=https://127.0.0.1:8200
+          VAULT_TOKEN={{ backup_vault_token }}
+          VAULT_CACERT={{ vault_cacert_path }}
+          AGE_RECIPIENT={{ age_public_key }}
+          S3_ENDPOINT=https://{{ s3_endpoint }}
+          S3_BUCKET=firblab-vault-backups
+          LOCAL_BACKUP_HOST=10.0.10.13
+          LOCAL_BACKUP_USER=vault-backup
+          LOCAL_BACKUP_PATH=/backups/vault
+          BACKUP_DIR=/tmp/vault-backups
+      no_log: true
+
+    # -----------------------------------------------------------------
+    # Create wrapper script (loads env from file)
+    # -----------------------------------------------------------------
+    # LaunchDaemons can't source files, so we use a wrapper that
+    # exports env vars then calls the backup script.
+    # -----------------------------------------------------------------
+    - name: Deploy backup wrapper script
+      ansible.builtin.copy:
+        dest: /opt/firblab/scripts/vault-backup-wrapper.sh
+        owner: root
+        group: wheel
+        mode: "0750"
+        content: |
+          #!/usr/bin/env bash
+          # Vault backup wrapper — loads environment and runs backup script.
+          # Managed by Ansible — DO NOT EDIT MANUALLY
+          set -euo pipefail
+
+          # Export environment variables from config file
+          while IFS= read -r line; do
+            # Skip comments and empty lines
+            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+            export "$line"
+          done < /etc/vault-backup.d/env
+
+          # Add Homebrew to PATH (for age, aws CLI)
+          export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
+          # Run backup
+          exec {{ backup_script_path }}
+
+    # -----------------------------------------------------------------
+    # Create LaunchDaemon
+    # -----------------------------------------------------------------
+    - name: Deploy Vault backup LaunchDaemon
+      ansible.builtin.copy:
+        dest: "/Library/LaunchDaemons/{{ backup_launchd_label }}.plist"
+        owner: root
+        group: wheel
+        mode: "0644"
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>{{ backup_launchd_label }}</string>
+
+            <key>ProgramArguments</key>
+            <array>
+              <string>/opt/firblab/scripts/vault-backup-wrapper.sh</string>
+            </array>
+
+            <key>StartInterval</key>
+            <integer>{{ backup_interval_seconds }}</integer>
+
+            <key>StandardOutPath</key>
+            <string>{{ backup_log_path }}</string>
+
+            <key>StandardErrorPath</key>
+            <string>{{ backup_log_path }}</string>
+
+            <key>RunAtLoad</key>
+            <true/>
+          </dict>
+          </plist>
+      register: launchd_plist
+
+    # -----------------------------------------------------------------
+    # Load LaunchDaemon
+    # -----------------------------------------------------------------
+    - name: Check if backup LaunchDaemon is loaded
+      ansible.builtin.command: "launchctl print system/{{ backup_launchd_label }}"
+      register: launchd_status
+      changed_when: false
+      failed_when: false
+
+    - name: Unload existing LaunchDaemon (if plist changed)
+      ansible.builtin.command: "launchctl bootout system/{{ backup_launchd_label }}"
+      when:
+        - launchd_plist.changed
+        - launchd_status.rc == 0
+      failed_when: false
+
+    - name: Load Vault backup LaunchDaemon
+      ansible.builtin.command: "launchctl bootstrap system /Library/LaunchDaemons/{{ backup_launchd_label }}.plist"
+      when: launchd_plist.changed or launchd_status.rc != 0
+
+    # -----------------------------------------------------------------
+    # Create log file
+    # -----------------------------------------------------------------
+    - name: Create backup log file
+      ansible.builtin.file:
+        path: "{{ backup_log_path }}"
+        state: touch
+        owner: root
+        group: wheel
+        mode: "0640"
+        modification_time: preserve
+        access_time: preserve
+
+  post_tasks:
+    - name: Display vault-1 backup deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Backup Deployed on vault-1"
+          - "=========================================="
+          - "Script:    {{ backup_script_path }}"
+          - "Wrapper:   /opt/firblab/scripts/vault-backup-wrapper.sh"
+          - "Schedule:  Every {{ backup_interval_seconds // 3600 }} hours (LaunchDaemon)"
+          - "Log:       {{ backup_log_path }}"
+          - "S3 Bucket: firblab-vault-backups"
+          - "Local:     vault-backup@10.0.10.13:/backups/vault/"
+          - ""
+          - "Verify:"
+          - "  launchctl print system/{{ backup_launchd_label }}"
+          - "  tail -f {{ backup_log_path }}"
+          - "  aws s3 ls --endpoint-url https://{{ s3_endpoint }} s3://firblab-vault-backups/"
+          - "=========================================="
+
+# =========================================================================
+# Play 2: Prepare backup target on vault-3 (RPi5)
+# =========================================================================
+- name: "Vault Backup: Prepare target on vault-3 (RPi5)"
+  hosts: vault-3
+  become: true
+  gather_facts: true
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Create backup user + directory
+    # -----------------------------------------------------------------
+    - name: Create vault-backup user (no login, just for SCP)
+      ansible.builtin.user:
+        name: vault-backup
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: true
+        home: /home/vault-backup
+        state: present
+
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: /backups/vault
+        state: directory
+        owner: vault-backup
+        group: vault-backup
+        mode: "0750"
+
+    # -----------------------------------------------------------------
+    # Authorize vault-1's SSH key for vault-backup user
+    # -----------------------------------------------------------------
+    # vault-1 runs as root (LaunchDaemon), so we need root's SSH key
+    # on vault-3 authorized for the vault-backup user.
+    # The key is generated on vault-1 if it doesn't exist.
+    # -----------------------------------------------------------------
+    - name: Create .ssh directory for vault-backup user
+      ansible.builtin.file:
+        path: /home/vault-backup/.ssh
+        state: directory
+        owner: vault-backup
+        group: vault-backup
+        mode: "0700"
+
+    - name: Check for vault-1 root SSH public key
+      ansible.builtin.stat:
+        path: /var/root/.ssh/id_ed25519.pub
+      delegate_to: vault-1
+      register: vault1_root_key
+      become: true
+
+    - name: Generate root SSH keypair on vault-1 (if missing)
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -f /var/root/.ssh/id_ed25519 -N ""
+        creates: /var/root/.ssh/id_ed25519
+      delegate_to: vault-1
+      become: true
+      when: not vault1_root_key.stat.exists
+
+    - name: Read vault-1 root SSH public key
+      ansible.builtin.slurp:
+        src: /var/root/.ssh/id_ed25519.pub
+      delegate_to: vault-1
+      register: vault1_root_pubkey
+      become: true
+
+    - name: Authorize vault-1 root key for vault-backup user
+      ansible.posix.authorized_key:
+        user: vault-backup
+        key: "{{ vault1_root_pubkey.content | b64decode }}"
+        state: present
+
+    # -----------------------------------------------------------------
+    # Allow vault-backup user to use SCP (override nologin for SFTP/SCP)
+    # -----------------------------------------------------------------
+    # nologin blocks interactive login but SCP/SFTP work via
+    # ForceCommand if needed. However, OpenSSH SCP actually needs
+    # a shell. Use /bin/bash but with no password and no sudo.
+    # -----------------------------------------------------------------
+    - name: Set vault-backup shell to bash for SCP
+      ansible.builtin.user:
+        name: vault-backup
+        shell: /bin/bash
+
+  post_tasks:
+    - name: Display vault-3 backup target summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Vault Backup Target Ready on vault-3"
+          - "=========================================="
+          - "User:      vault-backup"
+          - "Directory: /backups/vault/"
+          - "Retention: 30 days (managed by vault-backup.sh)"
+          - ""
+          - "Verify:"
+          - "  ls -la /backups/vault/"
+          - "  ssh vault-backup@10.0.10.13 ls /backups/vault/"
+          - "=========================================="

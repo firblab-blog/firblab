@@ -1,0 +1,33 @@
+# =============================================================================
+# ClusterIssuer for Let's Encrypt — issues publicly-trusted TLS certificates
+# via Cloudflare DNS-01 challenge for *.home.example-lab.org internal services.
+# =============================================================================
+# This issuer complements the existing vault-issuer (Vault PKI for M2M TLS).
+# User-facing services use letsencrypt-dns for browser-trusted certs.
+#
+# Prerequisites:
+#   - cert-manager installed in the cluster
+#   - Cloudflare API token with Zone:DNS:Edit permission for example-lab.org
+#   - ExternalSecret syncing token from Vault → K8s Secret cloudflare-api-token
+#
+# Usage in Ingress:
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-dns
+# =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example-lab.org
+    privateKeySecretRef:
+      name: letsencrypt-dns-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token

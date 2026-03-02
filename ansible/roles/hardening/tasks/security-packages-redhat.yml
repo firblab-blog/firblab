@@ -1,0 +1,16 @@
+---
+# =============================================================================
+# Security Packages — RedHat/Rocky
+# =============================================================================
+
+- name: Install security packages (RedHat)
+  ansible.builtin.dnf:
+    name:
+      - audit
+      - aide
+      - policycoreutils-python-utils
+      - libpwquality
+    state: present
+  tags:
+    - packages
+    - security

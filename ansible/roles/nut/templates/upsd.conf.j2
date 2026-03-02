@@ -1,0 +1,13 @@
+# =============================================================================
+# upsd Listener Configuration — /etc/nut/upsd.conf
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+#
+# LISTEN on 0.0.0.0 to allow remote NUT clients (future: Proxmox nodes,
+# Vault cluster, other lab hosts) to monitor UPS status for coordinated
+# safe shutdowns on power loss.
+# =============================================================================
+
+LISTEN {{ nut_upsd_listen_address }} {{ nut_upsd_listen_port }}
+MAXAGE {{ nut_upsd_maxage }}

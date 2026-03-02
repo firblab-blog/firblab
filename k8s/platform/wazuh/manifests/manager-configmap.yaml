@@ -1,0 +1,78 @@
+# =============================================================================
+# Wazuh Manager — Configuration (Standalone Mode)
+# =============================================================================
+# Single manager instance (no cluster). Handles agent enrollment, event
+# collection, rule processing, and alert forwarding to the indexer.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wazuh-manager-config
+  namespace: wazuh
+data:
+  ossec.conf: |
+    <ossec_config>
+      <!-- Global settings -->
+      <global>
+        <jsonout_output>yes</jsonout_output>
+        <alerts_log>yes</alerts_log>
+        <logall>no</logall>
+        <logall_json>no</logall_json>
+        <email_notification>no</email_notification>
+      </global>
+
+      <!-- Agent enrollment (authd) -->
+      <auth>
+        <disabled>no</disabled>
+        <port>1515</port>
+        <use_source_ip>no</use_source_ip>
+        <use_password>yes</use_password>
+        <force_insert>yes</force_insert>
+        <force_time>0</force_time>
+        <purge>yes</purge>
+        <limit_maxagents>1000</limit_maxagents>
+      </auth>
+
+      <!-- Remote agent event collection -->
+      <remote>
+        <connection>secure</connection>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+        <queue_size>131072</queue_size>
+      </remote>
+
+      <!-- Wazuh API: configured via /var/ossec/api/configuration/api.yaml (4.14+) -->
+
+      <!-- Vulnerability detection -->
+      <vulnerability-detection>
+        <enabled>yes</enabled>
+        <index-status>yes</index-status>
+        <feed-update-interval>60m</feed-update-interval>
+      </vulnerability-detection>
+
+      <!-- Indexer output (Filebeat) -->
+      <indexer>
+        <enabled>yes</enabled>
+        <hosts>
+          <host>http://wazuh-indexer:9200</host>
+        </hosts>
+        <ssl>
+          <certificate_verification>no</certificate_verification>
+        </ssl>
+      </indexer>
+
+      <!-- Logging -->
+      <logging>
+        <log_format>json</log_format>
+      </logging>
+
+      <!-- Rules and decoders -->
+      <ruleset>
+        <decoder_dir>ruleset/decoders</decoder_dir>
+        <rule_dir>ruleset/rules</rule_dir>
+        <rule_exclude>0215-policy_rules.xml</rule_exclude>
+        <list>etc/lists/audit-keys</list>
+        <list>etc/lists/amazon/aws-eventnames</list>
+        <list>etc/lists/security-eventchannel</list>
+      </ruleset>
+    </ossec_config>

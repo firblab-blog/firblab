@@ -1,0 +1,817 @@
+---
+# =============================================================================
+# Scanopy Role - Docker Compose Deployment
+# =============================================================================
+# Deploys Scanopy network topology scanner with PostgreSQL and daemon
+# using Docker Compose. The daemon runs in host network mode with
+# privileged access for ARP/Layer 2 scanning.
+#
+# First-deploy flow:
+#   1. Template compose, start server + postgres ONLY (no daemon yet)
+#   2. POST /api/auth/setup (org + network) → session cookie
+#   3. POST /api/auth/register (admin account)
+#   4. POST /api/auth/login → authenticated session
+#   5. GET /api/v1/networks → network_id
+#   6. POST /api/v1/daemons/provision → daemon record + API key
+#   7. Re-template compose with:
+#      - SCANOPY_DISABLE_REGISTRATION=true
+#      - SCANOPY_NETWORK_ID + SCANOPY_DAEMON_API_KEY on daemon
+#   8. Start all containers — daemon registers as DaemonPoll
+#
+# CRITICAL: The daemon must NOT start before provisioning. If the daemon
+# connects to the server before it has credentials, the server auto-creates
+# a ServerPoll daemon record. The provision endpoint also creates daemons
+# as ServerPoll (no mode parameter). The daemon only updates the mode to
+# DaemonPoll via register_with_server() — which it skips if it already
+# finds itself on the server via announce_startup(). Starting the daemon
+# ONLY after provisioning and credential injection avoids this entirely.
+#
+# The daemon API key is stored in Vault (secret/services/scanopy).
+#
+# Subsequent runs skip onboarding entirely (idempotent — detected via
+# /api/auth/me returning 200). If daemon credentials are already in
+# Vault, they're passed through to the compose template.
+#
+# Expects the docker role to be applied first.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flush pending handlers from earlier roles (common, hardening, docker)
+# ---------------------------------------------------------------------------
+# Critical: the docker role's daemon.json template triggers a "Restart docker"
+# handler. If this fires AFTER we start containers, it kills them all.
+# Flushing here ensures Docker is fully restarted before we touch containers.
+- name: Flush handlers from earlier roles before starting containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# VLAN Sub-Interfaces (multi-VLAN L2 scanning)
+# ---------------------------------------------------------------------------
+# Creates 802.1Q sub-interfaces via NetworkManager (nmcli) so the daemon
+# has Layer 2 presence on every VLAN. Requires the switch port to be
+# configured as a trunk (Scanner Trunk profile in Terraform Layer 00).
+#
+# Each sub-interface gets a static IP with no default route — only the
+# primary interface (eth0 on VLAN 1) carries the default gateway.
+#
+# Skipped entirely if scanopy_vlan_interfaces is not defined (backward-compatible).
+# ---------------------------------------------------------------------------
+- name: Configure VLAN sub-interfaces for multi-VLAN scanning
+  when: scanopy_vlan_interfaces is defined and scanopy_vlan_interfaces | length > 0
+  tags:
+    - configure
+    - vlan
+  block:
+    - name: Detect wired Ethernet interface name
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        exit 1
+      register: _wired_detect
+      changed_when: false
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        _wired_iface: "{{ _wired_detect.stdout | trim }}"
+
+    - name: Check existing VLAN connections
+      ansible.builtin.command:
+        cmd: "nmcli -t -f NAME con show"
+      register: _nm_connections
+      changed_when: false
+
+    - name: Create VLAN sub-interfaces
+      ansible.builtin.command:
+        argv:
+          - nmcli
+          - con
+          - add
+          - type
+          - vlan
+          - con-name
+          - "vlan{{ item.vlan_id }}"
+          - ifname
+          - "{{ _wired_iface }}.{{ item.vlan_id }}"
+          - dev
+          - "{{ _wired_iface }}"
+          - id
+          - "{{ item.vlan_id }}"
+          - ipv4.method
+          - manual
+          - ipv4.addresses
+          - "{{ item.ip }}/{{ item.cidr }}"
+          - ipv4.never-default
+          - "true"
+          - ipv6.method
+          - disabled
+      loop: "{{ scanopy_vlan_interfaces }}"
+      loop_control:
+        label: "vlan{{ item.vlan_id }} ({{ item.name }}: {{ item.ip }}/{{ item.cidr }})"
+      when: "'vlan' ~ item.vlan_id | string not in _nm_connections.stdout"
+
+    - name: Activate VLAN sub-interfaces
+      ansible.builtin.command:
+        cmd: "nmcli con up vlan{{ item.vlan_id }}"
+      loop: "{{ scanopy_vlan_interfaces }}"
+      loop_control:
+        label: "vlan{{ item.vlan_id }}"
+      register: _vlan_up
+      changed_when: "'successfully activated' in _vlan_up.stdout"
+      failed_when: false
+
+    - name: Verify VLAN sub-interfaces are active
+      ansible.builtin.command:
+        cmd: "ip -br addr show {{ _wired_iface }}.{{ item.vlan_id }}"
+      loop: "{{ scanopy_vlan_interfaces }}"
+      loop_control:
+        label: "{{ _wired_iface }}.{{ item.vlan_id }} → {{ item.ip }}"
+      register: _vlan_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display VLAN interface status
+      ansible.builtin.debug:
+        msg: >-
+          {{ scanopy_vlan_interfaces | length }} VLAN sub-interfaces configured:
+          {{ scanopy_vlan_interfaces | map(attribute='vlan_id') | map('regex_replace', '^', 'VLAN ') | join(', ') }}.
+          Daemon will detect these on next start/scan.
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Scanopy directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ scanopy_base_path }}"
+    - path: "{{ scanopy_base_path }}/config"
+      mode: "0750"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose — initial template
+# ---------------------------------------------------------------------------
+# On first deploy, start with registration ENABLED so onboarding can run.
+# After admin account creation + daemon provisioning, this is re-templated
+# with registration disabled and daemon credentials injected.
+- name: Template Scanopy Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ scanopy_base_path }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_changed
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+- name: Pull Scanopy images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ scanopy_base_path }}"
+  register: scanopy_pull_result
+  changed_when: "'Pull complete' in scanopy_pull_result.stdout or 'Downloaded' in scanopy_pull_result.stderr"
+  tags:
+    - deploy
+
+# Don't use --wait here. On first deploy on slow hardware (RPi5), database
+# migrations may take time. Let 'up -d' return immediately and rely on the
+# Ansible uri health check task below to wait for readiness.
+- name: Start Scanopy containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose up -d
+      {{ '--force-recreate' if compose_changed.changed | default(false) else '' }}
+    chdir: "{{ scanopy_base_path }}"
+  register: scanopy_up_result
+  changed_when: "'Started' in scanopy_up_result.stderr or 'Creating' in scanopy_up_result.stderr or 'Recreat' in scanopy_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+# 30 retries x 10s = 5 minutes max wait (covers DB migrations on RPi5).
+- name: Wait for Scanopy API to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/health"
+    method: GET
+    status_code: [200]
+  register: scanopy_health
+  retries: 30
+  delay: 10
+  until: scanopy_health.status is defined and scanopy_health.status == 200
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Scanopy API never became healthy
+  ansible.builtin.fail:
+    msg: "Scanopy API failed to respond after 300 seconds. Last status: {{ scanopy_health.status | default('connection refused') }}"
+  when: scanopy_health.status is not defined or scanopy_health.status != 200
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Initial Admin Account (first-run onboarding)
+# ---------------------------------------------------------------------------
+# Scanopy requires completing an onboarding wizard to create the first user.
+# The API flow is: POST /api/auth/setup (org + network) → POST /api/auth/register
+# (email + password + terms_accepted). The setup call stores org/network
+# config in a server session cookie; register applies it and creates the user.
+#
+# Detection: /api/auth/me returns 401 if no session exists (no admin yet).
+# If the admin already exists, this entire block is skipped (idempotent).
+# ---------------------------------------------------------------------------
+- name: Check if Scanopy admin account exists
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/auth/me"
+    method: POST
+    status_code: [200, 401, 403]
+  register: scanopy_auth_check
+  failed_when: false
+  tags:
+    - configure
+    - onboarding
+
+- name: Set onboarding needed flag
+  ansible.builtin.set_fact:
+    _scanopy_needs_onboarding: >-
+      {{ scanopy_admin_email is defined
+         and scanopy_admin_password is defined
+         and scanopy_auth_check.status is defined
+         and scanopy_auth_check.status != 200 }}
+  tags:
+    - configure
+    - onboarding
+
+# If onboarding is needed and registration is currently disabled,
+# temporarily enable it by re-templating and recreating the server.
+- name: Temporarily enable registration for onboarding
+  when: _scanopy_needs_onboarding | bool
+  tags:
+    - configure
+    - onboarding
+  block:
+    - name: Re-template compose with registration enabled
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ scanopy_base_path }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        scanopy_disable_registration: false
+      register: _compose_reg_enabled
+
+    - name: Recreate server with registration enabled
+      ansible.builtin.command:
+        cmd: docker compose up -d --force-recreate server
+        chdir: "{{ scanopy_base_path }}"
+      when: _compose_reg_enabled.changed
+      changed_when: true
+
+    - name: Wait for Scanopy API after registration enable
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/health"
+        method: GET
+        status_code: [200]
+      register: _health_after_enable
+      retries: 15
+      delay: 5
+      until: _health_after_enable.status is defined and _health_after_enable.status == 200
+
+- name: Scanopy onboarding — create initial admin account
+  when: _scanopy_needs_onboarding | bool
+  tags:
+    - configure
+    - onboarding
+  block:
+    # Step 1: POST /api/auth/setup — pre-register org + network in session
+    - name: "Onboarding step 1/3: Configure organization and network"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/auth/setup"
+        method: POST
+        body_format: json
+        body:
+          organization_name: "{{ scanopy_org_name }}"
+          network:
+            name: "{{ scanopy_network_name }}"
+            snmp_enabled: false
+        status_code: [200]
+        return_content: true
+      register: scanopy_setup_result
+
+    - name: Extract session cookie from setup response
+      ansible.builtin.set_fact:
+        scanopy_session_cookie: "{{ scanopy_setup_result.set_cookie | regex_search('session_id=[^;]+') }}"
+
+    # Step 2: POST /api/auth/register — create the admin user
+    - name: "Onboarding step 2/3: Register admin account"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/auth/register"
+        method: POST
+        body_format: json
+        body:
+          email: "{{ scanopy_admin_email }}"
+          password: "{{ scanopy_admin_password }}"
+          terms_accepted: true
+          marketing_opt_in: false
+        headers:
+          Cookie: "{{ scanopy_session_cookie }}"
+        status_code: [200, 409]
+        return_content: true
+      register: scanopy_register_result
+      no_log: true
+
+    - name: Display Scanopy onboarding result
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Scanopy admin account created: ' ~ scanopy_admin_email ~ '. '
+             ~ "Organization '" ~ scanopy_org_name ~ "' with network '"
+             ~ scanopy_network_name ~ "' initialized."
+             if scanopy_register_result.status == 200
+             else 'Scanopy admin account already exists (' ~ scanopy_admin_email ~ '). Skipping onboarding.' }}
+
+# ---------------------------------------------------------------------------
+# Daemon Provisioning (first-run, after admin account exists)
+# ---------------------------------------------------------------------------
+# Explicitly provision the daemon via the server API:
+#   1. Login with admin credentials → session cookie
+#   2. GET /api/v1/networks → network_id
+#   3. Delete any auto-created daemon records (the server may have created
+#      a ServerPoll daemon via its integrated daemon first-contact)
+#   4. POST /api/v1/daemons/provision → daemon record + API key
+#
+# The daemon API key is then injected as SCANOPY_NETWORK_ID and
+# SCANOPY_DAEMON_API_KEY env vars in the compose template. On next
+# container start, the daemon self-registers via POST /api/daemons/register
+# with DaemonPoll mode (from SCANOPY_MODE env var).
+# ---------------------------------------------------------------------------
+- name: Provision integrated daemon
+  when:
+    - _scanopy_needs_onboarding | bool
+    - scanopy_daemon_api_key is not defined or scanopy_daemon_api_key | length == 0
+  tags:
+    - configure
+    - onboarding
+  block:
+    # Authenticate with admin credentials
+    - name: "Daemon provision 1/4: Login to Scanopy API"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          email: "{{ scanopy_admin_email }}"
+          password: "{{ scanopy_admin_password }}"
+        status_code: [200]
+        return_content: true
+      register: _login_result
+      no_log: true
+
+    - name: Extract login session cookie
+      ansible.builtin.set_fact:
+        _admin_session: "{{ _login_result.set_cookie | regex_search('session_id=[^;]+') }}"
+
+    # Get the network UUID (created during onboarding)
+    - name: "Daemon provision 2/4: Get network ID"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/v1/networks"
+        method: GET
+        headers:
+          Cookie: "{{ _admin_session }}"
+        status_code: [200]
+        return_content: true
+      register: _networks_result
+
+    - name: Extract network ID
+      ansible.builtin.set_fact:
+        scanopy_daemon_network_id: "{{ (_networks_result.content | from_json).data[0].id }}"
+
+    # Delete any auto-created daemon records. The server's integrated daemon
+    # first-contact creates a ServerPoll record before Ansible runs provisioning.
+    # We must clean this up so our freshly provisioned daemon can register
+    # with the correct DaemonPoll mode.
+    - name: "Daemon provision 3/4: List existing daemons"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons"
+        method: GET
+        headers:
+          Cookie: "{{ _admin_session }}"
+        status_code: [200]
+        return_content: true
+      register: _daemons_list
+
+    - name: Delete auto-created daemon records
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons/{{ item }}"
+        method: DELETE
+        headers:
+          Cookie: "{{ _admin_session }}"
+        status_code: [200, 204, 404]
+      loop: "{{ (_daemons_list.content | from_json).data | map(attribute='id') | list }}"
+      when: (_daemons_list.content | from_json).data | length > 0
+
+    # Provision the daemon — creates a fresh daemon record + generates API key.
+    # NOTE: The provision endpoint always creates a ServerPoll daemon (it
+    # doesn't accept a mode parameter). The daemon updates the mode to
+    # DaemonPoll via register_with_server() on its first startup with
+    # the injected credentials.
+    - name: "Daemon provision 4/4: Provision daemon via server API"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons/provision"
+        method: POST
+        body_format: json
+        body:
+          name: "{{ scanopy_daemon_name }}"
+          network_id: "{{ scanopy_daemon_network_id }}"
+          url: "http://{{ ansible_host }}:{{ scanopy_daemon_port }}"
+        headers:
+          Cookie: "{{ _admin_session }}"
+        status_code: [200, 201]
+        return_content: true
+      register: _provision_result
+
+    - name: Extract daemon API key
+      ansible.builtin.set_fact:
+        scanopy_daemon_api_key: "{{ (_provision_result.content | from_json).data.daemon_api_key }}"
+      no_log: true
+
+    - name: Display daemon provisioning result
+      ansible.builtin.debug:
+        msg: >-
+          Daemon '{{ scanopy_daemon_name }}' provisioned for network '{{ scanopy_network_name }}'.
+          Network ID: {{ scanopy_daemon_network_id }}.
+          API key stored (prefix: {{ scanopy_daemon_api_key[:12] }}...).
+
+    # Store daemon credentials in Vault alongside other Scanopy secrets.
+    # This is a delegate_to:localhost task since Vault CLI runs on controller.
+    - name: Store daemon credentials in Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - put
+          - -mount=secret
+          - services/scanopy
+          - "db_password={{ scanopy_db_password }}"
+          - "admin_email={{ scanopy_admin_email }}"
+          - "admin_password={{ scanopy_admin_password }}"
+          - "daemon_network_id={{ scanopy_daemon_network_id }}"
+          - "daemon_api_key={{ scanopy_daemon_api_key }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: true
+
+# ---------------------------------------------------------------------------
+# Final Compose Template + Container Restart
+# ---------------------------------------------------------------------------
+# Re-template with the final desired state:
+#   - Registration disabled
+#   - Daemon credentials injected (SCANOPY_NETWORK_ID, SCANOPY_DAEMON_API_KEY)
+# Then recreate ALL containers so the daemon starts with credentials and
+# registers as DaemonPoll via register_with_server().
+- name: Template final Scanopy Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ scanopy_base_path }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _compose_final
+  tags:
+    - configure
+
+# Stop and remove the daemon container + its config volume before restart.
+# The daemon stores its ID in /root/.config/daemon/. If this cached ID
+# matches a daemon the server already knows (from the auto-created record
+# or the provision call), the daemon calls announce_startup() which succeeds
+# WITHOUT updating the mode from ServerPoll to DaemonPoll. Removing the
+# config forces a fresh register_with_server() call that sets DaemonPoll.
+- name: Stop daemon container before config reset
+  ansible.builtin.command:
+    cmd: docker compose stop daemon
+    chdir: "{{ scanopy_base_path }}"
+  when: _compose_final.changed | default(false)
+  changed_when: true
+  tags:
+    - configure
+
+- name: Remove daemon container to release volume
+  ansible.builtin.command:
+    cmd: docker compose rm -f daemon
+    chdir: "{{ scanopy_base_path }}"
+  when: _compose_final.changed | default(false)
+  changed_when: true
+  tags:
+    - configure
+
+- name: Remove daemon config volume to force fresh registration
+  ansible.builtin.command:
+    cmd: docker volume rm -f scanopy_daemon_config
+  register: _vol_rm
+  changed_when: "'scanopy_daemon_config' in _vol_rm.stdout"
+  failed_when: false
+  when: _compose_final.changed | default(false)
+  tags:
+    - configure
+
+- name: Recreate containers with final configuration
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ scanopy_base_path }}"
+  when: _compose_final.changed | default(false)
+  changed_when: true
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Post-Restart Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Scanopy API after final restart
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/health"
+    method: GET
+    status_code: [200]
+  register: _health_final
+  retries: 30
+  delay: 10
+  until: _health_final.status is defined and _health_final.status == 200
+  failed_when: false
+  when: _compose_final.changed | default(false)
+  tags:
+    - verify
+
+- name: Fail if Scanopy API not healthy after final restart
+  ansible.builtin.fail:
+    msg: "Scanopy API failed to respond after restart. Last status: {{ _health_final.status | default('connection refused') }}"
+  when:
+    - _health_final is not skipped
+    - _health_final.status is not defined or _health_final.status != 200
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Fix Daemon Mode (ServerPoll → DaemonPoll)
+# ---------------------------------------------------------------------------
+# The provision endpoint and auto-detection both create daemons as ServerPoll.
+# There is no API endpoint to update the mode. The only reliable fix:
+#   1. Login to get a session
+#   2. List daemons and find any in server_poll mode
+#   3. Delete them
+#   4. Restart the daemon container — it re-registers as DaemonPoll
+#      via register_with_server() (sends SCANOPY_MODE env var value)
+#
+# This runs on every deploy (idempotent — skips if daemon is already
+# DaemonPoll or no daemons exist in wrong mode).
+# ---------------------------------------------------------------------------
+- name: Fix daemon mode — login to Scanopy API
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/auth/login"
+    method: POST
+    body_format: json
+    body:
+      email: "{{ scanopy_admin_email }}"
+      password: "{{ scanopy_admin_password }}"
+    status_code: [200]
+    return_content: true
+  register: _fix_login
+  no_log: true
+  when:
+    - scanopy_admin_email is defined
+    - scanopy_admin_password is defined
+    - scanopy_admin_password | length > 0
+  tags:
+    - configure
+    - verify
+
+- name: Extract session cookie for daemon fix
+  ansible.builtin.set_fact:
+    _fix_session: "{{ _fix_login.set_cookie | regex_search('session_id=[^;]+') }}"
+  when: _fix_login is not skipped and _fix_login.status == 200
+  tags:
+    - configure
+    - verify
+
+- name: List current daemons
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons"
+    method: GET
+    headers:
+      Cookie: "{{ _fix_session }}"
+    status_code: [200]
+    return_content: true
+  register: _fix_daemons_list
+  when: _fix_session is defined
+  tags:
+    - configure
+    - verify
+
+- name: Identify daemons stuck in server_poll mode
+  ansible.builtin.set_fact:
+    _bad_daemon_ids: >-
+      {{ (_fix_daemons_list.content | from_json).data
+         | selectattr('mode', 'equalto', 'server_poll')
+         | map(attribute='id')
+         | list }}
+  when: _fix_daemons_list is not skipped and _fix_daemons_list.status == 200
+  tags:
+    - configure
+    - verify
+
+- name: Delete daemons stuck in server_poll mode
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons/{{ item }}"
+    method: DELETE
+    headers:
+      Cookie: "{{ _fix_session }}"
+    status_code: [200, 204, 404]
+  loop: "{{ _bad_daemon_ids | default([]) }}"
+  when: _bad_daemon_ids | default([]) | length > 0
+  tags:
+    - configure
+    - verify
+
+- name: Restart daemon container to re-register as DaemonPoll
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate daemon
+    chdir: "{{ scanopy_base_path }}"
+  when: _bad_daemon_ids | default([]) | length > 0
+  changed_when: true
+  tags:
+    - configure
+    - verify
+
+- name: Wait for daemon to register after mode fix
+  ansible.builtin.pause:
+    seconds: 15
+  when: _bad_daemon_ids | default([]) | length > 0
+  tags:
+    - configure
+    - verify
+
+# ---------------------------------------------------------------------------
+# Verify Daemon Registration
+# ---------------------------------------------------------------------------
+- name: Wait for daemon to be reachable
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_daemon_port }}/api/health"
+    method: GET
+    status_code: [200, 401]
+  register: _daemon_check
+  failed_when: false
+  retries: 12
+  delay: 10
+  until: _daemon_check.status is defined and _daemon_check.status in [200, 401]
+  tags:
+    - verify
+
+- name: Verify daemon mode is daemon_poll
+  ansible.builtin.uri:
+    url: "http://localhost:{{ scanopy_server_port }}/api/v1/daemons"
+    method: GET
+    headers:
+      Cookie: "{{ _fix_session }}"
+    status_code: [200]
+    return_content: true
+  register: _verify_daemons
+  when: _fix_session is defined
+  tags:
+    - verify
+
+- name: Display daemon status
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Daemon registered as ' ~ ((_verify_daemons.content | from_json).data[0].mode | default('unknown'))
+         ~ ' on port ' ~ scanopy_daemon_port ~ '.'
+         if (_verify_daemons is not skipped and (_verify_daemons.content | from_json).data | length > 0)
+         else 'Daemon responding on port ' ~ scanopy_daemon_port ~ '.'
+         if (_daemon_check.status | default(0) in [200, 401])
+         else 'WARNING: Daemon not responding on port ' ~ scanopy_daemon_port ~ '. '
+              ~ 'Check: docker compose -f ' ~ scanopy_base_path ~ '/docker-compose.yml logs daemon' }}
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# NetBox Sync Automation (Scanopy → NetBox daily cron)
+# ---------------------------------------------------------------------------
+# Deploys the scanopy-netbox-sync.py script and a cron job that syncs
+# discovered hosts from Scanopy into NetBox daily. Credentials are
+# pre-baked into an env file at deploy time (from Vault via playbook
+# pre_tasks). The cron wrapper sources the env file before running.
+#
+# Requires: scanopy_netbox_sync_enabled=true, scanopy_netbox_sync_url,
+#           scanopy_netbox_sync_token (set by playbook)
+# ---------------------------------------------------------------------------
+- name: Install pynetbox for NetBox sync script
+  ansible.builtin.pip:
+    name: pynetbox
+    state: present
+    extra_args: --break-system-packages
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Create sync scripts directory
+  ansible.builtin.file:
+    path: "{{ scanopy_base_path }}/scripts"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Deploy scanopy-netbox-sync.py script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/scanopy-netbox-sync.py"
+    dest: "{{ scanopy_base_path }}/scripts/scanopy-netbox-sync.py"
+    owner: root
+    group: root
+    mode: "0755"
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Template NetBox sync credentials env file
+  ansible.builtin.template:
+    src: netbox-sync.env.j2
+    dest: "{{ scanopy_base_path }}/config/netbox-sync.env"
+    owner: root
+    group: root
+    mode: "0600"
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  no_log: true
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Deploy NetBox sync wrapper script
+  ansible.builtin.template:
+    src: scanopy-netbox-sync.sh.j2
+    dest: "{{ scanopy_base_path }}/scripts/scanopy-netbox-sync.sh"
+    owner: root
+    group: root
+    mode: "0750"
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Create NetBox sync log file
+  ansible.builtin.file:
+    path: /var/log/scanopy-netbox-sync.log
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  when: scanopy_netbox_sync_enabled | default(false) | bool
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Create NetBox sync cron job
+  ansible.builtin.cron:
+    name: "scanopy-netbox-sync"
+    minute: "{{ scanopy_netbox_sync_cron_minute }}"
+    hour: "{{ scanopy_netbox_sync_cron_hour }}"
+    job: "{{ scanopy_base_path }}/scripts/scanopy-netbox-sync.sh >> /var/log/scanopy-netbox-sync.log 2>&1"
+    user: root
+    state: "{{ 'present' if (scanopy_netbox_sync_enabled | default(false) | bool) else 'absent' }}"
+  tags:
+    - scanopy
+    - netbox-sync
+
+- name: Remove NetBox sync cron job when disabled
+  ansible.builtin.cron:
+    name: "scanopy-netbox-sync"
+    state: absent
+  when: not (scanopy_netbox_sync_enabled | default(false) | bool)
+  tags:
+    - scanopy
+    - netbox-sync

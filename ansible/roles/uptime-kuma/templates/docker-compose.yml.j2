@@ -1,0 +1,19 @@
+# =============================================================================
+# Uptime Kuma Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  uptime-kuma:
+    image: {{ uptime_kuma_image }}
+    container_name: uptime-kuma
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ uptime_kuma_port }}:3001"
+    volumes:
+      - {{ uptime_kuma_data_dir }}:/app/data

@@ -1,0 +1,67 @@
+---
+# =============================================================================
+# AI GPU Guest VM — Default Variables
+# =============================================================================
+# ROCm-enabled AI/ML workloads: Ollama, Open WebUI, n8n.
+# Requires AMD GPU passed through via PCI passthrough (hostpci).
+# =============================================================================
+
+# Install directory for Docker services
+ai_gpu_install_dir: /opt/ai-gpu
+
+# Service ports
+ai_gpu_ollama_port: 11434
+ai_gpu_openwebui_port: 3000
+ai_gpu_n8n_port: 5678
+
+# Docker image versions (pinned for reproducibility)
+# Renovate tracks these via customManagers regex (Pattern A — full image:tag)
+ai_gpu_ollama_image: "ollama/ollama:0.16.3-rocm"
+ai_gpu_openwebui_image: "ghcr.io/open-webui/open-webui:v0.8.3"
+ai_gpu_n8n_image: "n8nio/n8n:1.123.21"
+
+# ---------------------------------------------------------------------------
+# Data Disk — Ollama models + future large datasets
+# ---------------------------------------------------------------------------
+# Terraform creates an additional disk (scsi1) on the VM. Ansible handles
+# formatting, mounting, and fstab persistence. The disk device is auto-
+# detected by scanning for unformatted/unmounted block devices > 50GB.
+# ---------------------------------------------------------------------------
+ai_gpu_data_disk_device: /dev/sdb
+ai_gpu_data_disk_label: ai-gpu-data
+ai_gpu_data_disk_mount: /mnt/data
+ai_gpu_data_disk_fstype: ext4
+ai_gpu_data_disk_opts: "defaults,nofail"
+
+# Data directory for Ollama models (on the data disk)
+ai_gpu_ollama_data: "{{ ai_gpu_data_disk_mount }}/ollama"
+
+# ROCm version — pinned for reproducibility
+# https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager/package-manager-ubuntu.html
+ai_gpu_rocm_version: "7.2"
+
+# ROCm target GPU architecture (RDNA 3 = gfx1100 family)
+# Used by ROCm to compile kernels for the specific GPU.
+# RX 7800 XT (Navi 32) = gfx1101
+ai_gpu_rocm_target: "gfx1101"
+
+# ---------------------------------------------------------------------------
+# Open WebUI — OIDC SSO via Authentik
+# ---------------------------------------------------------------------------
+# Set by playbook pre_tasks from Vault (services/openwebui/oidc).
+# First user to sign in becomes admin.
+# ---------------------------------------------------------------------------
+ai_gpu_openwebui_oidc_enabled: false
+ai_gpu_openwebui_oidc_provider_url: ""
+ai_gpu_openwebui_oidc_client_id: ""
+ai_gpu_openwebui_oidc_client_secret: ""
+ai_gpu_openwebui_url: "https://openwebui.home.example-lab.org"
+ai_gpu_openwebui_secret_key: ""
+
+# ---------------------------------------------------------------------------
+# n8n — Encryption key
+# ---------------------------------------------------------------------------
+# n8n encrypts stored credentials with this key. Must be stable across
+# container recreations. Set by playbook pre_tasks from Vault (services/n8n).
+# ---------------------------------------------------------------------------
+ai_gpu_n8n_encryption_key: ""

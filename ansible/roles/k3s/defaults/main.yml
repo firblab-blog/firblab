@@ -1,0 +1,53 @@
+---
+# =============================================================================
+# K3s Role Defaults
+# =============================================================================
+# These are overridden by group_vars/k3s_cluster.yml in production.
+# K3s is the lightweight Kubernetes distro for the RPi5 bare-metal cluster.
+# =============================================================================
+
+# renovate: datasource=github-releases depName=k3s-io/k3s versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)\+k3s(?<build>\d+)$
+k3s_version: "v1.32.11+k3s1"
+
+k3s_cluster_cidr: "10.44.0.0/16"
+k3s_service_cidr: "10.45.0.0/16"
+k3s_cluster_dns: "10.45.0.10"
+
+k3s_init_node: "k3s-server-1"
+k3s_init_node_ip: "10.0.20.60"
+k3s_server_url: "https://10.0.20.60:6443"
+
+k3s_tls_san: []
+k3s_disable: []
+
+k3s_flannel_backend: "vxlan"
+
+k3s_kube_apiserver_args: []
+k3s_kubelet_args: []
+
+k3s_sysctl: {}
+k3s_kernel_modules: []
+
+k3s_create_etcd_user: true
+
+# CIS-adjacent hardening (K3s has no profile: "cis" one-liner like RKE2)
+k3s_protect_kernel_defaults: true
+k3s_secrets_encryption: true
+
+# Install method: script (internet-connected)
+k3s_install_method: "script"
+
+# Paths (K3s defaults — differ from RKE2)
+k3s_config_dir: "/etc/rancher/k3s"
+k3s_data_dir: "/var/lib/rancher/k3s"
+k3s_bin_dir: "/usr/local/bin"
+
+# ---------------------------------------------------------------------------
+# CoreDNS Custom Zones
+# ---------------------------------------------------------------------------
+# Same pattern as RKE2 — dedicated CoreDNS server blocks for internal DNS.
+# K3s uses the same HelmChartConfig mechanism via the server manifests dir.
+k3s_coredns_custom_zones: []
+
+# Default zone cache TTL (seconds) — the catch-all "." server block
+k3s_coredns_default_cache_ttl: 30

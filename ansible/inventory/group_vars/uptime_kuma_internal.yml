@@ -1,0 +1,121 @@
+---
+# =============================================================================
+# Uptime Kuma Internal Configuration
+# =============================================================================
+# Group variables for the internal Uptime Kuma LXC on lab-03 (Management
+# VLAN 10, 10.0.10.19). Monitors all homelab services: Vault cluster,
+# Proxmox nodes, and *.home.example-lab.org Traefik-proxied services.
+#
+# Paired with the public Uptime Kuma on the Hetzner gateway which monitors
+# *.example-lab.org (public-facing services only).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# Port 3001: Uptime Kuma web UI — Traefik proxy (10.0.10.17) + admin.
+uptime_kuma_internal_firewall_ports:
+  - { port: "3001", proto: tcp, comment: "Uptime Kuma web UI (Traefik proxy + admin)" }
+
+uptime_kuma_internal_firewall_sources:
+  - "{{ management_network }}"          # VLAN 10 — Traefik proxy, admin access
+  - "{{ lan_network }}"                 # VLAN 1  — Jordan's workstation
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ uptime_kuma_internal_firewall_ports }}"
+firewall_additional_sources: "{{ uptime_kuma_internal_firewall_sources }}"
+
+# Docker networking — Docker manages its own iptables for container → host routing.
+# UFW allow-from rules above cover host-level access to port 3001.
+firewall_docker_forwarding: false
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "monitoring-infra"
+
+# ---------------------------------------------------------------------------
+# Uptime Kuma Monitor Definitions
+# ---------------------------------------------------------------------------
+# Consumed by uptime-kuma-internal-deploy.yml (configure-uptime-kuma.py).
+# type options: http, port, ping
+#   NOTE: "port" is the Uptime Kuma Socket.IO API name for TCP port checks.
+# Adding a monitor: add one entry here, run uptime-kuma-internal-deploy.yml
+#   --tags uptime-kuma
+# ---------------------------------------------------------------------------
+uptime_kuma_monitors:
+
+  # ---- Authentik SSO -------------------------------------------------------
+  - name: "Authentik"
+    type: http
+    url: "https://auth.home.example-lab.org"
+
+  # ---- Core Infrastructure -------------------------------------------------
+  - name: "GitLab"
+    type: http
+    url: "https://gitlab.home.example-lab.org"
+
+  - name: "GitLab SSH"
+    type: port
+    hostname: "10.0.10.50"
+    port: 22
+
+  - name: "PatchMon"
+    type: http
+    url: "https://patchmon.home.example-lab.org"
+
+  - name: "Backrest"
+    type: http
+    url: "https://backrest.home.example-lab.org"
+
+  - name: "NetBox"
+    type: http
+    url: "https://netbox.home.example-lab.org"
+
+  - name: "ArgoCD"
+    type: http
+    url: "https://argocd.home.example-lab.org"
+
+  # ---- Vault Cluster -------------------------------------------------------
+  # Port checks (not HTTP) — Vault's HTTPS cert is self-signed by internal CA.
+  # TCP reachability is sufficient to confirm service health.
+  - name: "Vault-1 (Mac Mini)"
+    type: port
+    hostname: "10.0.10.10"
+    port: 8200
+
+  - name: "Vault-2 (lab-02)"
+    type: port
+    hostname: "10.0.50.2"
+    port: 8200
+
+  - name: "Vault-3 (RPi5)"
+    type: port
+    hostname: "10.0.10.13"
+    port: 8200
+
+  # ---- Proxmox Nodes -------------------------------------------------------
+  # ignore_tls: true — Proxmox uses self-signed certs.
+  - name: "Proxmox-01 (lab-01)"
+    type: http
+    url: "https://10.0.10.42:8006"
+    ignore_tls: true
+
+  - name: "Proxmox-02 (lab-02)"
+    type: http
+    url: "https://10.0.10.2:8006"
+    ignore_tls: true
+
+  - name: "Proxmox-03 (lab-03)"
+    type: http
+    url: "https://10.0.10.3:8006"
+    ignore_tls: true
+
+  # ---- Standalone Services -------------------------------------------------
+  - name: "Vaultwarden"
+    type: http
+    url: "https://vaultwarden.home.example-lab.org"
+
+  - name: "Open WebUI"
+    type: http
+    url: "https://openwebui.home.example-lab.org"

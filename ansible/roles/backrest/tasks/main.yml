@@ -1,0 +1,303 @@
+---
+# =============================================================================
+# Backrest — Installation and Configuration
+# =============================================================================
+# Deploys the Backrest web UI for monitoring Restic backup repositories.
+# Runs as a systemd service bound to 127.0.0.1 (localhost only).
+#
+# Backrest connects to local filesystem repos (bind-mounted from the host's
+# hdd-mirror-0 ZFS pool) for read-only browsing, health verification, and
+# file restoration.
+#
+# No plans or hooks are configured — Backrest is read-only monitoring.
+# Backup orchestration remains with the per-host restic-backup cron scripts.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Step 1: Create service user
+# ---------------------------------------------------------------------------
+# When backrest_user == restic (the default for this deployment), the restic
+# group/user already exist from the restic-server role. We still run these
+# tasks — group/user with state:present are idempotent. We omit `home:` to
+# avoid clobbering the restic user's existing home directory.
+- name: Create backrest group
+  ansible.builtin.group:
+    name: "{{ backrest_group }}"
+    system: true
+    state: present
+  tags: [backrest]
+
+- name: Create backrest user
+  ansible.builtin.user:
+    name: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    comment: "Backrest monitoring service account"
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 2: Install Backrest binary
+# ---------------------------------------------------------------------------
+- name: Check if Backrest is already installed
+  ansible.builtin.stat:
+    path: "{{ backrest_binary }}"
+  register: backrest_binary_stat
+  tags: [backrest]
+
+- name: Check Backrest version (if installed)
+  ansible.builtin.command:
+    cmd: "{{ backrest_binary }} --help"
+  register: backrest_version_check
+  changed_when: false
+  failed_when: false
+  timeout: 5
+  when: backrest_binary_stat.stat.exists
+  tags: [backrest]
+
+- name: Download Backrest binary
+  ansible.builtin.get_url:
+    url: "https://github.com/garethgeorge/backrest/releases/download/v{{ backrest_version }}/backrest_Linux_{{ backrest_arch }}.tar.gz"
+    dest: "/tmp/backrest-{{ backrest_version }}.tar.gz"
+    mode: "0644"
+  when: not backrest_binary_stat.stat.exists
+  tags: [backrest]
+
+- name: Extract Backrest binary
+  ansible.builtin.unarchive:
+    src: "/tmp/backrest-{{ backrest_version }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+  when: not backrest_binary_stat.stat.exists
+  tags: [backrest]
+
+- name: Install Backrest binary
+  ansible.builtin.copy:
+    src: /tmp/backrest
+    dest: "{{ backrest_binary }}"
+    mode: "0755"
+    remote_src: true
+  when: not backrest_binary_stat.stat.exists
+  notify: restart backrest
+  tags: [backrest]
+
+- name: Clean up Backrest download artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/backrest-{{ backrest_version }}.tar.gz"
+    - /tmp/backrest
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 3: Create directories
+# ---------------------------------------------------------------------------
+- name: Create Backrest config directory
+  ansible.builtin.file:
+    path: "{{ backrest_config_dir }}"
+    state: directory
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    mode: "0750"
+  tags: [backrest]
+
+- name: Create Backrest data directory
+  ansible.builtin.file:
+    path: "{{ backrest_data_dir }}"
+    state: directory
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    mode: "0750"
+  tags: [backrest]
+
+- name: Create Backrest cache directory
+  ansible.builtin.file:
+    path: "{{ backrest_cache_dir }}"
+    state: directory
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    mode: "0750"
+  tags: [backrest]
+
+# Recursively chown all files inside the data and config dirs.
+# Required when the service user changes (e.g. backrest → restic): the
+# directory tasks above only set ownership on the directory itself, not
+# pre-existing files inside it.
+- name: Ensure backrest data directory contents owned by service user
+  ansible.builtin.file:
+    path: "{{ backrest_data_dir }}"
+    state: directory
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    recurse: true
+  tags: [backrest]
+
+- name: Ensure backrest config directory contents owned by service user
+  ansible.builtin.file:
+    path: "{{ backrest_config_dir }}"
+    state: directory
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    recurse: true
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 3.5: Install restic binary (required for repo discovery below)
+# ---------------------------------------------------------------------------
+# Must run BEFORE repo discovery — discovery uses `restic cat config` to read
+# repo GUIDs. If restic isn't installed yet, discovery silently fails and
+# config.json is deployed with an empty repos list.
+- name: Check if restic is already installed
+  ansible.builtin.command:
+    cmd: /usr/local/bin/restic version
+  register: restic_binary_check
+  changed_when: false
+  failed_when: false
+  tags: [backrest]
+
+- name: Install bzip2 for restic binary extraction
+  ansible.builtin.apt:
+    name: bzip2
+    state: present
+    update_cache: true
+  when: restic_binary_check.rc != 0
+  tags: [backrest]
+
+- name: Download restic binary for Backrest
+  ansible.builtin.get_url:
+    url: "https://github.com/restic/restic/releases/download/v0.17.3/restic_0.17.3_linux_amd64.bz2"
+    dest: /tmp/restic.bz2
+    mode: "0644"
+  when: restic_binary_check.rc != 0
+  tags: [backrest]
+
+- name: Extract restic binary
+  ansible.builtin.shell:
+    cmd: bunzip2 -k /tmp/restic.bz2 && mv /tmp/restic /usr/local/bin/restic && chmod 0755 /usr/local/bin/restic
+    creates: /usr/local/bin/restic
+  when: restic_binary_check.rc != 0
+  tags: [backrest]
+
+- name: Clean up restic download
+  ansible.builtin.file:
+    path: /tmp/restic.bz2
+    state: absent
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 4: Discover initialized repos and their GUIDs
+# ---------------------------------------------------------------------------
+# Backrest requires a GUID for every repo in config.json. GUIDs are assigned
+# by restic when a repo is initialized (first backup). Rather than hardcoding
+# GUIDs, we auto-discover them: check which candidate repos have been
+# initialized (have a 'config' file), read the GUID from each, and build
+# the list dynamically. Uninitialized repos are silently skipped.
+- name: Check which candidate repos are initialized
+  ansible.builtin.stat:
+    path: "{{ item.path }}/config"
+  loop: "{{ backrest_repos }}"
+  loop_control:
+    label: "{{ item.id }}"
+  register: backrest_repo_config_checks
+  tags: [backrest]
+
+- name: Read GUIDs from initialized repos
+  ansible.builtin.command:
+    cmd: "restic -r {{ item.item.path }} cat config --no-lock"
+  environment:
+    RESTIC_PASSWORD: "{{ restic_repo_password }}"
+  register: backrest_repo_guid_results
+  changed_when: false
+  failed_when: false
+  timeout: 15
+  loop: "{{ backrest_repo_config_checks.results | selectattr('stat.exists', 'true') | list }}"
+  loop_control:
+    label: "{{ item.item.id }}"
+  no_log: true
+  tags: [backrest]
+
+- name: Initialize discovered repos list
+  ansible.builtin.set_fact:
+    backrest_discovered_repos: []
+  tags: [backrest]
+
+- name: Build discovered repos list with GUIDs
+  ansible.builtin.set_fact:
+    backrest_discovered_repos: "{{ backrest_discovered_repos + [{'id': item.item.item.id, 'path': item.item.item.path, 'guid': (item.stdout | from_json).id}] }}"
+  loop: "{{ backrest_repo_guid_results.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.item.id | default('unknown') }}"
+  when:
+    - item.rc is defined
+    - item.rc == 0
+    - item.stdout | default('') | length > 0
+  no_log: true
+  tags: [backrest]
+
+- name: Display discovered repos
+  ansible.builtin.debug:
+    msg: "Backrest will monitor {{ backrest_discovered_repos | length }} initialized repo(s): {{ backrest_discovered_repos | map(attribute='id') | join(', ') | default('none') }}"
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 5: Deploy configuration
+# ---------------------------------------------------------------------------
+# config.json is templated by Ansible from Vault secrets. It contains repo
+# passwords and auth credentials — permissions are locked to 0600.
+# Uses backrest_discovered_repos (auto-discovered GUIDs) — not backrest_repos.
+- name: Deploy Backrest configuration
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ backrest_config_file }}"
+    owner: "{{ backrest_user }}"
+    group: "{{ backrest_group }}"
+    mode: "0600"
+  notify: restart backrest
+  no_log: true
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 6: Deploy systemd service
+# ---------------------------------------------------------------------------
+- name: Deploy Backrest systemd unit
+  ansible.builtin.template:
+    src: backrest.service.j2
+    dest: /etc/systemd/system/backrest.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart backrest
+  tags: [backrest]
+
+- name: Enable and start Backrest
+  ansible.builtin.systemd:
+    name: backrest
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [backrest]
+
+# ---------------------------------------------------------------------------
+# Step 7: Verify
+# ---------------------------------------------------------------------------
+- name: Verify Backrest is listening
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ backrest_port }}"
+    timeout: 30
+  tags: [backrest, verify]
+
+- name: Display Backrest configuration
+  ansible.builtin.debug:
+    msg:
+      - "Backrest monitoring UI configured on {{ inventory_hostname }}"
+      - "Listen: {{ backrest_listen }} (localhost only — use SSH tunnel)"
+      - "Config: {{ backrest_config_file }}"
+      - "Data: {{ backrest_data_dir }}"
+      - "Repos monitored: {{ backrest_discovered_repos | map(attribute='id') | join(', ') | default('none (no initialized repos found)') }}"
+      - ""
+      - "Access: ssh -L 9898:127.0.0.1:9898 root@{{ ansible_host }}"
+      - "Then open: http://localhost:9898"
+  tags: [backrest, verify]

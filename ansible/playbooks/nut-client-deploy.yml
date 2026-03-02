@@ -1,0 +1,134 @@
+---
+# =============================================================================
+# NUT Client Deployment Playbook
+# =============================================================================
+# Deploys NUT in netclient mode on UPS-protected hosts for coordinated
+# shutdown. When the UPS battery hits LOWBATT, the NUT master (lab-08)
+# signals FSD — these secondary clients shut down first, then the master
+# shuts down last and commands the UPS to cut power.
+#
+# Power topology:
+#   UPS (closet rack): lab-01, lab-04, TrueNAS, closet switch, lab-08
+#   Wall power (minilab): lab-02, lab-03, Mac Mini, vault-3
+#
+# NUT server: lab-08 (10.0.4.20:3493, VLAN 1)
+# NUT clients: lab-01, lab-04 (VLAN 10 → VLAN 1, zone policy allows)
+#
+# Prerequisites:
+#   - lab-08 already running NUT netserver (lab-08-deploy.yml)
+#   - NUT secrets exist in Vault: secret/services/nut
+#   - SSH keys for target hosts available
+#   - Vault CLI configured: VAULT_ADDR, VAULT_TOKEN, VAULT_CACERT
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/nut-client-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags install    # Only install packages
+#   ansible-playbook ... --tags configure  # Only write config files
+#   ansible-playbook ... --tags service    # Only manage services
+#   ansible-playbook ... --tags verify     # Only run health checks
+# =============================================================================
+
+- name: Deploy NUT clients for coordinated UPS shutdown
+  hosts: ups_clients
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    nut_mode: netclient
+    nut_server_host: "10.0.4.20"
+    nut_server_ups_name: "ups"
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # NUT Secret Management: Read monitor password from Vault
+    # -----------------------------------------------------------------
+    # The monitor password must match what's configured on the NUT server
+    # (lab-08). It was generated during lab-08-deploy.yml and
+    # stored at secret/services/nut.
+    # -----------------------------------------------------------------
+    - name: Read NUT secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/nut
+      register: vault_nut_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: nut_monitor_password is not defined
+      tags:
+        - always
+
+    - name: Set NUT monitor password from Vault
+      ansible.builtin.set_fact:
+        nut_monitor_password: "{{ (vault_nut_read.stdout | from_json).data.data.monitor_password }}"
+      when:
+        - nut_monitor_password is not defined
+        - vault_nut_read.rc is defined
+        - vault_nut_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate NUT monitor password is available
+      ansible.builtin.assert:
+        that:
+          - nut_monitor_password is defined
+          - nut_monitor_password | length > 0
+        fail_msg: >
+          NUT monitor password not available. This password must match the
+          NUT server (lab-08). Check Vault:
+            export VAULT_ADDR=https://10.0.10.10:8200
+            export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+            vault kv get -mount=secret -field=monitor_password services/nut
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying NUT client on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, mode=netclient,
+          server={{ nut_server_host }}, ups={{ nut_server_ups_name }})
+
+  roles:
+    - role: nut
+      tags:
+        - nut
+
+  post_tasks:
+    - name: Display NUT client deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "NUT Client Deployed: {{ inventory_hostname }}"
+          - "=========================================="
+          - "Mode:       netclient (secondary)"
+          - "Server:     {{ nut_server_ups_name }}@{{ nut_server_host }}:3493"
+          - "Action:     Graceful shutdown on FSD signal"
+          - ""
+          - "Verify:"
+          - "  upsc {{ nut_server_ups_name }}@{{ nut_server_host }}"
+          - "  systemctl status nut-monitor"
+          - ""
+          - "Shutdown sequence (on LOWBATT):"
+          - "  1. Master (lab-08) signals FSD"
+          - "  2. Secondary clients (this host) shut down"
+          - "  3. Master waits HOSTSYNC seconds, then shuts down"
+          - "  4. UPS cuts power after FINALDELAY"
+          - "=========================================="
+      tags:
+        - verify

@@ -1,0 +1,80 @@
+---
+# =============================================================================
+# K3s CIS Hardening Configuration
+# =============================================================================
+# Deploys CIS Benchmark configuration files BEFORE K3s starts.
+# K3s does not have RKE2's `profile: "cis"` one-liner — these controls are
+# applied via explicit config flags and pre-deployed config files.
+#
+# Reuses the same audit policy and encryption config templates from the RKE2
+# role (identical Kubernetes API server configuration).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Audit Policy (DISA STIG V-242402, V-242403)
+# ---------------------------------------------------------------------------
+- name: Deploy API server audit policy
+  ansible.builtin.template:
+    src: audit-policy.yaml.j2
+    dest: "{{ k3s_config_dir }}/audit-policy.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - hardening
+    - audit
+
+# ---------------------------------------------------------------------------
+# Secrets Encryption at Rest (DISA STIG V-242450)
+# ---------------------------------------------------------------------------
+- name: Generate encryption key if not provided
+  ansible.builtin.set_fact:
+    k3s_encryption_key: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) | b64encode }}"
+  when:
+    - k3s_encryption_key is not defined
+    - k3s_role == "server"
+  no_log: true
+  run_once: true
+  tags:
+    - hardening
+
+- name: Deploy secrets encryption config
+  ansible.builtin.template:
+    src: encryption-config.yaml.j2
+    dest: "{{ k3s_config_dir }}/encryption-config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  when: k3s_role == "server"
+  tags:
+    - hardening
+
+# ---------------------------------------------------------------------------
+# CIS Sysctl Config
+# ---------------------------------------------------------------------------
+- name: Deploy K3s CIS sysctl config
+  ansible.builtin.template:
+    src: k3s-cis-sysctl.conf.j2
+    dest: /etc/sysctl.d/60-k3s-cis.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload sysctl
+  tags:
+    - hardening
+    - sysctl
+
+# ---------------------------------------------------------------------------
+# Audit Log Directory
+# ---------------------------------------------------------------------------
+- name: Create audit log directory
+  ansible.builtin.file:
+    path: "{{ k3s_data_dir }}/server/logs"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: k3s_role == "server"
+  tags:
+    - hardening
+    - audit

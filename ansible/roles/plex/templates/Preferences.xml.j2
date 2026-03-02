@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  =============================================================================
+  Plex Media Server Preferences
+  =============================================================================
+  Managed by Ansible - DO NOT EDIT MANUALLY
+  Host: {{ inventory_hostname }}
+  Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+  =============================================================================
+-->
+<Preferences
+  AcceptedEULA="1"
+  ProcessedMachineIdentifier="{{ ansible_machine_id | default('') }}"
+  PublishServerOnPlexOnlineKey="1"
+  PlexOnlineToken="{{ plex_claim_token | default('') }}"
+  SendCrashReports="0"
+  LogLevel="{{ plex_log_level | default('1') }}"
+  EnableIPv6="0"
+  LanNetworksBandwidth="{{ plex_allowed_networks | default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']) | join(',') }}"
+  TranscoderTempDirectory="{{ plex_transcoder_temp_dir | default('/tmp/plex_transcoder') }}"
+  TranscoderH264BackgroundPreset="fast"
+  MaxSimultaneousTranscodes="{{ plex_max_transcode_sessions | default('3') }}"
+  ScheduledLibraryUpdateInterval="1800"
+  ButlerTaskRefreshLibraries="1"
+  ButlerTaskOptimizeDatabase="1"
+  FSEventLibraryUpdatesEnabled="1"
+  allowedNetworks="{{ plex_allowed_networks | default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']) | join(',') }}"
+  ManualPortMappingPort="{{ plex_port | default('32400') }}"
+  secureConnections="1"
+  GdmEnabled="1"
+  RelayEnabled="1"
+  allowMediaDeletion="{{ plex_allow_media_deletion | default('0') }}"
+/>

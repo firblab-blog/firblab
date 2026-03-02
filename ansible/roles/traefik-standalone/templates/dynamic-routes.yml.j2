@@ -1,0 +1,109 @@
+# =============================================================================
+# Traefik v3 Dynamic Routes — FirbLab Standalone Proxy
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+#
+# Generated from traefik_backends map. Each backend gets:
+#   - A router (Host rule + TLS)
+#   - A service (backend URL)
+#   - Optional ForwardAuth middleware (Authentik)
+#   - Optional insecure transport (for self-signed backends like PBS)
+# =============================================================================
+
+http:
+
+  # ---------------------------------------------------------------
+  # Middlewares
+  # ---------------------------------------------------------------
+  middlewares:
+    # Default security headers for all proxied services
+    default-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        frameDeny: false
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet"
+
+    # Authentik ForwardAuth — single sign-on for services without native OIDC.
+    # Traefik sends a subrequest to Authentik; if the user is not authenticated,
+    # Authentik redirects to its login page. On success, Authentik sets headers
+    # with user identity (X-authentik-username, etc.).
+    authentik-forwardauth:
+      forwardAuth:
+        address: "{{ traefik_authentik_url }}/outpost.goauthentik.io/auth/traefik"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - X-authentik-username
+          - X-authentik-groups
+          - X-authentik-entitlements
+          - X-authentik-email
+          - X-authentik-name
+          - X-authentik-uid
+
+{% for name, svc in traefik_backends.items() %}
+{% if svc.custom_response_headers is defined and svc.custom_response_headers %}
+    # Per-service custom headers for {{ name }}
+    {{ name }}-headers:
+      headers:
+        customResponseHeaders:
+{% for header, value in svc.custom_response_headers.items() %}
+          {{ header }}: {{ value }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+  # ---------------------------------------------------------------
+  # Routers
+  # ---------------------------------------------------------------
+  routers:
+{% for name, svc in traefik_backends.items() %}
+    {{ name }}:
+{% set all_subdomains = [svc.subdomain] + (svc.aliases | default([])) %}
+      rule: "{% for sub in all_subdomains %}Host(`{{ sub }}.{{ traefik_domain }}`){% if not loop.last %} || {% endif %}{% endfor %}"
+      entryPoints:
+        - websecure
+      service: {{ name }}
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - default-headers
+{% if svc.forwardauth %}
+        - authentik-forwardauth
+{% endif %}
+{% if svc.custom_response_headers is defined and svc.custom_response_headers %}
+        - {{ name }}-headers
+{% endif %}
+
+{% endfor %}
+
+  # ---------------------------------------------------------------
+  # Services
+  # ---------------------------------------------------------------
+  services:
+{% for name, svc in traefik_backends.items() %}
+    {{ name }}:
+      loadBalancer:
+        servers:
+          - url: "{{ svc.backend_url }}"
+{% if svc.insecure_backend | default(false) %}
+        serversTransport: insecure-transport
+{% endif %}
+{% if svc.websocket | default(false) %}
+        passHostHeader: true
+{% endif %}
+
+{% endfor %}
+
+{% if traefik_backends.values() | selectattr('insecure_backend', 'defined') | selectattr('insecure_backend') | list | length > 0 %}
+  # ---------------------------------------------------------------
+  # Transports (for self-signed backend certificates)
+  # ---------------------------------------------------------------
+  serversTransports:
+    insecure-transport:
+      insecureSkipVerify: true
+{% endif %}

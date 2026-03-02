@@ -1,0 +1,110 @@
+# =============================================================================
+# NetworkPolicies — gitlab-agent namespace
+# =============================================================================
+# GitLab Agent (agentk) needs:
+#   Ingress: Prometheus (metrics port 8080)
+#   Egress: DNS, K8s API (cluster management), GitLab (tunnel + API)
+# =============================================================================
+
+# --- Default deny -----------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+# --- Ingress from Prometheus ------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-ingress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080
+
+# --- Egress: DNS ------------------------------------------------------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+# --- Egress: K8s API --------------------------------------------------------
+# Canal DNAT: kube-proxy rewrites ClusterIP (10.43.0.1:443) to node IP:6443
+# before Calico filter rules fire. Target the node CIDR + real port.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.0/24   # RKE2 node CIDR (post-DNAT destination)
+      ports:
+        - port: 6443                  # kube-apiserver port (post-DNAT)
+
+# --- Egress: GitLab ---------------------------------------------------------
+# Agent maintains a persistent bidirectional tunnel to GitLab.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gitlab-egress
+  namespace: gitlab-agent
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.50/32
+      ports:
+        - port: 443
+        - port: 80

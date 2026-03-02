@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# Proxmox GPU Passthrough — Host Preparation Defaults
+# =============================================================================
+# Applied to Proxmox hypervisor nodes to configure IOMMU + VFIO for PCI
+# device passthrough (GPU, NIC, etc.). Requires a host REBOOT after first run.
+#
+# AMD RDNA 3 (Navi 32/33) GPUs have a known hardware-level reset bug:
+#   - No Function-Level Reset (FLR) support
+#   - GPU enters D3cold after VM shutdown and cannot wake up
+#   - PCI config space reads as corrupt → QEMU pci_irq_handler assertion crash
+# This role applies all known workarounds: softdep ordering, D3cold prevention,
+# framebuffer blacklisting, and VFIO early binding via initramfs.
+# =============================================================================
+
+# IOMMU type: "intel" for Intel CPUs, "amd" for AMD CPUs.
+# Sets kernel parameter: intel_iommu=on iommu=pt (or amd_iommu=on iommu=pt)
+gpu_iommu_type: intel
+
+# PCI vendor:device IDs to bind to vfio-pci driver.
+# Find with: lspci -nn | grep VGA (or grep Audio for HDMI audio function)
+# Example: AMD RX 7800 XT (Navi 32) = 1002:747e (GPU) + 1002:ab30 (audio)
+gpu_vfio_device_ids:
+  - "1002:747e"
+  - "1002:ab30"
+
+# Kernel modules to blacklist (prevent host from claiming the GPU)
+gpu_blacklist_drivers:
+  - amdgpu
+  - radeon
+
+# ---------------------------------------------------------------------------
+# AMD RDNA 3 Workarounds
+# ---------------------------------------------------------------------------
+
+# Prevent GPU from entering D3cold (unrecoverable deep sleep).
+# When true, adds disable_idle_d3=1 to vfio-pci module options and creates
+# a udev rule to set d3cold_allowed=0 on the GPU at device add time.
+gpu_disable_d3cold: true
+
+# Prevent host framebuffer from posting the GPU at boot.
+# When true, adds initcall_blacklist=sysfb_init and video=efifb:off to the
+# kernel cmdline. The host uses the iGPU (i915) for console instead.
+gpu_prevent_host_framebuffer: true
+
+# Disable PCIe Active State Power Management (prevents low-power transitions
+# that can make the GPU unresettable). Also disables Advanced Error Reporting
+# to prevent error storms from failed PCI resets.
+gpu_disable_pcie_powermgmt: true

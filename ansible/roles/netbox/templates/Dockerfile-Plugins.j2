@@ -1,0 +1,24 @@
+# =============================================================================
+# NetBox Custom Image with Plugins
+# =============================================================================
+# Managed by Ansible - DO NOT EDIT MANUALLY
+# Extends the official NetBox Docker image with community plugins.
+# =============================================================================
+
+FROM netboxcommunity/netbox:{{ netbox_version }}
+
+# NetBox v4.5+ uses uv instead of pip. The venv is at /opt/netbox/venv
+# but pip binary is not installed — use /usr/local/bin/uv pip instead.
+
+# Install netbox-topology-views (confirmed NetBox 4.5 compatible)
+RUN /usr/local/bin/uv pip install netbox-topology-views=={{ netbox_topology_views_version }}
+
+{% if netbox_proxmox_importer_enabled %}
+# Install netbox-proxmox-importer (stated 4.4.x compat — may need patching for 4.5)
+# Installs from GitHub main branch since no PyPI package exists.
+RUN /usr/local/bin/uv pip install https://github.com/MindCollaps/Netbox-Proxmox-Importer/archive/refs/heads/main.zip || \
+    echo "WARNING: netbox-proxmox-importer failed to install. Continuing without it."
+{% endif %}
+
+# Copy plugin configuration
+COPY plugins.py /etc/netbox/config/plugins.py

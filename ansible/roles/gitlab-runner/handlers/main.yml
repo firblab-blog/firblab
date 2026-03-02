@@ -1,0 +1,14 @@
+---
+# =============================================================================
+# GitLab Runner Role - Handlers
+# =============================================================================
+
+- name: Restart gitlab-runner
+  ansible.builtin.systemd:
+    name: gitlab-runner
+    state: restarted
+
+- name: Reload gitlab-runner
+  ansible.builtin.systemd:
+    name: gitlab-runner
+    state: reloaded

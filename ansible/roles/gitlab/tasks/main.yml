@@ -1,0 +1,399 @@
+---
+# =============================================================================
+# GitLab Role - GitLab CE Installation and Configuration
+# =============================================================================
+# Installs GitLab CE from the official apt repository, templates the
+# gitlab.rb configuration, and runs reconfigure.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Data Disk Setup (scsi1 → /dev/sdb)
+# ---------------------------------------------------------------------------
+# Formats and mounts the data disk if present. GitLab stores git
+# repositories on this disk for storage tiering (OS on NVMe, data on HDD).
+# Uses LABEL-based fstab entries for stability across disk reorders.
+# ---------------------------------------------------------------------------
+- name: Check if data disk exists
+  ansible.builtin.stat:
+    path: /dev/sdb
+  register: data_disk
+  tags:
+    - install
+    - data_disk
+
+- name: Check if data disk has a filesystem
+  ansible.builtin.command:
+    cmd: blkid -o value -s TYPE /dev/sdb
+  register: data_disk_fs
+  changed_when: false
+  failed_when: false
+  when: data_disk.stat.exists
+  tags:
+    - install
+    - data_disk
+
+- name: Format data disk as ext4
+  ansible.builtin.command:
+    cmd: mkfs.ext4 -L gitlab-data /dev/sdb
+  when:
+    - data_disk.stat.exists
+    - data_disk_fs.rc != 0 or data_disk_fs.stdout == ""
+  tags:
+    - install
+    - data_disk
+
+- name: Create data disk mount point
+  ansible.builtin.file:
+    path: "{{ gitlab_data_mount_point }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: data_disk.stat.exists
+  tags:
+    - install
+    - data_disk
+
+- name: Mount data disk via fstab
+  ansible.posix.mount:
+    path: "{{ gitlab_data_mount_point }}"
+    src: "LABEL=gitlab-data"
+    fstype: ext4
+    opts: defaults,noatime
+    state: mounted
+  when: data_disk.stat.exists
+  tags:
+    - install
+    - data_disk
+
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+- name: Install GitLab prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - openssh-server
+      - ca-certificates
+      - tzdata
+      - perl
+      - postfix
+    state: present
+    update_cache: true
+  tags:
+    - install
+
+- name: Enable and start postfix for GitLab notifications
+  ansible.builtin.systemd:
+    name: postfix
+    enabled: true
+    state: started
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# GitLab Repository
+# ---------------------------------------------------------------------------
+- name: Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  tags:
+    - install
+
+- name: Download GitLab GPG key
+  ansible.builtin.get_url:
+    url: "https://packages.gitlab.com/gitlab/{{ gitlab_edition | default('gitlab-ce') }}/gpgkey"
+    dest: /tmp/gitlab-gpg-key
+    mode: "0644"
+    force: true
+  tags:
+    - install
+
+- name: Dearmor GitLab GPG key into keyring
+  ansible.builtin.command:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/gitlab-archive-keyring.gpg /tmp/gitlab-gpg-key
+  args:
+    creates: /etc/apt/keyrings/gitlab-archive-keyring.gpg
+  tags:
+    - install
+
+- name: Set GitLab keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/gitlab-archive-keyring.gpg
+    mode: "0644"
+  tags:
+    - install
+
+- name: Add GitLab apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/gitlab-archive-keyring.gpg]
+      https://packages.gitlab.com/gitlab/{{ gitlab_edition | default('gitlab-ce') }}/ubuntu/
+      {{ ansible_distribution_release }} main
+    state: present
+    filename: gitlab
+    update_cache: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Install GitLab CE
+# ---------------------------------------------------------------------------
+- name: Install GitLab CE package
+  ansible.builtin.apt:
+    name: "{{ gitlab_edition | default('gitlab-ce') }}={{ gitlab_version }}"
+    state: present
+  environment:
+    EXTERNAL_URL: "{{ gitlab_external_url }}"
+  register: gitlab_install_result
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Data Disk — Git Data Directory (after install, git user exists)
+# ---------------------------------------------------------------------------
+- name: Create GitLab git-data directory on data disk
+  ansible.builtin.file:
+    path: "{{ gitlab_git_data_dir }}"
+    state: directory
+    owner: git
+    group: git
+    mode: "0700"
+  when: data_disk.stat.exists
+  tags:
+    - install
+    - data_disk
+    - configure
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+- name: Ensure GitLab configuration directory exists
+  ansible.builtin.file:
+    path: /etc/gitlab
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - configure
+
+- name: Template GitLab configuration
+  ansible.builtin.template:
+    src: gitlab.rb.j2
+    dest: /etc/gitlab/gitlab.rb
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  notify: Reconfigure gitlab
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Initial Reconfigure (on fresh install)
+# ---------------------------------------------------------------------------
+- name: Run initial GitLab reconfigure
+  ansible.builtin.command:
+    cmd: gitlab-ctl reconfigure
+  when: gitlab_install_result.changed
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Wait for GitLab
+# ---------------------------------------------------------------------------
+# GitLab 18.x restricts /-/health and /-/readiness to localhost only.
+# Use 127.0.0.1 (runs on the remote host) to check the health endpoint.
+- name: Wait for GitLab to be healthy (localhost check)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ gitlab_http_port | default('80') }}/-/health"
+    method: GET
+    status_code: [200]
+  retries: 30
+  delay: 10
+  register: gitlab_health
+  until: gitlab_health.status is defined and gitlab_health.status == 200
+  when: gitlab_install_result.changed
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Initial Root Password
+# ---------------------------------------------------------------------------
+- name: Read GitLab initial root password
+  ansible.builtin.slurp:
+    src: /etc/gitlab/initial_root_password
+  register: gitlab_root_password_file
+  failed_when: false
+  changed_when: false
+  tags:
+    - verify
+
+- name: Display GitLab initial root password
+  ansible.builtin.debug:
+    msg: "GitLab root password: {{ (gitlab_root_password_file.content | b64decode).split('Password: ')[1] | trim }}"
+  when:
+    - gitlab_root_password_file is not failed
+    - gitlab_root_password_file.content is defined
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Backup Automation
+# ---------------------------------------------------------------------------
+# Deploys a backup script + cron job that:
+#   1. Runs gitlab-backup create (repos, DB, uploads, artifacts)
+#   2. Backs up gitlab-secrets.json + gitlab.rb (required for restore)
+#   3. Encrypts with age
+#   4. Uploads to Hetzner S3
+#   5. Cleans up old S3 backups (retention policy)
+# ---------------------------------------------------------------------------
+- name: Install backup prerequisites (age + pip)
+  ansible.builtin.apt:
+    name:
+      - age
+      - python3-pip
+    state: present
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Install AWS CLI for S3 uploads
+  ansible.builtin.pip:
+    name: awscli
+    state: present
+    extra_args: --break-system-packages
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create backup script directory
+  ansible.builtin.file:
+    path: /opt/firblab/scripts
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Deploy GitLab backup script
+  ansible.builtin.template:
+    src: gitlab-backup.sh.j2
+    dest: /opt/firblab/scripts/gitlab-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create root .aws directory
+  ansible.builtin.file:
+    path: /root/.aws
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Configure AWS CLI credentials for S3
+  ansible.builtin.copy:
+    dest: /root/.aws/credentials
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      [default]
+      aws_access_key_id = {{ gitlab_backup_s3_access_key }}
+      aws_secret_access_key = {{ gitlab_backup_s3_secret_key }}
+  no_log: true
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Configure AWS CLI config
+  ansible.builtin.file:
+    path: /root/.aws
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Write AWS CLI config file
+  ansible.builtin.copy:
+    dest: /root/.aws/config
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      [default]
+      region = {{ gitlab_backup_s3_endpoint.split('.')[0] | default('nbg1') }}
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create GitLab backup cron job
+  ansible.builtin.cron:
+    name: "gitlab-backup-s3"
+    minute: "{{ gitlab_backup_cron_minute }}"
+    hour: "{{ gitlab_backup_cron_hour }}"
+    job: "/opt/firblab/scripts/gitlab-backup.sh >> /var/log/gitlab-backup.log 2>&1"
+    user: root
+    state: present
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Create backup log file
+  ansible.builtin.file:
+    path: /var/log/gitlab-backup.log
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+- name: Deploy logrotate config for GitLab backup log
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/gitlab-backup
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      /var/log/gitlab-backup.log {
+          weekly
+          rotate 4
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+  when: gitlab_backup_enabled | default(false) | bool
+  tags:
+    - backup
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+- name: Remove temporary GPG key file
+  ansible.builtin.file:
+    path: /tmp/gitlab-gpg-key
+    state: absent
+  tags:
+    - install
+    - cleanup

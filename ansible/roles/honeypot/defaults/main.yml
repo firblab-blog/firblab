@@ -1,0 +1,75 @@
+---
+# =============================================================================
+# Honeypot Role - Default Variables
+# =============================================================================
+# Multi-protocol honeypot deception system deployed on a dedicated Hetzner
+# server. Services: OpenCanary, Cowrie, Dionaea, Endlessh, Grafana Alloy.
+# Override in playbook vars or group_vars/host_vars as needed.
+# =============================================================================
+
+# Install directory (Docker Compose project root)
+honeypot_install_dir: /opt/firblab/honeypot
+
+# --- OpenCanary ---
+# Multi-protocol emulation: FTP, MySQL, RDP, VNC, Redis
+# SSH/Telnet disabled — handled by Cowrie for deeper interaction
+honeypot_opencanary_node_id: "lab-honeypot"
+honeypot_opencanary_ftp_port: 21
+honeypot_opencanary_ftp_banner: "FTP server (vsftpd 3.0.5) ready."
+honeypot_opencanary_mysql_port: 3306
+honeypot_opencanary_mysql_banner: "5.7.44-0ubuntu0.18.04.1"
+honeypot_opencanary_rdp_port: 3389
+honeypot_opencanary_vnc_port: 5900
+honeypot_opencanary_redis_port: 6379
+
+# --- Cowrie ---
+# Interactive SSH/Telnet honeypot with session recording and malware capture.
+# No versioned tags available on Docker Hub (only latest + SHA digests).
+# Excluded from Renovate tracking via packageRule.
+honeypot_cowrie_image: "cowrie/cowrie:latest"
+# Port mapping: host 22 → container 2222 (SSH), host 23 → container 2223 (Telnet)
+honeypot_cowrie_ssh_host_port: 22
+honeypot_cowrie_telnet_host_port: 23
+honeypot_cowrie_hostname: "svr01"
+honeypot_cowrie_ssh_version: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6"
+honeypot_cowrie_download_limit: 10485760  # 10 MB
+
+# --- Dionaea ---
+# Low-interaction malware capture honeypot. Emulates SMB, SIP, HTTP/HTTPS.
+# Captures malware binaries for analysis.
+honeypot_dionaea_enabled: true
+honeypot_dionaea_image: "dinotools/dionaea:latest"
+honeypot_dionaea_smb_port: 445
+honeypot_dionaea_sip_port: 5060
+honeypot_dionaea_http_port: 8080
+honeypot_dionaea_https_port: 8443
+
+# --- Endlessh ---
+# SSH tarpit — holds connections open with endless banner, wasting bot resources.
+# Exposed on port 2223 externally (not 22 — that's Cowrie).
+honeypot_endlessh_enabled: true
+honeypot_endlessh_image: "shizunge/endlessh-go:latest"
+honeypot_endlessh_host_port: 2223
+honeypot_endlessh_delay_ms: 10000
+honeypot_endlessh_max_line_length: 32
+honeypot_endlessh_max_clients: 4096
+
+# --- Grafana Alloy (replaces Promtail — EOL March 2026) ---
+# Ships OpenCanary + Cowrie + Dionaea JSON logs to Loki on K3s RPi5 cluster
+# via WireGuard tunnel through the gateway. MetalLB VIP on Services VLAN 20.
+honeypot_alloy_image: "grafana/alloy:v1.13.2"
+honeypot_alloy_loki_url: "http://10.0.20.201:3100"
+honeypot_alloy_host_label: "lab-honeypot"
+
+# --- SSH port migration ---
+# Move real SSH to port 2222 (port 22 reserved for Cowrie)
+honeypot_real_ssh_port: 2222
+
+# --- WireGuard client ---
+# The honeypot connects as a WireGuard peer to the gateway server, enabling
+# Alloy to push logs through the tunnel to the homelab Loki instance.
+# The peer config file must be placed on the host before running this role
+# (via cloud-init, manual copy from S3, or pre-task).
+honeypot_wireguard_enabled: true
+honeypot_wireguard_config_path: /etc/wireguard/wg0.conf
+honeypot_wireguard_interface: wg0

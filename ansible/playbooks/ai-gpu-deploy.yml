@@ -1,0 +1,201 @@
+---
+# =============================================================================
+# AI GPU VM Deployment Playbook
+# =============================================================================
+# Deploys Ollama (ROCm), Open WebUI, and n8n on a VM with AMD GPU
+# passthrough. CIS L1 hardened VM with ROCm drivers for GPU compute.
+#
+# Prerequisites:
+#   - GPU passthrough configured on Proxmox host (run proxmox-gpu-setup.yml first)
+#   - Host rebooted after GPU setup (IOMMU activation)
+#   - AI GPU VM provisioned by Terraform Layer 05 (with hostpci attached)
+#   - SSH key available (Terraform-generated in .secrets/)
+#
+# Execution order:
+#   1. ansible-playbook proxmox-gpu-setup.yml    (host prep, one-time)
+#   2. Reboot lab-01                         (manual)
+#   3. terraform apply (Layer 05)                (creates VM + attaches GPU)
+#   4. ansible-playbook ai-gpu-deploy.yml        (this playbook)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/ai-gpu-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common       # Only baseline system config
+#   ansible-playbook ... --tags hardening    # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker       # Only Docker installation
+#   ansible-playbook ... --tags rocm         # Only ROCm driver installation
+#   ansible-playbook ... --tags deploy       # Only container deployment
+#   ansible-playbook ... --tags verify       # Only health checks
+# =============================================================================
+
+- name: Deploy AI GPU workloads
+  hosts: ai-gpu
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying AI GPU workloads on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    - name: Check for GPU devices
+      ansible.builtin.stat:
+        path: /dev/kfd
+      register: gpu_kfd_check
+      tags:
+        - verify
+
+    - name: Warn if GPU not detected
+      ansible.builtin.debug:
+        msg: >
+          WARNING: /dev/kfd not found. GPU passthrough may not be active.
+          Verify: lspci | grep -i vga && ls -la /dev/kfd /dev/dri/
+          The ROCm containers will start but GPU acceleration will not work.
+      when: not gpu_kfd_check.stat.exists
+      tags:
+        - verify
+
+    # -----------------------------------------------------------------------
+    # Vault: Read Open WebUI service secret (secret_key)
+    # -----------------------------------------------------------------------
+    - name: Read Open WebUI service secret from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/openwebui
+      register: vault_openwebui_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+    - name: Set Open WebUI secret_key from Vault
+      ansible.builtin.set_fact:
+        ai_gpu_openwebui_secret_key: "{{ (vault_openwebui_read.stdout | from_json).data.data.secret_key }}"
+      when: vault_openwebui_read.rc is defined and vault_openwebui_read.rc == 0
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+    # -----------------------------------------------------------------------
+    # Vault: Read Open WebUI OIDC credentials (services/openwebui/oidc)
+    # -----------------------------------------------------------------------
+    - name: Read Open WebUI OIDC credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/openwebui/oidc
+      register: vault_openwebui_oidc_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+    - name: Set Open WebUI OIDC credentials
+      ansible.builtin.set_fact:
+        ai_gpu_openwebui_oidc_enabled: true
+        ai_gpu_openwebui_oidc_client_id: "{{ (vault_openwebui_oidc_read.stdout | from_json).data.data.client_id }}"
+        ai_gpu_openwebui_oidc_client_secret: "{{ (vault_openwebui_oidc_read.stdout | from_json).data.data.client_secret }}"
+        ai_gpu_openwebui_oidc_provider_url: "http://10.0.10.16:9000/application/o/openwebui/.well-known/openid-configuration"
+      when: vault_openwebui_oidc_read.rc is defined and vault_openwebui_oidc_read.rc == 0
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+    # -----------------------------------------------------------------------
+    # Vault: Read n8n service secret (encryption_key)
+    # -----------------------------------------------------------------------
+    - name: Read n8n service secret from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/n8n
+      register: vault_n8n_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+    - name: Set n8n encryption key from Vault
+      ansible.builtin.set_fact:
+        ai_gpu_n8n_encryption_key: "{{ (vault_n8n_read.stdout | from_json).data.data.encryption_key }}"
+      when: vault_n8n_read.rc is defined and vault_n8n_read.rc == 0
+      no_log: true
+      tags:
+        - ai-gpu
+        - deploy
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM with dedicated kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # AI GPU services (ROCm drivers + Ollama + Open WebUI + n8n)
+    - role: ai-gpu
+      tags:
+        - ai-gpu
+        - rocm
+        - deploy
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "AI GPU Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - ""
+          - "Services:"
+          - "  Ollama API: http://{{ ansible_host }}:{{ ai_gpu_ollama_port | default(11434) }}"
+          - "  Open WebUI: http://{{ ansible_host }}:{{ ai_gpu_openwebui_port | default(3000) }}"
+          - "  n8n:        http://{{ ansible_host }}:{{ ai_gpu_n8n_port | default(5678) }}"
+          - ""
+          - "GPU: {{ 'Detected (/dev/kfd present)' if gpu_kfd_check.stat.exists else 'NOT DETECTED — check passthrough config' }}"
+          - ""
+          - "Quick test:"
+          - "  curl http://{{ ansible_host }}:{{ ai_gpu_ollama_port | default(11434) }}/api/version"
+          - "  curl -X POST http://{{ ansible_host }}:{{ ai_gpu_ollama_port | default(11434) }}/api/pull -d '{\"name\": \"llama3.2:3b\"}'"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/ai-gpu/docker-compose.yml ps"
+          - "  docker compose -f /opt/ai-gpu/docker-compose.yml logs -f ollama"
+          - "=========================================="
+      tags:
+        - verify

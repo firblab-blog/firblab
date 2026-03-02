@@ -1,0 +1,33 @@
+---
+# =============================================================================
+# Automatic Security Updates — RedHat/Rocky
+# =============================================================================
+# Ensures all RedHat/Rocky hosts get daily security patches via dnf-automatic.
+
+- name: Install dnf-automatic
+  ansible.builtin.dnf:
+    name: dnf-automatic
+    state: present
+  tags:
+    - packages
+    - updates
+
+- name: Configure dnf-automatic for security updates
+  ansible.builtin.lineinfile:
+    path: /etc/dnf/automatic.conf
+    regexp: "^{{ item.key }}"
+    line: "{{ item.key }} = {{ item.value }}"
+    state: present
+  loop:
+    - { key: "apply_updates", value: "yes" }
+    - { key: "upgrade_type", value: "security" }
+  tags:
+    - updates
+
+- name: Enable dnf-automatic timer
+  ansible.builtin.systemd:
+    name: dnf-automatic.timer
+    enabled: true
+    state: started
+  tags:
+    - updates

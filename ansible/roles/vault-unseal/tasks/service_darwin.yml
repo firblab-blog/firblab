@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# Vault Unseal — macOS Service (LaunchDaemon)
+# =============================================================================
+# Sets up the unseal vault as a LaunchDaemon that starts at boot.
+# Pattern follows: ansible/roles/vault/tasks/service_darwin.yml
+# =============================================================================
+
+- name: Template unseal vault LaunchDaemon plist
+  ansible.builtin.template:
+    src: vault-unseal.launchdaemon.plist.j2
+    dest: "/Library/LaunchDaemons/{{ vault_unseal_launchd_label }}.plist"
+    owner: root
+    group: wheel
+    mode: "0644"
+  notify:
+    - Unload vault-unseal launch daemon
+    - Load vault-unseal launch daemon
+  tags:
+    - service
+
+- name: Check if unseal vault LaunchDaemon is loaded
+  ansible.builtin.command: "launchctl print system/{{ vault_unseal_launchd_label }}"
+  register: unseal_launchd_status
+  changed_when: false
+  failed_when: false
+  tags:
+    - service
+
+- name: Load unseal vault LaunchDaemon
+  ansible.builtin.command: "launchctl bootstrap system /Library/LaunchDaemons/{{ vault_unseal_launchd_label }}.plist"
+  when: unseal_launchd_status.rc != 0
+  tags:
+    - service
+
+- name: Ensure unseal vault is running
+  ansible.builtin.command: "launchctl kickstart -k system/{{ vault_unseal_launchd_label }}"
+  changed_when: false
+  failed_when: false
+  tags:
+    - service

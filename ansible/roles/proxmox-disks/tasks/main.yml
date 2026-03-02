@@ -1,0 +1,176 @@
+---
+# =============================================================================
+# proxmox-disks — Main Dispatcher
+# =============================================================================
+# Auto-discovers uninitialized disks on Proxmox nodes, classifies them by
+# type (NVMe/SSD/HDD), and configures them as Proxmox storage pools.
+#
+# Strategies:
+#   NVMe / SSD       → LVM-Thin (thin provisioning for VM disks + snapshots)
+#   HDD (paired)     → ZFS Mirror (redundant pool with checksums + compression)
+#   HDD (standalone) → Directory (ext4 for backups, ISOs, bulk storage)
+#
+# Safety:
+#   Default mode is DISCOVERY ONLY. Disks are scanned and reported but NOT
+#   touched. Set proxmox_disks_initialize=true to actually initialize disks.
+#
+# Usage:
+#   # Discovery only (safe):
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02
+#
+#   # Initialize disks:
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true
+#
+#   # Wipe a disk and reinitialize from scratch:
+#   ansible-playbook playbooks/proxmox-disk-bootstrap.yml --limit lab-02 \
+#     -e proxmox_disks_initialize=true \
+#     -e '{"proxmox_disks_wipe": ["/dev/sda"]}'
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Phase 0: Wipe requested disks (only if opt-in and wipe list is non-empty)
+# -------------------------------------------------------------------------
+- name: "Wipe | Identify OS disk before wipe safety check"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      ROOT_DEV=$(findmnt -n -o SOURCE / | head -1)
+      if [[ "$ROOT_DEV" == /dev/mapper/* ]] || [[ "$ROOT_DEV" == /dev/dm-* ]]; then
+        ROOT_VG=$(lvs --noheadings -o vg_name "$ROOT_DEV" 2>/dev/null | tr -d ' ')
+        if [ -n "$ROOT_VG" ]; then
+          PV_DEV=$(pvs --noheadings -o pv_name -S "vg_name=$ROOT_VG" 2>/dev/null | head -1 | tr -d ' ')
+          if [ -n "$PV_DEV" ]; then
+            ROOT_DEV="$PV_DEV"
+          fi
+        fi
+      fi
+      echo "$ROOT_DEV" | sed -E 's/p?[0-9]+$//'
+    executable: /bin/bash
+  register: wipe_os_disk_check
+  changed_when: false
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_disks_wipe | length > 0
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | SAFETY — Refuse to wipe the OS disk"
+  ansible.builtin.fail:
+    msg: >-
+      REFUSING TO WIPE {{ item }} — it is the OS disk
+      ({{ wipe_os_disk_check.stdout | trim }}).
+      This would destroy your Proxmox installation. Remove it from proxmox_disks_wipe.
+  loop: "{{ proxmox_disks_wipe }}"
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_disks_wipe | length > 0
+    - item == wipe_os_disk_check.stdout | trim
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe | Confirm disks to wipe"
+  ansible.builtin.debug:
+    msg: >-
+      Will wipe the following disks: {{ proxmox_disks_wipe | join(', ') }}.
+      ALL DATA ON THESE DISKS WILL BE DESTROYED.
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_disks_wipe | length > 0
+  tags: [proxmox-disks, wipe]
+
+- name: "Wipe requested disks"
+  ansible.builtin.include_tasks: wipe.yml
+  vars:
+    wipe_disk: "{{ item }}"
+  loop: "{{ proxmox_disks_wipe }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_disks_wipe | length > 0
+    - item != wipe_os_disk_check.stdout | trim
+  tags: [proxmox-disks, wipe]
+
+# -------------------------------------------------------------------------
+# Phase 1: Discover and classify all uninitialized disks
+# -------------------------------------------------------------------------
+- name: "Discover uninitialized disks"
+  ansible.builtin.include_tasks: discover.yml
+  tags: [proxmox-disks, discovery]
+
+# -------------------------------------------------------------------------
+# Phase 2: Configure each discovered disk (only if opt-in is set)
+# -------------------------------------------------------------------------
+- name: "Skip initialization — discovery-only mode"
+  ansible.builtin.debug:
+    msg: >-
+      Discovery complete. Found {{ proxmox_discovered_disks | length }} uninitialized disk(s).
+      Re-run with -e proxmox_disks_initialize=true to initialize.
+  when:
+    - not (proxmox_disks_initialize | bool)
+    - proxmox_discovered_disks | length > 0
+  tags: [proxmox-disks]
+
+# --- LVM-Thin for SSD / NVMe disks ---
+- name: "Configure LVM-thin pools"
+  ansible.builtin.include_tasks: configure-lvmthin.yml
+  vars:
+    current_disk: "{{ item }}"
+  loop: "{{ proxmox_discovered_disks | selectattr('strategy', 'equalto', 'lvmthin') | list }}"
+  loop_control:
+    label: "{{ item.name | default('none') }} → {{ item.pool_name | default('none') }}"
+  when: proxmox_disks_initialize | bool
+  tags: [proxmox-disks, lvmthin]
+
+# --- Directory storage for standalone HDD disks ---
+- name: "Configure directory storage pools"
+  ansible.builtin.include_tasks: configure-dir.yml
+  vars:
+    current_disk: "{{ item }}"
+  loop: "{{ proxmox_discovered_disks | selectattr('strategy', 'equalto', 'dir') | list }}"
+  loop_control:
+    label: "{{ item.name | default('none') }} → {{ item.pool_name | default('none') }}"
+  when: proxmox_disks_initialize | bool
+  tags: [proxmox-disks, dir]
+
+# --- ZFS Mirror for paired HDD disks ---
+# Called once per mirror GROUP (not per disk). Each group is a set of same-size
+# HDDs that form a single mirror vdev (e.g., /dev/sda + /dev/sdb → hdd-mirror-0).
+- name: "Configure ZFS mirror pools"
+  ansible.builtin.include_tasks: configure-zfs-mirror.yml
+  vars:
+    mirror_pool_name: "{{ item.key }}"
+    mirror_disks: "{{ item.value }}"
+  loop: "{{ proxmox_zfs_mirror_groups | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} ({{ item.value | map(attribute='name') | join(' + ') }})"
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_zfs_mirror_groups | default({}) | length > 0
+  tags: [proxmox-disks, zfs-mirror]
+
+# -------------------------------------------------------------------------
+# Phase 3: Summary
+# -------------------------------------------------------------------------
+- name: "Display final storage pool status"
+  ansible.builtin.shell:
+    cmd: |
+      export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      set -euo pipefail
+      pvesm status 2>/dev/null || echo "pvesm not available"
+    executable: /bin/bash
+  register: final_status
+  changed_when: false
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_discovered_disks | length > 0
+  tags: [proxmox-disks]
+
+- name: "Final Proxmox storage pools"
+  ansible.builtin.debug:
+    msg: "{{ final_status.stdout_lines }}"
+  when:
+    - proxmox_disks_initialize | bool
+    - proxmox_discovered_disks | length > 0
+    - final_status is defined
+  tags: [proxmox-disks]

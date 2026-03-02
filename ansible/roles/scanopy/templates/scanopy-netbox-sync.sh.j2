@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Scanopy → NetBox Sync — Cron Wrapper
+# =============================================================================
+# Managed by Ansible — DO NOT EDIT MANUALLY
+# Host: {{ inventory_hostname }}
+#
+# Runs the scanopy-netbox-sync.py script with credentials from the env file.
+# Called by cron daily. Logs to /var/log/scanopy-netbox-sync.log.
+# =============================================================================
+set -euo pipefail
+
+ENVFILE="{{ scanopy_base_path }}/config/netbox-sync.env"
+SCRIPT="{{ scanopy_base_path }}/scripts/scanopy-netbox-sync.py"
+
+if [ ! -f "$ENVFILE" ]; then
+    echo "$(date -Iseconds) ERROR: env file not found: $ENVFILE" >&2
+    exit 1
+fi
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "$(date -Iseconds) ERROR: sync script not found: $SCRIPT" >&2
+    exit 1
+fi
+
+echo "$(date -Iseconds) Starting Scanopy → NetBox sync"
+
+# Source credentials (no 'export' in env file — export here)
+set -a
+# shellcheck source=/dev/null
+source "$ENVFILE"
+set +a
+
+python3 "$SCRIPT"
+
+echo "$(date -Iseconds) Sync complete"

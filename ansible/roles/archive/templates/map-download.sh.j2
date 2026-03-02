@@ -1,0 +1,152 @@
+#!/bin/bash
+# =============================================================================
+# map-download.sh — Download OpenFreeMap planet tiles for TileServer GL
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+#
+# Downloads the latest free planet MBTiles from OpenFreeMap:
+#   https://openfreemap.org/
+#
+# Tiles use the OpenMapTiles vector tile schema and work directly with
+# tileserver-gl. Planet download is ~90 GB.
+#
+# After download, update archive_tileservergl_datasets in Ansible vars
+# and re-run archive-deploy.yml to register the dataset in config.json:
+#
+#   archive_tileservergl_datasets:
+#     - name: planet
+#       mbtiles: tiles.mbtiles
+#
+# Usage:
+#   sudo /opt/archive/scripts/map-download.sh               # Download latest planet
+#   sudo /opt/archive/scripts/map-download.sh --check       # Show latest URL (no download)
+#   sudo /opt/archive/scripts/map-download.sh --status      # Show downloaded files
+# =============================================================================
+
+set -euo pipefail
+
+MAPS_DIR="{{ archive_cold_dir }}/maps"
+INDEX_URL="https://btrfs.openfreemap.com/files.txt"
+BASE_URL="https://btrfs.openfreemap.com"
+ARIA2_CONNECTIONS="{{ archive_kiwix_aria2_connections }}"
+LOG_FILE="/var/log/map-download.log"
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
+}
+
+# ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+MODE="download"
+if [[ "${1:-}" == "--check" ]]; then
+  MODE="check"
+elif [[ "${1:-}" == "--status" ]]; then
+  MODE="status"
+fi
+
+# ---------------------------------------------------------------------------
+# Status: show what's already downloaded
+# ---------------------------------------------------------------------------
+if [[ "${MODE}" == "status" ]]; then
+  echo "=== Downloaded map files in ${MAPS_DIR} ==="
+  if [[ -d "${MAPS_DIR}" ]]; then
+    find "${MAPS_DIR}" -name "*.mbtiles" -o -name "*.pmtiles" | sort | while read -r f; do
+      SIZE=$(du -sh "${f}" 2>/dev/null | cut -f1)
+      echo "  ${SIZE}  ${f}"
+    done
+    echo ""
+    echo "Total:"
+    du -sh "${MAPS_DIR}" 2>/dev/null || echo "  (empty)"
+  else
+    echo "  ${MAPS_DIR} does not exist"
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Find latest planet tiles URL from index
+# ---------------------------------------------------------------------------
+log "Fetching OpenFreeMap index from ${INDEX_URL}..."
+LATEST_PATH=$(curl -sf "${INDEX_URL}" \
+  | grep 'areas/planet/' \
+  | grep 'tiles\.mbtiles$' \
+  | sort \
+  | tail -1)
+
+if [[ -z "${LATEST_PATH}" ]]; then
+  log "ERROR: Could not find latest planet tiles in index. Check ${INDEX_URL}"
+  exit 1
+fi
+
+LATEST_URL="${BASE_URL}/${LATEST_PATH}"
+VERSION_DIR=$(echo "${LATEST_PATH}" | awk -F'/' '{print $3}')
+DEST_FILE="${MAPS_DIR}/tiles.mbtiles"
+
+log "Latest planet tiles: ${LATEST_URL}"
+log "Version: ${VERSION_DIR}"
+
+# ---------------------------------------------------------------------------
+# Check mode: just print URL and exit
+# ---------------------------------------------------------------------------
+if [[ "${MODE}" == "check" ]]; then
+  echo ""
+  echo "Latest OpenFreeMap planet URL:"
+  echo "  ${LATEST_URL}"
+  echo ""
+  echo "Download destination:"
+  echo "  ${DEST_FILE}"
+  echo ""
+  echo "Estimated size: ~90 GB"
+  echo ""
+  echo "To download, run:"
+  echo "  sudo /opt/archive/scripts/map-download.sh"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+mkdir -p "${MAPS_DIR}"
+
+# Store the version we're downloading so we can detect when a newer one
+# is available on the next run.
+VERSION_FILE="${MAPS_DIR}/.downloaded_version"
+if [[ -f "${VERSION_FILE}" ]]; then
+  DOWNLOADED_VERSION=$(cat "${VERSION_FILE}")
+  if [[ "${DOWNLOADED_VERSION}" == "${VERSION_DIR}" ]]; then
+    log "Already downloaded version ${VERSION_DIR} — nothing to do."
+    log "Run with --status to see downloaded files."
+    exit 0
+  fi
+  log "New version available: ${VERSION_DIR} (currently have: ${DOWNLOADED_VERSION})"
+fi
+
+log "Downloading planet MBTiles (~90 GB) to ${DEST_FILE}..."
+log "This will take a long time. Progress is logged to ${LOG_FILE}"
+
+aria2c \
+  --continue=true \
+  --max-connection-per-server="${ARIA2_CONNECTIONS}" \
+  --min-split-size=20M \
+  --file-allocation=falloc \
+  --dir="${MAPS_DIR}" \
+  --out="tiles.mbtiles" \
+  "${LATEST_URL}" \
+  2>&1 | tee -a "${LOG_FILE}"
+
+if [[ ! -f "${DEST_FILE}" ]]; then
+  log "ERROR: Download failed — ${DEST_FILE} not found."
+  exit 1
+fi
+
+echo "${VERSION_DIR}" > "${VERSION_FILE}"
+log "Download complete: ${DEST_FILE}"
+log ""
+log "Next step: register the dataset in Ansible vars and re-run archive-deploy.yml:"
+log "  archive_tileservergl_datasets:"
+log "    - name: planet"
+log "      mbtiles: tiles.mbtiles"
+log ""
+log "Then:"
+log "  ansible-playbook -i inventory/hosts.yml playbooks/archive-deploy.yml --tags archive"

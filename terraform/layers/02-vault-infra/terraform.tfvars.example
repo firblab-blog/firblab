@@ -1,0 +1,66 @@
+# =============================================================================
+# Layer 02: Vault HA Cluster - Example Variable Values
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# =============================================================================
+
+# ---------------------------------------------------------
+# Proxmox Connection
+# ---------------------------------------------------------
+proxmox_api_url   = "https://10.0.10.2:8006"
+proxmox_api_token = "terraform@pam!terraform-token=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node      = "lab-02"
+
+# ---------------------------------------------------------
+# Vault VM Settings (vault-2)
+# ---------------------------------------------------------
+vault_vm_id             = 5002
+vault_vm_name           = "vault-2"
+vault_vm_description    = "Vault HA cluster node 2 - Raft integrated storage"
+vault_cpu_cores         = 2
+vault_memory_mb         = 4096
+vault_os_disk_size_gb   = 40
+vault_data_disk_size_gb = 20
+vault_storage_pool      = "local-lvm"
+vault_snippet_storage   = "local"
+vault_vm_username       = "admin"
+
+# ---------------------------------------------------------
+# Cloud Image
+# ---------------------------------------------------------
+download_cloud_image = true
+cloud_image_url      = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+cloud_image_filename = "noble-server-cloudimg-amd64.qcow2"
+
+# ---------------------------------------------------------
+# Network Settings
+# ---------------------------------------------------------
+vault_network_bridge = "vmbr0"
+vault_vlan_tag       = 50
+vault_ip_address     = "10.0.50.2/24"
+vault_gateway        = "10.0.50.1"
+vault_domain_name    = "example-lab.local"
+vault_dns_servers    = ["1.1.1.1", "8.8.8.8"]
+
+# ---------------------------------------------------------
+# SSH
+# ---------------------------------------------------------
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-key-comment"
+
+# ---------------------------------------------------------
+# Vault Configuration
+# ---------------------------------------------------------
+vault_version = "1.17.6"
+
+# ---------------------------------------------------------
+# Raft Peer Addresses
+# ---------------------------------------------------------
+vault_node_1_address = "10.0.10.11"   # vault-1: Mac Mini M4
+vault_node_2_address = "10.0.50.2"    # vault-2: Proxmox VM
+vault_node_3_address = "10.0.10.13"   # vault-3: RPi5 CM5
+
+vault_api_port     = 8200
+vault_cluster_port = 8201

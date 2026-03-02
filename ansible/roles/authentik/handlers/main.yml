@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Authentik Role Handlers
+# =============================================================================
+
+- name: Restart authentik
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ authentik_install_dir }}"

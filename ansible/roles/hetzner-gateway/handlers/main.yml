@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# hetzner-gateway Role — Handlers
+# =============================================================================
+
+- name: restart traefik
+  community.docker.docker_compose_v2:
+    project_src: "{{ gateway_services_dir }}"
+    services:
+      - traefik
+    state: restarted
+  become: true
+
+- name: restart adguard
+  community.docker.docker_compose_v2:
+    project_src: "{{ gateway_services_dir }}"
+    services:
+      - adguard
+    state: restarted
+  become: true
+
+- name: restart fail2ban
+  community.docker.docker_compose_v2:
+    project_src: "{{ gateway_services_dir }}"
+    services:
+      - fail2ban
+    state: restarted
+  become: true
+
+- name: restart alloy
+  community.docker.docker_compose_v2:
+    project_src: "{{ gateway_services_dir }}"
+    services:
+      - alloy
+    state: restarted
+  become: true
+
+- name: enable wireguard-routes
+  ansible.builtin.systemd:
+    name: wireguard-routes
+    enabled: true
+    daemon_reload: true
+  become: true

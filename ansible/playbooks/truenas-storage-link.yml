@@ -1,0 +1,173 @@
+---
+# =============================================================================
+# TrueNAS SCALE — Configure Mellanox Storage Link
+# =============================================================================
+# Configures the Mellanox CX4121C Port 2 interface on TrueNAS for the
+# dedicated 10G point-to-point storage link to lab-01.
+#
+# This adds a NEW interface — the existing onboard NIC (enp2s0, 10.0.40.2)
+# is NOT modified. SSH stays live throughout.
+#
+# Prerequisites:
+#   - Mellanox CX4121C installed in TrueNAS
+#   - DAC cable connected between TrueNAS Mellanox Port 2 and lab-01
+#   - lab-01 vmbr1 already configured (10.10.10.1/30)
+#   - SSH: truenas_admin@10.0.40.2:2222 (~/.ssh/truenas_admin)
+#
+# Usage:
+#   ansible-playbook playbooks/truenas-storage-link.yml
+#
+# Verification (after playbook completes):
+#   ssh -i ~/.ssh/id_ed25519_lab-01 -o IdentitiesOnly=yes admin@10.0.10.42 \
+#     'ping -c 3 10.10.10.2'
+# =============================================================================
+
+- name: TrueNAS — configure Mellanox 10G storage link
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  vars:
+    truenas_ip: "10.0.40.2"
+    truenas_ssh_user: "truenas_admin"
+    truenas_ssh_key: "~/.ssh/truenas_admin"
+    truenas_ssh_port: 2222
+    truenas_ssh_opts: >-
+      -i {{ truenas_ssh_key }}
+      -p {{ truenas_ssh_port }}
+      -o StrictHostKeyChecking=no
+      -o IdentitiesOnly=yes
+    # Mellanox CX4121C Port 2 — DAC to lab-01
+    storage_interface: "enp1s0f1np1"
+    storage_ip: "10.10.10.2"
+    storage_netmask: 30
+    storage_mtu: 9000
+    # Rollback timer: TrueNAS reverts if not checked in within this many seconds
+    checkin_timeout: 300
+
+  tasks:
+    - name: Verify TrueNAS connectivity
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          -o ConnectTimeout=10
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'midclt call system.info'
+      register: truenas_info
+      changed_when: false
+
+    - name: Display TrueNAS info
+      ansible.builtin.debug:
+        msg: "Connected to {{ (truenas_info.stdout | from_json).hostname }} ({{ (truenas_info.stdout | from_json).version }})"
+
+    - name: Query existing interfaces
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'midclt call interface.query'
+      register: interface_query
+      changed_when: false
+
+    - name: Check if storage interface is already configured
+      ansible.builtin.set_fact:
+        interface_exists: "{{ interface_query.stdout | from_json | selectattr('id', 'equalto', storage_interface) | list | length > 0 }}"
+
+    - name: Display current state
+      ansible.builtin.debug:
+        msg: "Interface {{ storage_interface }} already configured: {{ interface_exists }}"
+
+    # -----------------------------------------------------------------
+    # Rollback any stale pending changes from a previous failed run
+    # -----------------------------------------------------------------
+    - name: Rollback any stale pending changes
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'sudo midclt call interface.rollback'
+      register: rollback_result
+      failed_when: false
+      changed_when: rollback_result.rc == 0
+
+    # -----------------------------------------------------------------
+    # Create or update the Mellanox storage interface
+    # -----------------------------------------------------------------
+    - name: Create storage interface ({{ storage_interface }})
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'sudo midclt call interface.create "{\"name\": \"{{ storage_interface }}\", \"ipv4_dhcp\": false, \"aliases\": [{\"address\": \"{{ storage_ip }}\", \"netmask\": {{ storage_netmask }}}], \"mtu\": {{ storage_mtu }}}"'
+      register: create_result
+      changed_when: true
+      when: not interface_exists
+
+    - name: Update storage interface ({{ storage_interface }})
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'sudo midclt call interface.update {{ storage_interface }} "{\"ipv4_dhcp\": false, \"aliases\": [{\"address\": \"{{ storage_ip }}\", \"netmask\": {{ storage_netmask }}}], \"mtu\": {{ storage_mtu }}}"'
+      register: update_result
+      changed_when: true
+      when: interface_exists
+
+    # -----------------------------------------------------------------
+    # Commit with rollback timer
+    # -----------------------------------------------------------------
+    - name: Commit interface changes ({{ checkin_timeout }}s rollback timer)
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'sudo midclt call interface.commit "{\"checkin_timeout\": {{ checkin_timeout }}}"'
+      changed_when: true
+
+    - name: Wait for interface to come up
+      ansible.builtin.pause:
+        seconds: 15
+        prompt: "Waiting 15s for link negotiation + ARP..."
+
+    # -----------------------------------------------------------------
+    # Verify point-to-point link from lab-01
+    # -----------------------------------------------------------------
+    - name: Verify ping from lab-01 to TrueNAS storage IP
+      ansible.builtin.command:
+        cmd: >
+          ssh -i ~/.ssh/id_ed25519_lab-01
+          -o IdentitiesOnly=yes
+          -o StrictHostKeyChecking=no
+          admin@10.0.10.42
+          'ping -c 3 -W 2 {{ storage_ip }}'
+      register: ping_result
+      changed_when: false
+
+    - name: Display ping result
+      ansible.builtin.debug:
+        msg: "{{ ping_result.stdout }}"
+
+    # -----------------------------------------------------------------
+    # Check in (cancel rollback timer)
+    # -----------------------------------------------------------------
+    - name: Check in — confirm interface change
+      ansible.builtin.command:
+        cmd: >
+          ssh {{ truenas_ssh_opts }}
+          {{ truenas_ssh_user }}@{{ truenas_ip }}
+          'sudo midclt call interface.checkin'
+      changed_when: true
+
+    - name: Storage link configured
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          TrueNAS Mellanox storage interface configured:
+
+            Interface:  {{ storage_interface }}
+            IP:         {{ storage_ip }}/{{ storage_netmask }}
+            MTU:        {{ storage_mtu }}
+            Peer:       lab-01 vmbr1 @ 10.10.10.1/30
+
+          Point-to-point ping verified. Interface checked in.
+          ============================================================

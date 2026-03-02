@@ -1,0 +1,211 @@
+---
+# =============================================================================
+# K3s Monitoring Stack Deployment
+# =============================================================================
+# Installs kube-prometheus-stack + loki-stack on the K3s RPi5 cluster.
+# Runs from the Mac workstation using the K3s kubeconfig.
+#
+# Deploys:
+#   - kube-prometheus-stack (Prometheus, Grafana, Alertmanager, kube-state-metrics)
+#   - loki-stack (Loki + Promtail)
+#   - Custom dashboard ConfigMaps
+#
+# Prerequisites:
+#   - Platform prerequisites deployed (k3s-platform-deploy.yml)
+#   - ExternalSecrets synced (grafana-admin-credentials, grafana-oidc, alertmanager-config)
+#   - Kubeconfig at ~/.kube/k3s-config
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/k3s-monitoring-deploy.yml
+# =============================================================================
+
+- name: Deploy monitoring stack on K3s RPi5 cluster
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars:
+    kubeconfig: "{{ lookup('env', 'HOME') }}/.kube/k3s-config"
+    k3s_platform_dir: "{{ playbook_dir }}/../../k8s/k3s-platform"
+
+  tasks:
+    # =========================================================================
+    # 1. Namespace setup
+    # =========================================================================
+    - name: Ensure monitoring namespace exists
+      ansible.builtin.command:
+        cmd: kubectl create namespace monitoring --kubeconfig {{ kubeconfig }}
+      register: _ns_monitoring
+      changed_when: _ns_monitoring.rc == 0
+      failed_when: _ns_monitoring.rc != 0 and 'already exists' not in _ns_monitoring.stderr
+      tags: [namespace]
+
+    # PSA: privileged enforce — needed for Promtail hostPath mounts
+    - name: Label monitoring namespace for PSA privileged
+      ansible.builtin.command:
+        cmd: >-
+          kubectl label namespace monitoring
+          pod-security.kubernetes.io/enforce=privileged
+          --overwrite
+          --kubeconfig {{ kubeconfig }}
+      changed_when: false
+      tags: [namespace]
+
+    # =========================================================================
+    # 2. Verify ExternalSecrets are synced
+    # =========================================================================
+    - name: Wait for monitoring ExternalSecrets to sync
+      ansible.builtin.command:
+        cmd: >-
+          kubectl wait --for=condition=Ready externalsecret --all
+          -n monitoring
+          --kubeconfig {{ kubeconfig }}
+          --timeout=120s
+      changed_when: false
+      tags: [secrets]
+
+    # =========================================================================
+    # 3. kube-prometheus-stack
+    # =========================================================================
+    - name: Add prometheus-community Helm repo
+      ansible.builtin.command:
+        cmd: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: _helm_repo_prom
+      changed_when: "'has been added' in _helm_repo_prom.stdout"
+      failed_when: _helm_repo_prom.rc != 0 and 'already exists' not in _helm_repo_prom.stderr
+      tags: [prometheus]
+
+    - name: Update Helm repos
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: false
+      tags: [prometheus, loki]
+
+    - name: Install kube-prometheus-stack
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install monitoring prometheus-community/kube-prometheus-stack
+          --namespace monitoring
+          --values {{ k3s_platform_dir }}/monitoring/prometheus/values.yaml
+          --kubeconfig {{ kubeconfig }}
+          --wait --timeout 10m
+      register: _prom_install
+      changed_when: "'has been upgraded' in _prom_install.stdout or 'has been installed' in _prom_install.stdout"
+      tags: [prometheus]
+
+    # =========================================================================
+    # 4. loki-stack
+    # =========================================================================
+    - name: Add Grafana Helm repo
+      ansible.builtin.command:
+        cmd: helm repo add grafana https://grafana.github.io/helm-charts
+      register: _helm_repo_grafana
+      changed_when: "'has been added' in _helm_repo_grafana.stdout"
+      failed_when: _helm_repo_grafana.rc != 0 and 'already exists' not in _helm_repo_grafana.stderr
+      tags: [loki]
+
+    - name: Install loki-stack
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install loki grafana/loki-stack
+          --namespace monitoring
+          --values {{ k3s_platform_dir }}/monitoring/loki/values.yaml
+          --kubeconfig {{ kubeconfig }}
+          --wait --timeout 10m
+      register: _loki_install
+      changed_when: "'has been upgraded' in _loki_install.stdout or 'has been installed' in _loki_install.stdout"
+      tags: [loki]
+
+    # =========================================================================
+    # 5. Custom dashboard ConfigMaps
+    # =========================================================================
+    - name: Find dashboard ConfigMap files
+      ansible.builtin.find:
+        paths: "{{ k3s_platform_dir }}/monitoring/dashboards"
+        patterns: "*.yaml"
+      register: _dashboard_files
+      tags: [dashboards]
+
+    - name: Apply dashboard ConfigMaps
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ item.path }} --kubeconfig {{ kubeconfig }}
+      loop: "{{ _dashboard_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: _dashboards
+      changed_when: "'created' in _dashboards.stdout or 'configured' in _dashboards.stdout"
+      when: _dashboard_files.files | length > 0
+      tags: [dashboards]
+
+    # =========================================================================
+    # 6. Verification
+    # =========================================================================
+    - name: Verify all monitoring pods are running
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get pods -n monitoring
+          --kubeconfig {{ kubeconfig }}
+          -o wide
+      register: _mon_pods
+      changed_when: false
+      tags: [verify]
+
+    - name: Show monitoring pods
+      ansible.builtin.debug:
+        var: _mon_pods.stdout_lines
+      tags: [verify]
+
+    - name: Get Loki LoadBalancer VIP
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get svc loki -n monitoring
+          --kubeconfig {{ kubeconfig }}
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      register: _loki_vip
+      changed_when: false
+      tags: [verify]
+
+    - name: Get Traefik LoadBalancer VIP
+      ansible.builtin.command:
+        cmd: >-
+          kubectl get svc traefik -n traefik
+          --kubeconfig {{ kubeconfig }}
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      register: _traefik_vip
+      changed_when: false
+      tags: [verify]
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "K3s Monitoring Stack Deployed"
+          - "=========================================="
+          - ""
+          - "kube-prometheus-stack:"
+          - "  Prometheus:     14d retention, 20Gi local-path, 1.5Gi limit"
+          - "  Grafana:        https://grafana.home.example-lab.org (after DNS cutover)"
+          - "  Alertmanager:   Gotify webhook (after WireGuard route setup)"
+          - ""
+          - "loki-stack:"
+          - "  Loki VIP:       {{ _loki_vip.stdout | default('pending') }}"
+          - "  Promtail:       DaemonSet on all 3 nodes"
+          - ""
+          - "Traefik VIP:      {{ _traefik_vip.stdout | default('pending') }}"
+          - ""
+          - "Verify Grafana (port-forward before DNS cutover):"
+          - "  kubectl port-forward svc/monitoring-grafana 3000:80 -n monitoring --kubeconfig {{ kubeconfig }}"
+          - "  open http://localhost:3000"
+          - ""
+          - "Check Prometheus targets:"
+          - "  kubectl port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 -n monitoring --kubeconfig {{ kubeconfig }}"
+          - "  open http://localhost:9090/targets"
+          - ""
+          - "Next steps (Phase 3):"
+          - "  1. Add WireGuard route to K3s nodes (10.8.0.0/24 via 10.0.20.1)"
+          - "  2. Point grafana.home.example-lab.org DNS to Traefik VIP"
+          - "  3. Update Hetzner Alloy loki_url to http://{{ _loki_vip.stdout | default('10.0.20.201') }}:3100"

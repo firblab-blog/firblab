@@ -1,0 +1,475 @@
+---
+# =============================================================================
+# Archive Appliance (lab-09) Bootstrap Playbook
+# =============================================================================
+# Three-phase bootstrap for lab-09 (ZimaBlade 7700) running Ubuntu 24.04
+# Server. Adapted from lab-08-bootstrap.yml but uses netplan (Ubuntu)
+# instead of NetworkManager (Raspberry Pi OS).
+#
+# Play 1 - Diagnostic Pre-Flight (READ-ONLY):
+#   Detects wired interface, verifies link/carrier, detects network manager
+#   (netplan vs NetworkManager vs dhcpcd), displays all interface info.
+#   Makes ZERO changes.
+#
+# Play 2 - Setup + Static IP:
+#   Creates admin user, sets hostname to lab-09, configures static IP
+#   (10.0.20.20/24) via netplan, locks admin user. SSH drops on IP
+#   change — expected. NOTE: the switch port must already be on VLAN 20
+#   (Services) via Terraform Layer 00 BEFORE running Play 2, or the host
+#   will become unreachable after the IP change.
+#
+# Play 3 - System Hardening (as admin at new static IP):
+#   Applies common baseline and CIS L1 hardening via reusable roles.
+#
+# After running this playbook, the host is ready for archive-deploy.yml.
+#
+# Prerequisites:
+#   1. Ubuntu 24.04 Server installed on ZimaBlade eMMC (hostname lab-09)
+#   2. SSH key generated and copied: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_archive
+#      ssh-copy-id -o PubkeyAuthentication=no -i ~/.ssh/id_ed25519_archive admin@<dhcp_ip>
+#   3. ZimaBlade switch port assigned to VLAN 20 (Services) via Terraform
+#      Layer 00 BEFORE running Play 2 (otherwise host is unreachable after
+#      IP change)
+#
+# Usage:
+#   # Diagnostic only (read-only, safe to run anytime — no sudo needed):
+#   ansible-playbook playbooks/archive-bootstrap.yml --tags diagnostic \
+#     -e "dhcp_ip=10.0.4.9"
+#
+#   # Full bootstrap (all 3 plays — requires sudo password for admin):
+#   ansible-playbook playbooks/archive-bootstrap.yml --tags full_bootstrap \
+#     -e "dhcp_ip=10.0.4.9" -K
+# =============================================================================
+
+# =========================================================================
+# Play 1: Diagnostic Pre-Flight (READ-ONLY)
+# =========================================================================
+# Makes ZERO changes. Detects wired interface, verifies link, detects
+# network manager, displays state for operator review.
+# Run standalone with: --tags diagnostic
+# =========================================================================
+- name: "Bootstrap lab-09 / archive (Play 1/3: Diagnostic Pre-Flight)"
+  hosts: archive
+  become: false
+  gather_facts: false
+  tags: [diagnostic, always]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ dhcp_ip | default('10.0.4.9') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_archive"
+
+  tasks:
+    # Gather facts without become — avoids "Missing sudo password" on fresh
+    # Ubuntu installs where admin has password-protected sudo. All facts
+    # needed for the diagnostic (distribution, architecture) are readable
+    # without root. Use gather_subset to skip hardware facts that may need
+    # elevated privileges on some systems.
+    - name: Gather system facts (unprivileged)
+      ansible.builtin.setup:
+        gather_subset:
+          - "!hardware"
+          - network
+          - distribution
+
+    # -------------------------------------------------------------------
+    # Detect wired interface name from kernel metadata
+    # -------------------------------------------------------------------
+    - name: Detect wired Ethernet interface name
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        echo "NONE"
+        exit 1
+      register: wired_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if no wired Ethernet interface detected
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: No wired Ethernet interface detected on lab-09.
+          ================================================================
+          Checked /sys/class/net/ for type=1 (Ethernet), non-wireless,
+          hardware-backed interfaces. Found none.
+
+          Possible causes:
+            - Ethernet cable not plugged in
+            - NIC not recognized by Ubuntu
+            - Missing driver
+
+          Diagnostic commands (run on console):
+            ls -la /sys/class/net/
+            ip link show
+            dmesg | grep -i eth
+          ================================================================
+      when: wired_detect.rc != 0
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+      when: wired_detect.rc == 0
+
+    - name: Display detected wired interface
+      ansible.builtin.debug:
+        msg: "Detected wired interface: {{ wired_iface }}"
+
+    # -------------------------------------------------------------------
+    # Verify wired link state (carrier)
+    # -------------------------------------------------------------------
+    - name: Check wired interface carrier (link state)
+      ansible.builtin.slurp:
+        src: "/sys/class/net/{{ wired_iface }}/carrier"
+      register: carrier_check
+      failed_when: false
+
+    - name: Fail if wired interface has no link
+      ansible.builtin.fail:
+        msg: |
+          ================================================================
+          ERROR: Wired interface '{{ wired_iface }}' has no link (no carrier).
+          ================================================================
+          The interface exists but there is no active Ethernet link.
+
+          Possible causes:
+            - Ethernet cable not plugged in or loose
+            - Switch port is down or disabled
+            - Cable fault
+
+          Check:
+            1. Physical cable connection at switch port
+            2. Switch port LED status
+            3. UniFi switch port status in Terraform
+          ================================================================
+      when: >
+        carrier_check.failed or
+        (carrier_check.content | default('') | b64decode | trim) != '1'
+
+    - name: Wired link confirmed UP
+      ansible.builtin.debug:
+        msg: "Interface '{{ wired_iface }}' has active carrier (link UP)"
+
+    # -------------------------------------------------------------------
+    # Detect network manager (netplan vs NetworkManager vs dhcpcd)
+    # -------------------------------------------------------------------
+    - name: Check if NetworkManager is active
+      ansible.builtin.command: systemctl is-active NetworkManager
+      register: nm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if netplan is available
+      ansible.builtin.command: which netplan
+      register: netplan_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if systemd-networkd is active
+      ansible.builtin.command: systemctl is-active systemd-networkd
+      register: networkd_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set network manager fact
+      ansible.builtin.set_fact:
+        network_manager: >-
+          {{ 'NetworkManager' if nm_check.stdout | trim == 'active'
+             else ('netplan' if netplan_check.rc == 0
+             else ('systemd-networkd' if networkd_check.stdout | trim == 'active'
+             else 'unknown')) }}
+
+    - name: Display network manager
+      ansible.builtin.debug:
+        msg: "Network manager: {{ network_manager }}"
+
+    # -------------------------------------------------------------------
+    # Display full interface and OS state for operator review
+    # -------------------------------------------------------------------
+    - name: Gather all interface information
+      ansible.builtin.command: ip addr show
+      register: ip_addr_output
+      changed_when: false
+
+    - name: Display all interface information
+      ansible.builtin.debug:
+        msg: "{{ ip_addr_output.stdout_lines }}"
+
+    - name: Show existing netplan config (if netplan available)
+      ansible.builtin.shell: cat /etc/netplan/*.yaml 2>/dev/null || echo "No netplan configs found (may need sudo)"
+      register: netplan_config
+      changed_when: false
+      failed_when: false
+      when: network_manager == 'netplan'
+
+    - name: Display netplan config
+      ansible.builtin.debug:
+        msg: "{{ netplan_config.stdout_lines | default(['netplan not detected']) }}"
+      when: network_manager == 'netplan'
+
+    - name: Diagnostic summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          Diagnostic Pre-Flight PASSED
+          ================================================================
+          Wired interface:    {{ wired_iface }}
+          Link state:         UP (carrier detected)
+          Network manager:    {{ network_manager }}
+          Current DHCP IP:    {{ ansible_host }}
+          Target static IP:   10.0.20.20/24
+          Target VLAN:        20 (Services)
+          Gateway:            10.0.20.1
+          OS:                 {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+          OS family:          {{ ansible_os_family }}
+
+          IMPORTANT: Ensure the ZimaBlade's switch port is assigned to
+          VLAN 20 (Services) via Terraform Layer 00 BEFORE proceeding
+          with Play 2, or the host will become unreachable after the
+          static IP change.
+          ================================================================
+
+# =========================================================================
+# Play 2: Setup + Static IP Assignment
+# =========================================================================
+# Creates admin user, sets hostname, configures static IP via netplan
+# (Ubuntu 24.04), locks admin user. SSH drops — expected.
+#
+# PREREQUISITE: Switch port must be on VLAN 20 before running this play.
+# =========================================================================
+- name: "Bootstrap lab-09 / archive (Play 2/3: Setup + Static IP)"
+  hosts: archive
+  become: true
+  gather_facts: true
+  tags: [never, full_bootstrap]
+
+  vars:
+    ansible_user: admin
+    ansible_host: "{{ dhcp_ip | default('10.0.4.9') }}"
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_archive"
+    admin_user: admin
+    admin_ssh_pubkey: "{{ lookup('file', '~/.ssh/id_ed25519_archive.pub') }}"
+    target_hostname: lab-09
+    target_ip: 10.0.20.20
+    target_cidr: 24
+    target_gateway: 10.0.20.1
+    # DNS must point to gw-01 (per-VLAN gateway) for internal
+    # *.home.example-lab.org resolution. Hardcoded 1.1.1.1/8.8.8.8 breaks
+    # internal DNS — services can't resolve each other by hostname.
+    dns_1: 10.0.20.1
+    dns_2: 1.1.1.1
+
+  tasks:
+    # Re-detect wired interface (Play 1 facts don't carry between plays)
+    - name: Re-detect wired Ethernet interface
+      ansible.builtin.shell: |
+        for iface in /sys/class/net/*; do
+          name=$(basename "$iface")
+          [ "$name" = "lo" ] && continue
+          [ -d "$iface/wireless" ] && continue
+          [ -e "$iface/device" ] || continue
+          [ "$(cat "$iface/type" 2>/dev/null)" = "1" ] || continue
+          echo "$name"
+          exit 0
+        done
+        exit 1
+      register: wired_detect
+      changed_when: false
+
+    - name: Set wired interface fact
+      ansible.builtin.set_fact:
+        wired_iface: "{{ wired_detect.stdout | trim }}"
+
+    # -------------------------------------------------------------------
+    # Hostname
+    # -------------------------------------------------------------------
+    - name: Set hostname to {{ target_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ target_hostname }}"
+
+    - name: Update /etc/hosts with new hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ target_hostname }}"
+        state: present
+
+    # -------------------------------------------------------------------
+    # Admin User Setup
+    # -------------------------------------------------------------------
+    - name: Create admin user with sudo privileges
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Set up SSH authorized key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_ssh_pubkey }}"
+        state: present
+        exclusive: false
+
+    - name: Grant admin user passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    # -------------------------------------------------------------------
+    # Static IP Configuration (netplan — Ubuntu 24.04)
+    # -------------------------------------------------------------------
+    # Ubuntu 24.04 Server uses netplan with systemd-networkd as the
+    # renderer by default. We drop a new netplan config with higher
+    # priority (99-) that overrides the installer's DHCP config.
+    # -------------------------------------------------------------------
+    - name: Deploy static IP netplan configuration
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-archive-static.yaml
+        content: |
+          # Managed by Ansible — archive-bootstrap.yml
+          # Static IP for archive appliance (lab-09) on Services VLAN 20
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              {{ wired_iface }}:
+                dhcp4: false
+                addresses:
+                  - {{ target_ip }}/{{ target_cidr }}
+                routes:
+                  - to: default
+                    via: {{ target_gateway }}
+                nameservers:
+                  addresses:
+                    - {{ dns_1 }}
+                    - {{ dns_2 }}
+        owner: root
+        group: root
+        mode: "0600"
+      register: netplan_config
+
+    - name: Remove default installer netplan config (DHCP)
+      ansible.builtin.shell: |
+        # Remove all netplan configs EXCEPT our static one to prevent conflicts
+        find /etc/netplan/ -name '*.yaml' -not -name '99-archive-static.yaml' -delete
+      when: netplan_config.changed
+      changed_when: true
+
+    # -------------------------------------------------------------------
+    # Lock Installer User (admin)
+    # -------------------------------------------------------------------
+    # IMPORTANT: Remove sudoers and group membership BEFORE locking the
+    # password. Once the password is locked, ansible can no longer
+    # re-authenticate for become — so password lock MUST be last.
+    # -------------------------------------------------------------------
+    - name: Remove admin sudoers entry (if any)
+      ansible.builtin.file:
+        path: /etc/sudoers.d/admin
+        state: absent
+
+    - name: Remove admin from sudo group
+      ansible.builtin.user:
+        name: admin
+        groups: ""
+        append: false
+
+    - name: Lock admin user password
+      ansible.builtin.user:
+        name: admin
+        password_lock: true
+
+    # -------------------------------------------------------------------
+    # Apply Network Config (SSH will drop — EXPECTED)
+    # -------------------------------------------------------------------
+    # Fire-and-forget: netplan apply changes the IP. SSH drops.
+    # The host will come up at 10.0.20.20 on VLAN 20.
+    # -------------------------------------------------------------------
+    - name: Flush handlers before network change
+      ansible.builtin.meta: flush_handlers
+
+    - name: Apply netplan config (SSH will drop — expected)
+      ansible.builtin.shell: |
+        nohup bash -c 'sleep 2 && netplan apply' &>/dev/null &
+      async: 0
+      poll: 0
+      changed_when: true
+
+# =========================================================================
+# Play 3: System Hardening (as admin at new static IP)
+# =========================================================================
+# Connects as the newly-created admin user at the static IP on VLAN 20.
+# Uses inventory defaults for archive (10.0.20.20, admin user).
+# Applies the full common baseline and CIS L1 hardening.
+# =========================================================================
+- name: "Bootstrap lab-09 / archive (Play 3/3: Hardening)"
+  hosts: archive
+  become: true
+  gather_facts: false
+  tags: [never, full_bootstrap]
+
+  # No connection overrides — inventory defaults are correct:
+  #   ansible_host: 10.0.20.20
+  #   ansible_user: admin
+  #   ansible_ssh_private_key_file: ~/.ssh/id_ed25519_archive
+
+  pre_tasks:
+    - name: Wait for host to come up at new IP (10.0.20.20)
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 120
+
+    - name: Gather facts from host at new IP
+      ansible.builtin.setup:
+
+    - name: Verify admin user connectivity
+      ansible.builtin.ping:
+
+  roles:
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    - role: hardening
+      tags:
+        - hardening
+        - security
+
+  post_tasks:
+    - name: Display bootstrap summary
+      ansible.builtin.debug:
+        msg: |
+          ================================================================
+          lab-09 (Archive Appliance) Bootstrap Complete!
+          ================================================================
+          Hostname:   {{ ansible_hostname }}
+          IP:         {{ ansible_default_ipv4.address | default('10.0.20.20') }}
+          VLAN:       20 (Services)
+          OS:         {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+          User:       admin (admin locked)
+          Roles:      common + hardening applied
+
+          Next steps:
+            1. Verify SSH:
+               ssh -i ~/.ssh/id_ed25519_archive -o IdentitiesOnly=yes admin@10.0.20.20
+
+            2. Deploy archive services:
+               export VAULT_ADDR=https://10.0.10.10:8200
+               export VAULT_TOKEN=hvs.xxxxx
+               export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+               ansible-playbook playbooks/archive-deploy.yml
+          ================================================================

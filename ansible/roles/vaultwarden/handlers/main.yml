@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Vaultwarden Role Handlers
+# =============================================================================
+
+- name: Restart vaultwarden
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ vaultwarden_install_dir }}"

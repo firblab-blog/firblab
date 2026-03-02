@@ -1,0 +1,206 @@
+---
+# =============================================================================
+# Vault Unseal — macOS User/Group + Binary Install
+# =============================================================================
+# Creates a dedicated service account via dscl and downloads the darwin binary.
+# Pattern follows: ansible/roles/vault/tasks/install_darwin.yml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Service Account (dscl)
+# ---------------------------------------------------------------------------
+- name: Check if unseal-vault group exists (macOS)
+  ansible.builtin.command: dscl . -read /Groups/_{{ vault_unseal_group }}
+  register: unseal_group_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Find next available GID for unseal-vault group (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    max_gid=$(dscl . -list /Groups PrimaryGroupID | awk '$2 >= 400 && $2 < 500 {print $2}' | sort -n | tail -1)
+    if [ -z "$max_gid" ]; then
+      echo 450
+    else
+      echo $((max_gid + 1))
+    fi
+  register: unseal_next_gid
+  changed_when: false
+  when: unseal_group_check.rc != 0
+  tags:
+    - install
+
+- name: Create unseal-vault group (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    GID={{ unseal_next_gid.stdout | default('451') }}
+    dscl . -create /Groups/_{{ vault_unseal_group }}
+    dscl . -create /Groups/_{{ vault_unseal_group }} PrimaryGroupID $GID
+    dscl . -create /Groups/_{{ vault_unseal_group }} RealName "Vault Unseal Service"
+    dscl . -create /Groups/_{{ vault_unseal_group }} Password "*"
+  when: unseal_group_check.rc != 0
+  tags:
+    - install
+
+- name: Check if unseal-vault user exists (macOS)
+  ansible.builtin.command: dscl . -read /Users/_{{ vault_unseal_user }}
+  register: unseal_user_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Find next available UID for unseal-vault user (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    max_uid=$(dscl . -list /Users UniqueID | awk '$2 >= 400 && $2 < 500 {print $2}' | sort -n | tail -1)
+    if [ -z "$max_uid" ]; then
+      echo 450
+    else
+      echo $((max_uid + 1))
+    fi
+  register: unseal_next_uid
+  changed_when: false
+  when: unseal_user_check.rc != 0
+  tags:
+    - install
+
+- name: Get unseal-vault group GID (macOS)
+  ansible.builtin.shell: |
+    dscl . -read /Groups/_{{ vault_unseal_group }} PrimaryGroupID | awk '{print $2}'
+  register: unseal_gid
+  changed_when: false
+  tags:
+    - install
+
+- name: Create unseal-vault user (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    UID_VAL={{ unseal_next_uid.stdout | default('451') }}
+    GID_VAL={{ unseal_gid.stdout }}
+    dscl . -create /Users/_{{ vault_unseal_user }}
+    dscl . -create /Users/_{{ vault_unseal_user }} UniqueID $UID_VAL
+    dscl . -create /Users/_{{ vault_unseal_user }} PrimaryGroupID $GID_VAL
+    dscl . -create /Users/_{{ vault_unseal_user }} UserShell /usr/bin/false
+    dscl . -create /Users/_{{ vault_unseal_user }} NFSHomeDirectory {{ vault_unseal_data_dir }}
+    dscl . -create /Users/_{{ vault_unseal_user }} RealName "Vault Unseal Service"
+    dscl . -create /Users/_{{ vault_unseal_user }} Password "*"
+  when: unseal_user_check.rc != 0
+  tags:
+    - install
+
+# Set macOS user/group with _ prefix
+- name: Set macOS unseal-vault user/group names with _ prefix
+  ansible.builtin.set_fact:
+    vault_unseal_user: "_{{ vault_unseal_user }}"
+    vault_unseal_group: "_{{ vault_unseal_group }}"
+  when: vault_unseal_user is not match('^_')
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Determine architecture and OS for download
+# ---------------------------------------------------------------------------
+- name: Set resolved architecture and OS for unseal vault download
+  ansible.builtin.set_fact:
+    vault_unseal_arch_resolved: "{{ 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+    vault_unseal_os_resolved: "darwin"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Download and Install Vault Binary
+# ---------------------------------------------------------------------------
+- name: Check if unseal vault binary is already installed at desired version
+  ansible.builtin.command:
+    cmd: "{{ vault_unseal_binary_path }} version"
+  register: vault_unseal_current_version
+  changed_when: false
+  failed_when: false
+  tags:
+    - install
+
+- name: Set vault_unseal_needs_install fact
+  ansible.builtin.set_fact:
+    vault_unseal_needs_install: >-
+      {{ vault_unseal_current_version.rc != 0 or
+         ('Vault v' + vault_version) not in (vault_unseal_current_version.stdout | default('')) }}
+  tags:
+    - install
+
+- name: Download Vault binary archive for unseal instance
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_darwin_{{ vault_unseal_arch_resolved }}.zip"
+    dest: "/tmp/vault-unseal_{{ vault_version }}_darwin_{{ vault_unseal_arch_resolved }}.zip"
+    mode: "0644"
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+
+- name: Download Vault SHA256SUMS for verification
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_SHA256SUMS"
+    dest: "/tmp/vault-unseal_{{ vault_version }}_SHA256SUMS"
+    mode: "0644"
+    force: true
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+
+- name: Verify unseal vault archive checksum (macOS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected=$(grep "vault_{{ vault_version }}_darwin_{{ vault_unseal_arch_resolved }}.zip" \
+      /tmp/vault-unseal_{{ vault_version }}_SHA256SUMS | awk '{print $1}')
+    actual=$(shasum -a 256 /tmp/vault-unseal_{{ vault_version }}_darwin_{{ vault_unseal_arch_resolved }}.zip | awk '{print $1}')
+    if [ "$expected" != "$actual" ]; then
+      echo "CHECKSUM MISMATCH: expected=$expected actual=$actual" >&2
+      exit 1
+    fi
+    echo "Checksum verified: $actual"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: vault_unseal_needs_install | bool
+  tags:
+    - install
+    - verify
+
+- name: Ensure /opt/unseal-vault directory exists
+  ansible.builtin.file:
+    path: /opt/unseal-vault
+    state: directory
+    owner: root
+    group: wheel
+    mode: "0755"
+  tags:
+    - install
+
+- name: Extract Vault binary for unseal instance (macOS)
+  ansible.builtin.unarchive:
+    src: "/tmp/vault-unseal_{{ vault_version }}_darwin_{{ vault_unseal_arch_resolved }}.zip"
+    dest: /opt/unseal-vault/
+    remote_src: true
+    owner: root
+    group: wheel
+    mode: "0755"
+  when: vault_unseal_needs_install | bool
+  notify: Restart vault-unseal
+  tags:
+    - install
+
+- name: Verify unseal vault binary is functional
+  ansible.builtin.command:
+    cmd: "{{ vault_unseal_binary_path }} version"
+  register: vault_unseal_version_check
+  changed_when: false
+  tags:
+    - install
+
+- name: Display installed unseal vault version
+  ansible.builtin.debug:
+    msg: "Unseal Vault: {{ vault_unseal_version_check.stdout }}"
+  tags:
+    - install

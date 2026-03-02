@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HashiCorp Vault LaunchDaemon
+  Managed by Ansible - DO NOT EDIT MANUALLY
+  Node: {{ vault_node_id }}
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example-lab.vault</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ vault_binary_path }}</string>
+    <string>server</string>
+    <string>-config={{ vault_config_dir }}/vault.hcl</string>
+  </array>
+
+  <key>UserName</key>
+  <string>{{ vault_user }}</string>
+
+  <key>GroupName</key>
+  <string>{{ vault_group }}</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VAULT_ADDR</key>
+    <string>{{ vault_api_addr }}</string>
+    <key>VAULT_CACERT</key>
+    <string>{{ vault_tls_ca_file }}</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{ vault_data_dir }}</string>
+
+  <key>StandardOutPath</key>
+  <string>{{ vault_log_dir }}/vault.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{ vault_log_dir }}/vault-error.log</string>
+
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+    <key>NumberOfProcesses</key>
+    <integer>65536</integer>
+  </dict>
+
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+    <key>NumberOfProcesses</key>
+    <integer>65536</integer>
+  </dict>
+</dict>
+</plist>

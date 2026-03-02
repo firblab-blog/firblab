@@ -1,0 +1,733 @@
+---
+# =============================================================================
+# Archive Appliance Role — Tasks
+# =============================================================================
+# Configures the ZimaBlade 7700 as a prepper-grade offline knowledge base.
+# Storage mounts (USB SSD, SATA HDD, NFS), Docker Compose stack with 6
+# services, and ZIM content download script.
+#
+# Tags:
+#   disk_setup  — Disk partitioning, formatting, fstab (first run only)
+#   storage     — Disk mounts + Docker data-root + NFS
+#   packages    — System packages (nfs-common, rsync, aria2, etc.)
+#   configure   — Directory scaffolding, config files, Docker data-root
+#   deploy      — Docker Compose pull + up
+#   zim         — ZIM download script deployment
+#   verify      — Per-service health checks
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Disk Setup (format + partition + fstab)
+# ---------------------------------------------------------------------------
+# Formats raw/foreign disks (APFS, PS4, etc.) as ext4 and mounts them.
+# Only runs when archive_disk_setup_enabled=true (default). Safe to re-run:
+# parted/mkfs tasks are gated on the disk NOT already having ext4.
+#
+# After first successful run, disks are ext4 with fstab entries by UUID.
+# Subsequent runs skip formatting and just ensure mounts are present.
+# ---------------------------------------------------------------------------
+- name: Install parted for disk management
+  ansible.builtin.apt:
+    name: parted
+    state: present
+    update_cache: true
+  when: archive_disk_setup_enabled | bool
+  tags:
+    - storage
+    - disk_setup
+
+- name: Check if block device exists
+  ansible.builtin.stat:
+    path: "{{ item.device }}"
+  register: disk_device_check
+  loop: "{{ archive_disks }}"
+  when: archive_disk_setup_enabled | bool
+  tags:
+    - storage
+    - disk_setup
+
+- name: Warn about missing block devices
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ item.item.device }} does not exist — skipping partition/format.
+      Check physical connection (USB SSD / SATA HDD).
+  loop: "{{ disk_device_check.results }}"
+  when:
+    - archive_disk_setup_enabled | bool
+    - not (item.stat.exists | default(false))
+  tags:
+    - storage
+    - disk_setup
+
+- name: Check existing filesystem on each disk
+  ansible.builtin.command:
+    cmd: "blkid -o value -s TYPE {{ item.device }}1"
+  register: disk_fs_check
+  loop: "{{ archive_disks }}"
+  changed_when: false
+  failed_when: false
+  when: archive_disk_setup_enabled | bool
+  tags:
+    - storage
+    - disk_setup
+
+- name: Wipe partition table and create single GPT partition
+  ansible.builtin.command:
+    cmd: >
+      parted -s {{ item.item.device }} --
+      mklabel gpt
+      mkpart primary ext4 1MiB 100%
+  loop: "{{ disk_fs_check.results }}"
+  when:
+    - archive_disk_setup_enabled | bool
+    - item.stdout | default('') != 'ext4'
+    - disk_device_check.results | selectattr('item.device', 'equalto', item.item.device) | map(attribute='stat.exists') | first | default(false)
+  tags:
+    - storage
+    - disk_setup
+
+- name: Format partition as ext4 with label
+  community.general.filesystem:
+    dev: "{{ item.item.device }}1"
+    fstype: ext4
+    opts: "-L {{ item.item.label }}"
+    force: true
+  loop: "{{ disk_fs_check.results }}"
+  when:
+    - archive_disk_setup_enabled | bool
+    - item.stdout | default('') != 'ext4'
+    - disk_device_check.results | selectattr('item.device', 'equalto', item.item.device) | map(attribute='stat.exists') | first | default(false)
+  tags:
+    - storage
+    - disk_setup
+
+- name: Create mount point directories
+  ansible.builtin.file:
+    path: "{{ item.mount }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "0755"
+  loop: "{{ archive_disks }}"
+  when: archive_disk_setup_enabled | bool
+  tags:
+    - storage
+    - disk_setup
+
+- name: Mount disks and add fstab entries (by label)
+  ansible.posix.mount:
+    src: "LABEL={{ item.label }}"
+    path: "{{ item.mount }}"
+    fstype: "{{ item.fstype }}"
+    opts: "{{ item.opts }}"
+    state: mounted
+  loop: "{{ archive_disks }}"
+  when:
+    - archive_disk_setup_enabled | bool
+    - disk_device_check.results | selectattr('item.device', 'equalto', item.device) | map(attribute='stat.exists') | first | default(false)
+  tags:
+    - storage
+    - disk_setup
+
+- name: Set ownership on mount points (post-mount)
+  ansible.builtin.file:
+    path: "{{ item.mount }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "0755"
+  loop: "{{ archive_disks }}"
+  when:
+    - archive_disk_setup_enabled | bool
+    - disk_device_check.results | selectattr('item.device', 'equalto', item.device) | map(attribute='stat.exists') | first | default(false)
+  tags:
+    - storage
+    - disk_setup
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+- name: Install archive tooling
+  ansible.builtin.apt:
+    name:
+      - nfs-common
+      - rsync
+      - age
+      - curl
+      - wget
+      - aria2
+    state: present
+    update_cache: true
+  tags:
+    - packages
+
+# ---------------------------------------------------------------------------
+# Docker Data Root (redirect from eMMC to USB SSD)
+# ---------------------------------------------------------------------------
+# The ZimaBlade's 32GB eMMC is too small for Docker images + volumes.
+# Override the Docker daemon data-root to the USB SSD.
+- name: Ensure Docker daemon config directory exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - configure
+    - storage
+
+- name: Configure Docker data-root on USB SSD
+  ansible.builtin.copy:
+    content: |
+      {
+        "data-root": "{{ archive_docker_data_root }}",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker
+  tags:
+    - configure
+    - storage
+
+# ---------------------------------------------------------------------------
+# Directories — Install directory (on eMMC)
+# ---------------------------------------------------------------------------
+- name: Create archive install directory
+  ansible.builtin.file:
+    path: "{{ archive_install_dir }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+- name: Create archive scripts directory
+  ansible.builtin.file:
+    path: "{{ archive_install_dir }}/scripts"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Directories — Hot storage (USB SSD)
+# ---------------------------------------------------------------------------
+- name: Create data directories on USB SSD (admin-owned)
+  ansible.builtin.file:
+    path: "{{ archive_data_dir }}/{{ item }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  loop:
+    - kiwix/zim
+    - bookstack/db
+    - bookstack/uploads
+    - stirlingpdf/training
+    - stirlingpdf/config
+    - filebrowser
+    - docker
+    - calibre/config
+    - calibre/books
+  tags:
+    - configure
+    - directories
+
+# ArchiveBox runs as UID 911 inside the container.
+# SQLite requires write access to the data directory for WAL journal files.
+- name: Create ArchiveBox data directory (UID 911)
+  ansible.builtin.file:
+    path: "{{ archive_data_dir }}/archivebox"
+    state: directory
+    owner: "911"
+    group: "911"
+    mode: "0755"
+  tags:
+    - configure
+    - directories
+
+# Wallabag data dirs — MariaDB handles persistence; these are Symfony cache/assets.
+# Wallabag container runs as root and manages ownership internally.
+- name: Create Wallabag data directories
+  ansible.builtin.file:
+    path: "{{ archive_data_dir }}/{{ item }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  loop:
+    - wallabag/db
+    - wallabag/data
+    - wallabag/images
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Directories — Cold storage (SATA HDD)
+# ---------------------------------------------------------------------------
+- name: Create data directories on SATA HDD
+  ansible.builtin.file:
+    path: "{{ archive_cold_dir }}/{{ item }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  loop:
+    - zim-overflow
+    - media
+    - archivebox-warc
+    - backups
+    - maps
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# NFS Mount from TrueNAS (optional)
+# ---------------------------------------------------------------------------
+- name: Create NFS mount point
+  ansible.builtin.file:
+    path: "{{ archive_mount_point }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  when: archive_nfs_enabled | bool
+  tags:
+    - configure
+    - nfs
+
+- name: Mount TrueNAS NFS share
+  ansible.posix.mount:
+    src: "{{ archive_nfs_server }}:{{ archive_nfs_path }}"
+    path: "{{ archive_mount_point }}"
+    fstype: nfs
+    opts: "defaults,rw,hard,intr,noatime,_netdev"
+    state: mounted
+  when: archive_nfs_enabled | bool
+  tags:
+    - configure
+    - nfs
+
+- name: Create NFS subdirectories
+  ansible.builtin.file:
+    path: "{{ archive_mount_point }}/{{ item }}"
+    state: directory
+    owner: admin
+    group: admin
+    mode: "0755"
+  loop:
+    - backups
+    - zim-library
+    - media
+    - documents
+    - software
+  when: archive_nfs_enabled | bool
+  tags:
+    - configure
+    - nfs
+
+# ---------------------------------------------------------------------------
+# FileBrowser Database (Docker bind-mount bug workaround)
+# ---------------------------------------------------------------------------
+- name: Check if filebrowser.db exists as a directory (Docker bind-mount bug)
+  ansible.builtin.stat:
+    path: "{{ archive_install_dir }}/filebrowser.db"
+  register: fb_db_stat
+  when: archive_filebrowser_enabled | default(true) | bool
+  tags:
+    - configure
+
+- name: Remove filebrowser.db directory (Docker created it incorrectly)
+  ansible.builtin.file:
+    path: "{{ archive_install_dir }}/filebrowser.db"
+    state: absent
+  when:
+    - archive_filebrowser_enabled | default(true) | bool
+    - fb_db_stat.stat.exists | default(false)
+    - fb_db_stat.stat.isdir | default(false)
+  tags:
+    - configure
+
+- name: Create FileBrowser database file (if not exists)
+  ansible.builtin.file:
+    path: "{{ archive_install_dir }}/filebrowser.db"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+  when: archive_filebrowser_enabled | default(true) | bool
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# TileServer GL config.json
+# ---------------------------------------------------------------------------
+# tileserver-gl requires config.json in the data directory at startup.
+# With archive_tileservergl_datasets=[] (default), it starts with an empty
+# catalog (no tiles). Download tiles with map-download.sh, then add them
+# to archive_tileservergl_datasets and re-run Ansible to register them.
+- name: Template tileserver-gl config.json
+  ansible.builtin.template:
+    src: tileserver-gl-config.json.j2
+    dest: "{{ archive_cold_dir }}/maps/config.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when: archive_tileservergl_enabled | default(true) | bool
+  notify: Restart archive
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Map Download Script
+# ---------------------------------------------------------------------------
+- name: Template map download script
+  ansible.builtin.template:
+    src: map-download.sh.j2
+    dest: "{{ archive_install_dir }}/scripts/map-download.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: archive_tileservergl_enabled | default(true) | bool
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# ZIM Sync Script + Cron
+# ---------------------------------------------------------------------------
+# Auto-discovers latest ZIM versions from download.kiwix.org, downloads
+# only if newer versions exist, removes stale files, restarts Kiwix.
+- name: Template ZIM sync script
+  ansible.builtin.template:
+    src: zim-sync.sh.j2
+    dest: "{{ archive_install_dir }}/scripts/zim-sync.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: archive_kiwix_enabled | default(true) | bool
+  tags:
+    - configure
+    - zim
+
+- name: Remove legacy ZIM download script (replaced by zim-sync.sh)
+  ansible.builtin.file:
+    path: "{{ archive_install_dir }}/scripts/zim-download.sh"
+    state: absent
+  tags:
+    - configure
+    - zim
+
+- name: Create monthly ZIM sync cron job
+  ansible.builtin.cron:
+    name: "zim-content-sync"
+    minute: "{{ archive_kiwix_zim_cron_minute }}"
+    hour: "{{ archive_kiwix_zim_cron_hour }}"
+    day: "{{ archive_kiwix_zim_cron_day }}"
+    job: "/opt/archive/scripts/zim-sync.sh >> /var/log/zim-sync.log 2>&1"
+    user: root
+    state: "{{ 'present' if (archive_kiwix_zim_cron_enabled | default(true) | bool) else 'absent' }}"
+  when: archive_kiwix_enabled | default(true) | bool
+  tags:
+    - configure
+    - zim
+
+# ---------------------------------------------------------------------------
+# Log Rotation (ZIM sync + Docker backup)
+# ---------------------------------------------------------------------------
+- name: Deploy logrotate config for archive logs
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/archive-appliance
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      /var/log/zim-sync.log {
+          monthly
+          rotate 6
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+
+      /var/log/docker-backup.log {
+          monthly
+          rotate 6
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Archive Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ archive_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_template_result
+  tags:
+    - configure
+
+# Pull images BEFORE flushing handlers or starting containers.
+# This catches bad image tags early — before any containers are
+# torn down or restarted. A failed pull here is safe: no containers
+# have been touched yet.
+- name: Pull archive container images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ archive_install_dir }}"
+  register: archive_pull_result
+  changed_when: "'Pull complete' in archive_pull_result.stdout or 'Downloaded' in archive_pull_result.stderr"
+  tags:
+    - deploy
+
+# Notify the handler only after pull succeeds, so a bad image tag
+# never triggers a container restart cycle.
+- name: Trigger archive restart if compose file changed
+  ansible.builtin.debug:
+    msg: "Docker Compose file changed — will restart containers"
+  changed_when: compose_template_result.changed
+  notify: Restart archive
+  tags:
+    - configure
+
+# Flush pending handlers (Docker daemon restart, archive restart)
+# before the explicit 'up' task below.
+- name: Flush handlers before starting archive containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# MariaDB tc.log Self-Healing
+# ---------------------------------------------------------------------------
+# MariaDB's transaction coordinator log (tc.log) can become corrupted if
+# a container is killed mid-transaction (e.g., 'docker compose down',
+# OOM kill, power loss). A corrupt tc.log causes a permanent restart loop:
+#   [ERROR] Bad magic header in tc log
+#   [ERROR] Crash recovery failed.
+# Fix: delete tc.log — MariaDB regenerates it on clean startup. Data is
+# safe because InnoDB has its own redo log for crash recovery.
+- name: Check for corrupt MariaDB tc.log files
+  ansible.builtin.stat:
+    path: "{{ archive_data_dir }}/{{ item }}/db/tc.log"
+  register: tclog_check
+  loop:
+    - bookstack
+    - wallabag
+  tags:
+    - deploy
+
+- name: Check MariaDB container health
+  ansible.builtin.command:
+    cmd: "docker inspect --format '{{ '{{' }}.State.Health.Status{{ '}}' }}' {{ item }}-db"
+  register: db_health_check
+  loop:
+    - bookstack
+    - wallabag
+  changed_when: false
+  failed_when: false
+  tags:
+    - deploy
+
+- name: Remove corrupt tc.log files (self-healing)
+  ansible.builtin.file:
+    path: "{{ archive_data_dir }}/{{ item.item }}/db/tc.log"
+    state: absent
+  loop: "{{ tclog_check.results }}"
+  when:
+    - item.stat.exists | default(false)
+    # Only remove if the DB container is unhealthy/restarting (not during normal operation)
+    - db_health_check.results | selectattr('item', 'equalto', item.item) | map(attribute='stdout') | first | default('') != 'healthy'
+  loop_control:
+    label: "{{ item.item }}"
+  notify: Restart archive
+  tags:
+    - deploy
+
+# --wait blocks until MariaDB health checks pass, ensuring BookStack
+# and Wallabag can connect on first startup.
+- name: Start archive containers (with health check wait)
+  ansible.builtin.shell:
+    cmd: docker compose up -d --remove-orphans --wait --wait-timeout 180
+    chdir: "{{ archive_install_dir }}"
+  register: archive_up_result
+  changed_when: "'Started' in archive_up_result.stderr or 'Creating' in archive_up_result.stderr"
+  # --wait may return non-zero if Kiwix crash-loops (no ZIM files yet).
+  # The Ansible health checks below will verify individual services.
+  failed_when: false
+  tags:
+    - deploy
+
+- name: Check if container start had issues
+  ansible.builtin.debug:
+    msg: >-
+      docker compose up returned rc={{ archive_up_result.rc }}.
+      This is expected if Kiwix is crash-looping (no ZIM files yet).
+      Individual service health will be verified below.
+  when: archive_up_result.rc != 0
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Checks
+# ---------------------------------------------------------------------------
+- name: Wait for FileBrowser to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_filebrowser_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: filebrowser_health
+  retries: 15
+  delay: 10
+  until: filebrowser_health.status is defined and filebrowser_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_filebrowser_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for Kiwix Serve to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_kiwix_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: kiwix_health
+  retries: 15
+  delay: 10
+  until: kiwix_health.status is defined and kiwix_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_kiwix_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for ArchiveBox to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_archivebox_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: archivebox_health
+  retries: 15
+  delay: 10
+  until: archivebox_health.status is defined and archivebox_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_archivebox_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for BookStack to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_bookstack_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: bookstack_health
+  retries: 20
+  delay: 10
+  until: bookstack_health.status is defined and bookstack_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_bookstack_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for Stirling PDF to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_stirlingpdf_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: stirlingpdf_health
+  retries: 15
+  delay: 10
+  until: stirlingpdf_health.status is defined and stirlingpdf_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_stirlingpdf_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for Wallabag to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_wallabag_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: wallabag_health
+  retries: 20
+  delay: 10
+  until: wallabag_health.status is defined and wallabag_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_wallabag_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for TileServer GL to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_tileservergl_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: tileservergl_health
+  retries: 15
+  delay: 10
+  until: tileservergl_health.status is defined and tileservergl_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_tileservergl_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Wait for Calibre-Web to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ archive_calibreweb_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: calibreweb_health
+  retries: 20
+  delay: 10
+  # Calibre-Web + DOCKER_MODS (Calibre install) takes longer on first start
+  until: calibreweb_health.status is defined and calibreweb_health.status in [200, 301, 302]
+  failed_when: false
+  when: archive_calibreweb_enabled | default(true) | bool
+  tags:
+    - verify
+
+- name: Display archive service health summary
+  ansible.builtin.debug:
+    msg:
+      - "Archive Service Health Check Summary:"
+      - "  FileBrowser:   {{ filebrowser_health.status | default('disabled/not responding') }}"
+      - "  Kiwix Serve:   {{ kiwix_health.status | default('disabled/not responding') }}"
+      - "  ArchiveBox:    {{ archivebox_health.status | default('disabled/not responding') }}"
+      - "  BookStack:     {{ bookstack_health.status | default('disabled/not responding') }}"
+      - "  Stirling PDF:  {{ stirlingpdf_health.status | default('disabled/not responding') }}"
+      - "  Wallabag:      {{ wallabag_health.status | default('disabled/not responding') }}"
+      - "  TileServer GL: {{ tileservergl_health.status | default('disabled/not responding') }}"
+      - "  Calibre-Web:   {{ calibreweb_health.status | default('disabled/not responding') }}"
+  tags:
+    - verify

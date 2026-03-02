@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# Auditd Configuration — RedHat/Rocky
+# =============================================================================
+
+- name: Template auditd rules (RedHat)
+  ansible.builtin.template:
+    src: auditd-rules-redhat.j2
+    dest: /etc/audit/rules.d/cis-l1.rules
+    owner: root
+    group: root
+    mode: "0640"
+    backup: true
+  notify: Restart auditd
+  tags:
+    - audit
+    - security
+
+- name: Enable and start auditd service
+  ansible.builtin.systemd:
+    name: auditd
+    enabled: true
+    state: started
+  tags:
+    - audit
+    - security

@@ -1,0 +1,612 @@
+---
+# =============================================================================
+# Proxmox Node Bootstrap Playbook
+# =============================================================================
+# Two-phase bootstrap for fresh Proxmox VE nodes:
+#
+# Play 1 - Initial Setup (connects as root — first and last time):
+#   Creates admin user, configures VLAN-aware networking, sets up Proxmox-
+#   specific iptables firewall, then locks out root SSH permanently.
+#
+# Play 2 - System Hardening (connects as admin):
+#   Applies common baseline (packages, NTP, fail2ban, SSH hardening,
+#   auto-updates) and CIS L1 hardening (kernel params, auditd, AIDE,
+#   AppArmor, file permissions) via reusable roles.
+#
+# After running this playbook, the inventory should use ansible_user: admin
+# for all future operations against this host. Root SSH is permanently
+# disabled.
+#
+# Usage:
+#   ansible-playbook playbooks/proxmox-bootstrap.yml --limit lab-02
+#   ansible-playbook playbooks/proxmox-bootstrap.yml -e "admin_user=admin"
+#
+# Day-2 firewall updates (re-apply iptables rules on already-bootstrapped nodes):
+#   ansible-playbook playbooks/proxmox-bootstrap.yml --limit proxmox_nodes --tags firewall
+#   (Play 1 is entirely skipped — its play-level tag 'bootstrap' doesn't match,
+#    so Ansible never connects as root or even attempts gather_facts)
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Play 1: Initial Bootstrap (as root)
+# -------------------------------------------------------------------------
+# This is the ONLY time root SSH is used. After this play completes,
+# root SSH is permanently disabled. All subsequent access uses the admin
+# user created here.
+# -------------------------------------------------------------------------
+- name: "Bootstrap Proxmox VE Node (Phase 1: Root Setup)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+  tags: [bootstrap]
+
+  vars:
+    # Override inventory connection — bootstrap connects as root
+    ansible_user: root
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ inventory_hostname }}"
+
+    # Admin user to create (replaces root for all future access)
+    # Uses the same per-host SSH key as root for consistency
+    admin_user: admin
+    admin_ssh_pubkey: "{{ lookup('file', '~/.ssh/id_ed25519_' + inventory_hostname + '.pub') }}"
+
+    # Network configuration
+    proxmox_mgmt_interface: vmbr0
+    # proxmox_mgmt_bridge_ports: MUST be set per-host in inventory (no default — different hardware = different NIC names)
+    management_subnet: "10.0.10.0/24"
+    workstation_subnet: "10.0.4.0/24"
+
+  tasks:
+    # -----------------------------------------------------------------------
+    # APT Repository Fix (MUST be first — everything else needs apt)
+    # -----------------------------------------------------------------------
+    # Fresh Proxmox ships with enterprise repos that require a paid
+    # subscription. Without a key, apt update fails with 401 Unauthorized.
+    # This block:
+    #   1. Disables enterprise repos (paid subscription required)
+    #   2. Installs Proxmox GPG release key (idempotent)
+    #   3. Enables no-subscription community repos (HTTP — Proxmox's HTTPS
+    #      has SSL cert issues; packages are GPG-signed regardless)
+    #   4. Updates apt cache and full-upgrades all packages
+    #   5. Removes the subscription nag popup from the Web UI
+    #
+    # NOTE: Debian base repos (trixie, trixie-updates, trixie-security) are
+    # already configured by the Proxmox installer via debian.sources (DEB822
+    # format). We do NOT create a duplicate debian.list file.
+    # -----------------------------------------------------------------------
+    - name: Disable Proxmox enterprise repo — .list format (PVE 8.x and earlier)
+      ansible.builtin.command:
+        cmd: "mv /etc/apt/sources.list.d/pve-enterprise.list /etc/apt/sources.list.d/pve-enterprise.list.disabled"
+        removes: /etc/apt/sources.list.d/pve-enterprise.list
+      tags: [repos]
+
+    - name: Disable Proxmox enterprise repo — .sources format (PVE 9.x DEB822)
+      ansible.builtin.command:
+        cmd: "mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled"
+        removes: /etc/apt/sources.list.d/pve-enterprise.sources
+      tags: [repos]
+
+    - name: Disable Ceph enterprise repo — .list format (PVE 8.x and earlier)
+      ansible.builtin.command:
+        cmd: "mv /etc/apt/sources.list.d/ceph.list /etc/apt/sources.list.d/ceph.list.disabled"
+        removes: /etc/apt/sources.list.d/ceph.list
+      tags: [repos]
+
+    - name: Disable Ceph enterprise repo — .sources format (PVE 9.x DEB822)
+      ansible.builtin.command:
+        cmd: "mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled"
+        removes: /etc/apt/sources.list.d/ceph.sources
+      tags: [repos]
+
+    - name: Install Proxmox VE release GPG key
+      ansible.builtin.get_url:
+        url: https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg
+        dest: /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
+        owner: root
+        group: root
+        mode: "0644"
+      tags: [repos]
+
+    - name: Enable Proxmox VE no-subscription repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.list
+        content: "deb http://download.proxmox.com/debian/pve trixie pve-no-subscription\n"
+        owner: root
+        group: root
+        mode: "0644"
+      tags: [repos]
+
+    - name: Enable Ceph no-subscription repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/ceph-no-subscription.list
+        content: "deb http://download.proxmox.com/debian/ceph-squid trixie no-subscription\n"
+        owner: root
+        group: root
+        mode: "0644"
+      tags: [repos]
+
+    - name: Update apt cache after repository changes
+      ansible.builtin.apt:
+        update_cache: true
+      tags: [repos]
+
+    - name: Full-upgrade all packages to latest versions
+      ansible.builtin.apt:
+        upgrade: full
+        autoremove: true
+      tags: [repos, upgrade]
+
+    # -----------------------------------------------------------------------
+    # Remove subscription nag popup from Web UI
+    # -----------------------------------------------------------------------
+    # The Proxmox Web UI shows a "No valid subscription" popup on every
+    # login. This patches proxmoxlib.js to disable the check. The sed
+    # targets the subscription status check line, making the condition
+    # always evaluate to false. Idempotent — safe to re-run.
+    #
+    # NOTE: Proxmox package upgrades may restore the original JS file.
+    # An APT post-invoke hook ensures the patch is reapplied automatically.
+    # -----------------------------------------------------------------------
+    - name: Remove subscription nag popup from Proxmox Web UI
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          JS_FILE="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+          if grep -q "res\.data\.status.*!.*active" "$JS_FILE" 2>/dev/null; then
+            cp "$JS_FILE" "${JS_FILE}.bak"
+            sed -i '/.*res\.data\.status.*/{s/\!//;s/active/NoMoreNagging/}' "$JS_FILE"
+            echo "CHANGED"
+          else
+            echo "OK"
+          fi
+        executable: /bin/bash
+      register: nag_removal
+      changed_when: nag_removal.stdout | trim == "CHANGED"
+      notify: Restart pveproxy
+      tags: [repos, nag]
+
+    - name: Install APT hook to reapply nag removal after proxmox-widget-toolkit updates
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-pve-nag-removal
+        content: |
+          // Reapply subscription nag removal after proxmox-widget-toolkit upgrades
+          DPkg::Post-Invoke {
+            "if [ -f /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js ]; then sed -i '/.*res\\.data\\.status.*/{s/\\!//;s/active/NoMoreNagging/}' /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js && systemctl restart pveproxy.service 2>/dev/null || true; fi";
+          };
+        owner: root
+        group: root
+        mode: "0644"
+      tags: [repos, nag]
+
+    # -----------------------------------------------------------------------
+    # Prerequisites
+    # -----------------------------------------------------------------------
+    - name: Install sudo (not present on fresh Proxmox/Debian)
+      ansible.builtin.apt:
+        name: sudo
+        state: present
+
+    # -----------------------------------------------------------------------
+    # Admin User Setup
+    # -----------------------------------------------------------------------
+    - name: Create admin user with sudo privileges
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Set up SSH authorized key for admin user
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_ssh_pubkey }}"
+        state: present
+        exclusive: false
+
+    - name: Grant admin user passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    # -----------------------------------------------------------------------
+    # VLAN-Aware Bridge Configuration
+    # -----------------------------------------------------------------------
+    # proxmox_mgmt_bridge_ports MUST be set per-host in inventory.
+    # Different hardware has different NIC names (eno1, enp1s0, nic0, etc.)
+    # and guessing wrong kills network access — requiring physical console.
+    # -----------------------------------------------------------------------
+    - name: "PREFLIGHT: Verify proxmox_mgmt_bridge_ports is defined"
+      ansible.builtin.assert:
+        that:
+          - proxmox_mgmt_bridge_ports is defined
+          - proxmox_mgmt_bridge_ports | length > 0
+        fail_msg: >-
+          proxmox_mgmt_bridge_ports is NOT set for {{ inventory_hostname }}.
+          This variable MUST be defined in inventory (ansible/inventory/hosts.yml)
+          with the physical NIC name (e.g., eno1, enp1s0, nic0). Run
+          'ip link show' on the host to find it. Writing /etc/network/interfaces
+          with the wrong bridge-ports will kill network access.
+        success_msg: "Bridge ports: {{ proxmox_mgmt_bridge_ports }}"
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Verify physical NIC {{ proxmox_mgmt_bridge_ports }} exists"
+      ansible.builtin.command: "ip link show {{ proxmox_mgmt_bridge_ports }}"
+      register: nic_check
+      changed_when: false
+      failed_when: nic_check.rc != 0
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Verify storage NIC {{ proxmox_storage_bridge_ports }} exists"
+      ansible.builtin.command: "ip link show {{ proxmox_storage_bridge_ports }}"
+      register: storage_nic_check
+      changed_when: false
+      failed_when: storage_nic_check.rc != 0
+      when: proxmox_storage_bridge_ports is defined
+      tags:
+        - network
+
+    - name: Configure VLAN-aware bridge (vmbr0)
+      ansible.builtin.template:
+        src: proxmox-interfaces.j2
+        dest: /etc/network/interfaces
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      notify: Restart networking
+      tags:
+        - network
+
+    # -----------------------------------------------------------------------
+    # Proxmox Firewall (iptables) — Initial setup as root
+    # -----------------------------------------------------------------------
+    # Proxmox nodes use raw iptables instead of UFW because they need
+    # rules for Proxmox-specific services (corosync, migration, Web UI).
+    # The common role's UFW firewall is skipped via proxmox_skip_ufw=true
+    # in group_vars/proxmox_nodes.yml.
+    #
+    # IMPORTANT: These tasks are intentionally NOT tagged 'firewall'.
+    # Play 2 has an identical block tagged [firewall] for day-2 updates.
+    # This separation prevents --tags firewall from triggering Play 1's
+    # root SSH connection on already-bootstrapped nodes (where root is
+    # locked), which would cause fail2ban bans and block Play 2.
+    #
+    # Full bootstrap (no --tags): both copies run (idempotent, no harm).
+    # Day-2 firewall: --tags firewall skips Play 1 entirely, runs Play 2.
+    # -----------------------------------------------------------------------
+    - name: Install iptables-persistent
+      ansible.builtin.apt:
+        name:
+          - iptables
+          - iptables-persistent
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Set temporary ACCEPT policy before flush (prevent lockout)
+      ansible.builtin.iptables:
+        chain: "{{ item }}"
+        policy: ACCEPT
+      loop:
+        - INPUT
+        - FORWARD
+        - OUTPUT
+
+    - name: Flush existing iptables rules
+      ansible.builtin.iptables:
+        chain: "{{ item }}"
+        flush: true
+      loop:
+        - INPUT
+        - FORWARD
+        - OUTPUT
+
+    - name: Allow loopback traffic
+      ansible.builtin.iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+
+    - name: Allow established and related connections
+      ansible.builtin.iptables:
+        chain: INPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+
+    - name: Allow ICMP (ping)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: icmp
+        jump: ACCEPT
+
+    - name: Allow SSH from management and workstation subnets
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "22"
+        source: "{{ item }}"
+        jump: ACCEPT
+      loop:
+        - "{{ management_subnet }}"
+        - "{{ workstation_subnet }}"
+
+    - name: Allow Proxmox Web UI (8006) from management, workstation, and IoT subnets
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "8006"
+        source: "{{ item }}"
+        jump: ACCEPT
+      loop:
+        - "{{ management_subnet }}"
+        - "{{ workstation_subnet }}"
+        - "{{ iot_network }}"           # VLAN 60 — Home Assistant Proxmox VE integration
+
+    - name: Allow Proxmox cluster communication (corosync)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: "5405:5412"
+        source: "{{ management_subnet }}"
+        jump: ACCEPT
+
+    - name: Allow Proxmox migration traffic
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "60000:60050"
+        source: "{{ management_subnet }}"
+        jump: ACCEPT
+
+    - name: Allow node_exporter (9100) from Services VLAN for Prometheus scraping
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "9100"
+        source: "{{ services_network }}"
+        jump: ACCEPT
+
+    - name: Set INPUT chain default policy to DROP
+      ansible.builtin.iptables:
+        chain: INPUT
+        policy: DROP
+
+    - name: Allow all outbound traffic
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        policy: ACCEPT
+
+    - name: Save iptables rules
+      ansible.builtin.shell: |
+        iptables-save > /etc/iptables/rules.v4
+      changed_when: true
+
+    # -----------------------------------------------------------------------
+    # Storage Content Types
+    # -----------------------------------------------------------------------
+    # Proxmox 'local' storage (directory-backed) ships with a limited set
+    # of content types. Terraform's bpg/proxmox provider needs:
+    #   - snippets: for cloud-init user-data uploads (SFTP to local:snippets/)
+    #   - images:   for cloud-init ISO during cross-node clone migrations
+    # Without these, terraform apply fails with "content type not available".
+    # -----------------------------------------------------------------------
+    - name: Enable snippets and images content types on local storage
+      ansible.builtin.command:
+        cmd: pvesm set local --content backup,import,iso,vztmpl,snippets,images
+      register: pvesm_result
+      changed_when: pvesm_result.rc == 0
+      tags: [storage]
+
+    # -----------------------------------------------------------------------
+    # Lock Down Root SSH
+    # -----------------------------------------------------------------------
+    # Restricts root to key-based SSH only. Password-based root login is
+    # blocked, but key-based access is preserved because Proxmox clusters
+    # REQUIRE root SSH between nodes for pvecm, migration, config sync,
+    # and Web UI remote shell. Using "no" here breaks clustering.
+    # The admin user is used for all operator access going forward.
+    # -----------------------------------------------------------------------
+    - name: Restrict root SSH to key-based auth only (Proxmox cluster requirement)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin prohibit-password"
+        state: present
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+
+    # Force all handlers to run NOW before Play 2 changes the connection user
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+  handlers:
+    - name: Restart networking
+      ansible.builtin.command: ifreload -a
+      changed_when: true
+
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+    - name: Restart pveproxy
+      ansible.builtin.systemd:
+        name: pveproxy
+        state: restarted
+
+# -------------------------------------------------------------------------
+# Play 2: System Hardening (as admin)
+# -------------------------------------------------------------------------
+# Connects as the newly-created admin user with sudo. Applies the full
+# common baseline and CIS L1 hardening via reusable roles.
+#
+# The common role's UFW firewall is automatically skipped for Proxmox
+# nodes via proxmox_skip_ufw=true in group_vars/proxmox_nodes.yml.
+# -------------------------------------------------------------------------
+- name: "Bootstrap Proxmox VE Node (Phase 2: Hardening)"
+  hosts: proxmox_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    # Connect as the admin user created in Play 1 (same per-host key)
+    ansible_user: admin
+    ansible_ssh_private_key_file: "~/.ssh/id_ed25519_{{ inventory_hostname }}"
+
+  pre_tasks:
+    - name: Verify admin user connectivity
+      ansible.builtin.ping:
+
+    # -----------------------------------------------------------------------
+    # Proxmox Firewall (iptables)
+    # -----------------------------------------------------------------------
+    # Proxmox nodes use raw iptables instead of UFW because they need
+    # rules for Proxmox-specific services (corosync, migration, Web UI).
+    # The common role's UFW firewall is skipped via proxmox_skip_ufw=true
+    # in group_vars/proxmox_nodes.yml.
+    #
+    # Lives in Play 2 (admin+become) so it is idempotent and re-runnable on
+    # already-bootstrapped nodes with: --tags firewall
+    # -----------------------------------------------------------------------
+    - name: Install iptables-persistent
+      ansible.builtin.apt:
+        name:
+          - iptables
+          - iptables-persistent
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      tags: [firewall]
+
+    - name: Set temporary ACCEPT policy before flush (prevent lockout)
+      ansible.builtin.iptables:
+        chain: "{{ item }}"
+        policy: ACCEPT
+      loop:
+        - INPUT
+        - FORWARD
+        - OUTPUT
+      tags: [firewall]
+
+    - name: Flush existing iptables rules
+      ansible.builtin.iptables:
+        chain: "{{ item }}"
+        flush: true
+      loop:
+        - INPUT
+        - FORWARD
+        - OUTPUT
+      tags: [firewall]
+
+    - name: Allow loopback traffic
+      ansible.builtin.iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Allow established and related connections
+      ansible.builtin.iptables:
+        chain: INPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Allow ICMP (ping)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: icmp
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Allow SSH from management and workstation subnets
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "22"
+        source: "{{ item }}"
+        jump: ACCEPT
+      loop:
+        - "{{ management_network }}"
+        - "{{ lan_network }}"
+      tags: [firewall]
+
+    - name: Allow Proxmox Web UI (8006) from management, workstation, and IoT subnets
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "8006"
+        source: "{{ item }}"
+        jump: ACCEPT
+      loop:
+        - "{{ management_network }}"
+        - "{{ lan_network }}"
+        - "{{ iot_network }}"           # VLAN 60 — Home Assistant Proxmox VE integration
+      tags: [firewall]
+
+    - name: Allow Proxmox cluster communication (corosync)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: "5405:5412"
+        source: "{{ management_network }}"
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Allow Proxmox migration traffic
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "60000:60050"
+        source: "{{ management_network }}"
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Allow node_exporter (9100) from Services VLAN for Prometheus scraping
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "9100"
+        source: "{{ services_network }}"
+        jump: ACCEPT
+      tags: [firewall]
+
+    - name: Set INPUT chain default policy to DROP
+      ansible.builtin.iptables:
+        chain: INPUT
+        policy: DROP
+      tags: [firewall]
+
+    - name: Allow all outbound traffic
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        policy: ACCEPT
+      tags: [firewall]
+
+    - name: Save iptables rules
+      ansible.builtin.shell: |
+        iptables-save > /etc/iptables/rules.v4
+      changed_when: true
+      tags: [firewall]
+
+  roles:
+    # Common baseline: packages, NTP, fail2ban, SSH hardening, auto-updates
+    # Firewall is skipped for Proxmox (proxmox_skip_ufw=true in group_vars)
+    - role: common
+      tags:
+        - common
+        - baseline
+
+    # CIS L1 hardening: kernel params, auditd, AIDE, AppArmor, file perms
+    - role: hardening
+      tags:
+        - hardening
+        - security

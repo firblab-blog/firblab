@@ -1,0 +1,85 @@
+---
+# =============================================================================
+# RKE2 Agent Installation
+# =============================================================================
+# Installs and configures an RKE2 agent (worker) node.
+# Agents join the cluster via the registration endpoint on port 9345.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Install RKE2 Binary
+# ---------------------------------------------------------------------------
+- name: Install RKE2 agent
+  ansible.builtin.shell:
+    cmd: |
+      curl -sfL https://get.rke2.io | \
+        INSTALL_RKE2_VERSION="{{ rke2_version }}" \
+        INSTALL_RKE2_TYPE="agent" \
+        sh -
+    creates: /usr/local/bin/rke2
+  environment:
+    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Cluster Token
+# ---------------------------------------------------------------------------
+- name: Write cluster token file
+  ansible.builtin.copy:
+    content: "{{ rke2_cluster_token }}"
+    dest: "{{ rke2_config_dir }}/cluster-token"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Agent Configuration
+# ---------------------------------------------------------------------------
+- name: Deploy RKE2 agent config
+  ansible.builtin.template:
+    src: rke2-agent-config.yaml.j2
+    dest: "{{ rke2_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart rke2-agent
+  tags:
+    - install
+    - configure
+
+# ---------------------------------------------------------------------------
+# Enable and Start
+# ---------------------------------------------------------------------------
+- name: Enable RKE2 agent service
+  ansible.builtin.systemd:
+    name: rke2-agent
+    enabled: true
+    daemon_reload: true
+  tags:
+    - install
+
+- name: Start RKE2 agent service
+  ansible.builtin.systemd:
+    name: rke2-agent
+    state: started
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Add RKE2 binaries to PATH
+# ---------------------------------------------------------------------------
+- name: Add RKE2 bin to system PATH
+  ansible.builtin.copy:
+    dest: /etc/profile.d/rke2.sh
+    content: |
+      # RKE2 — managed by Ansible
+      export PATH="$PATH:{{ rke2_bin_dir }}"
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - install

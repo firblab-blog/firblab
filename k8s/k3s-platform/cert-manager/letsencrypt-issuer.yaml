@@ -1,0 +1,24 @@
+# ClusterIssuer for Let's Encrypt — K3s RPi5 cluster.
+# Issues publicly-trusted TLS certificates via Cloudflare DNS-01 challenge
+# for *.home.example-lab.org services (e.g., grafana.home.example-lab.org).
+#
+# Prerequisites:
+#   - cert-manager installed in the cluster
+#   - Cloudflare API token synced from Vault via ExternalSecret
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@example-lab.org
+    privateKeySecretRef:
+      name: letsencrypt-dns-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token

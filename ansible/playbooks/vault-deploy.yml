@@ -1,0 +1,166 @@
+---
+# =============================================================================
+# Vault Cluster Deployment Playbook
+# =============================================================================
+# Deploys and configures a 3-node HashiCorp Vault cluster with integrated
+# Raft storage. Supports Linux (systemd) and macOS (LaunchDaemon).
+# Handles fresh installation, configuration, and optional transit auto-unseal.
+#
+# Prerequisites:
+#   - TLS certificates generated and available (or use a pre-task to generate)
+#   - SSH access to all vault_cluster hosts
+#   - inventory/group_vars/vault_cluster.yml configured
+#
+# Usage:
+#   ansible-playbook playbooks/vault-deploy.yml
+#   ansible-playbook playbooks/vault-deploy.yml --tags install
+#   ansible-playbook playbooks/vault-deploy.yml -e deploy_unseal_vault=true
+#   ansible-playbook playbooks/vault-deploy.yml -e "vault_transit_unseal_enabled=true" \
+#     -e "vault_transit_seal_token=<token>"
+#
+# Workflow:
+#   1. Deploy cluster:     ansible-playbook playbooks/vault-deploy.yml
+#   2. Initialize + unseal the first node manually
+#   3. Deploy unseal vault: ansible-playbook playbooks/vault-deploy.yml -e deploy_unseal_vault=true
+#   4. Initialize unseal vault, enable transit engine, create token (manual)
+#   5. Migrate seal:       ansible-playbook playbooks/vault-deploy.yml \
+#        -e vault_transit_unseal_enabled=true -e vault_transit_seal_token=<token>
+# =============================================================================
+
+- name: Deploy HashiCorp Vault Cluster
+  hosts: vault_cluster
+  become: true
+  gather_facts: true
+  serial: 1  # Rolling deployment — one node at a time
+
+  pre_tasks:
+    - name: Validate vault_node_id is set
+      ansible.builtin.assert:
+        that:
+          - vault_node_id is defined
+          - vault_node_id | length > 0
+        fail_msg: "vault_node_id must be defined for each host in vault_cluster"
+        success_msg: "Deploying Vault on node {{ vault_node_id }}"
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+        filter:
+          - ansible_architecture
+          - ansible_os_family
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Vault {{ vault_version }} on {{ inventory_hostname }}
+          ({{ vault_node_id }}, os={{ ansible_os_family }},
+          arch={{ ansible_architecture }}, ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (Linux only — macOS uses macos-pf)
+    # Opens vault_firewall_ports (8200, 8201) via firewall_additional_ports mapping
+    - role: common
+      when: ansible_os_family != "Darwin"
+      tags:
+        - common
+        - firewall
+
+    # Install Vault binary, configure storage/listener/TLS, set up service
+    - role: vault
+      tags:
+        - vault
+        - install
+        - configure
+
+  post_tasks:
+    - name: Wait for Vault API to become available
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ vault_api_port }}/v1/sys/health"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200  # Initialized, unsealed, active
+          - 429  # Unsealed, standby
+          - 472  # Data recovery mode
+          - 473  # Performance standby
+          - 501  # Not initialized
+          - 503  # Sealed
+      register: vault_health
+      retries: 12
+      delay: 5
+      until: vault_health.status in [200, 429, 472, 473, 501, 503]
+      tags:
+        - health
+
+    - name: Report Vault node status
+      ansible.builtin.debug:
+        msg: >
+          Vault {{ vault_node_id }} health check returned {{ vault_health.status }}.
+          {% if vault_health.status == 501 %}Node is NOT initialized — run 'vault operator init' on the first node.
+          {% elif vault_health.status == 503 %}Node is sealed — unseal required.
+          {% elif vault_health.status == 200 %}Node is active and healthy.
+          {% elif vault_health.status == 429 %}Node is unsealed and in standby mode.
+          {% endif %}
+      tags:
+        - health
+
+# =============================================================================
+# Transit Auto-Unseal Configuration (optional, applied after initial setup)
+# =============================================================================
+# The unseal vault is a lightweight standalone Vault instance that runs on
+# the Mac Mini (vault-1) on port 8210. It provides the transit engine used
+# by all cluster nodes for automatic unseal after reboot.
+#
+# Deploy with: -e deploy_unseal_vault=true
+# (Separate from vault_transit_unseal_enabled, which configures the production
+#  vault's seal stanza and requires the transit token to already exist.)
+# =============================================================================
+- name: Deploy Transit Unseal Vault
+  hosts: vault-1
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Gather system facts for unseal vault
+      ansible.builtin.setup:
+        filter:
+          - ansible_architecture
+          - ansible_os_family
+      when: deploy_unseal_vault | default(false) | bool
+
+  roles:
+    - role: vault-unseal
+      when: deploy_unseal_vault | default(false) | bool
+      tags:
+        - vault-unseal
+        - unseal
+
+  post_tasks:
+    - name: Wait for unseal Vault API to become available
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:8210/v1/sys/health"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200  # Initialized, unsealed
+          - 501  # Not initialized
+          - 503  # Sealed
+      register: unseal_health
+      retries: 12
+      delay: 5
+      until: unseal_health.status in [200, 501, 503]
+      when: deploy_unseal_vault | default(false) | bool
+      tags:
+        - health
+
+    - name: Report unseal Vault status
+      ansible.builtin.debug:
+        msg: >
+          Unseal Vault health check returned {{ unseal_health.status }}.
+          {% if unseal_health.status == 501 %}Unseal Vault is NOT initialized — run 'vault operator init' against port 8210.
+          {% elif unseal_health.status == 503 %}Unseal Vault is sealed — manual unseal required.
+          {% elif unseal_health.status == 200 %}Unseal Vault is active and ready for transit auto-unseal.
+          {% endif %}
+      when: deploy_unseal_vault | default(false) | bool
+      tags:
+        - health

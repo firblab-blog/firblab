@@ -1,0 +1,30 @@
+# =============================================================================
+# Environment: lab-09 (Pilot/Staging Proxmox Node)
+# =============================================================================
+# Normal usage (Vault is running — secrets come from Vault automatically):
+#   terraform apply -var proxmox_node=lab-09
+#
+# Bootstrap (Vault not yet deployed):
+#   Copy to lab-09.tfvars, fill in real values, then:
+#   terraform apply -var use_vault=false -var-file=../../environments/lab-09.tfvars
+#
+# NEVER commit the real .tfvars file to version control.
+# =============================================================================
+
+# Proxmox node to target (used for Vault secret lookup)
+proxmox_node = "lab-09"
+
+# --- Bootstrap-only variables (use_vault=false) ---
+# proxmox_api_url   = "https://10.0.10.9:8006"
+# proxmox_api_token = "terraform@pam!terraform-token=00000000-0000-0000-0000-000000000000"
+
+# SSH
+ssh_public_key = "ssh-ed25519 AAAA... your-key-comment"
+
+# Storage
+vm_storage_pool      = "local-lvm"
+iso_storage_pool     = "local"
+snippet_storage_pool = "local"
+
+# Network
+network_bridge = "vmbr0"

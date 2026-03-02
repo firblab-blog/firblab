@@ -1,0 +1,39 @@
+# Headlamp — Kubernetes web UI and cluster visualizer
+# Wave 2: Workload application (depends on ingress, TLS)
+# Official K8s SIG project: https://github.com/kubernetes-sigs/headlamp
+# Helm chart: https://kubernetes-sigs.github.io/headlamp/ (multi-source pattern)
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: headlamp
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  sources:
+    - repoURL: https://kubernetes-sigs.github.io/headlamp/
+      chart: headlamp
+      targetRevision: "0.40.*"
+      helm:
+        releaseName: headlamp
+        valueFiles:
+          - $values/k8s/platform/headlamp/helm/values.yaml
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: headlamp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

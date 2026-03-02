@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# Mealie Role Handlers
+# =============================================================================
+
+- name: Restart mealie
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ mealie_install_dir }}"

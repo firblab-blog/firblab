@@ -1,0 +1,24 @@
+# =============================================================================
+# Traefik BasicAuth Middleware for Longhorn UI
+# =============================================================================
+# DISABLED: The prerequisite htpasswd secret was never created, and no
+# IngressRoute references this middleware. The orphaned Middleware resource
+# caused Traefik to spam errors every few seconds:
+#   ERR Error while reading basic auth middleware
+#     error="secret 'longhorn-system/longhorn-basic-auth' not found"
+#
+# Re-enable when Longhorn UI is exposed via IngressRoute. Prerequisites:
+#   1. Create htpasswd secret via External Secrets from Vault
+#   2. Create an IngressRoute for longhorn-ui service
+#   3. Uncomment the Middleware below
+# =============================================================================
+# ---
+# apiVersion: traefik.io/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: longhorn-basic-auth
+#   namespace: longhorn-system
+# spec:
+#   basicAuth:
+#     secret: longhorn-basic-auth
+#     realm: "Longhorn Storage - Authentication Required"

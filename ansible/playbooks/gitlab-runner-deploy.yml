@@ -1,0 +1,195 @@
+---
+# =============================================================================
+# GitLab Runner Deployment Playbook
+# =============================================================================
+# Deploys GitLab Runner on an LXC container with Docker executor.
+#
+# Prerequisites:
+#   - LXC container deployed via Terraform Layer 03
+#   - LXC bootstrap completed (lxc-bootstrap.yml creates admin user)
+#   - SSH key available (~/.ssh/id_ed25519_gitlab-runner)
+#   - Runner created in GitLab UI (Admin > CI/CD > Runners > New instance runner)
+#   - Runner glrt- token stored in Vault at secret/services/gitlab/runner
+#   - Docker role available (ansible/roles/docker/)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Token source priority:
+#   1. Vault CLI lookup (vault kv get secret/services/gitlab/runner → token)
+#   2. Extra-vars override: -e 'gitlab_runner_token=glrt-xxxxx'
+#
+# Usage (run from repo root):
+#   cd ~/repos/firb-lab/firblab
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook ansible/playbooks/gitlab-runner-deploy.yml --limit gitlab-runner
+#
+# Tags:
+#   ansible-playbook ... --tags install     # Only install packages
+#   ansible-playbook ... --tags configure   # Only configure + register
+#   ansible-playbook ... --tags verify      # Only run verification checks
+# =============================================================================
+
+- name: Deploy GitLab Runner
+  hosts: gitlab-runner
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    - name: Retrieve runner token from Vault
+      ansible.builtin.set_fact:
+        gitlab_runner_token: >-
+          {{ lookup('ansible.builtin.pipe',
+             'vault kv get -mount=secret -field=token services/gitlab/runner') }}
+      when: gitlab_runner_token is not defined
+      no_log: true
+      delegate_to: localhost
+      become: false
+      tags:
+        - always
+
+    - name: Validate runner token
+      ansible.builtin.assert:
+        that:
+          - gitlab_runner_token is defined
+          - gitlab_runner_token | length > 0
+          - gitlab_runner_token is match('^glrt-')
+        fail_msg: >
+          gitlab_runner_token not found. Either:
+          1. Store in Vault: vault kv put secret/services/gitlab/runner token=glrt-xxxxx
+          2. Pass via extra-vars: -e 'gitlab_runner_token=glrt-xxxxx'
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying GitLab Runner on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }}, gitlab_url={{ gitlab_runner_url }})
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-02:{{ (vault_restic_read.stdout | from_json).data.data.firblab02_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-02/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+  vars:
+    # Restic backup configuration (local backup to hdd-mirror-0 via REST server)
+    # Runner config.toml has the registered runner token + executor config.
+    # Docker volumes/cache are ephemeral — not worth backing up.
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: gitlab-runner
+        paths:
+          - /etc/gitlab-runner
+        tags: ["gitlab-runner", "ci"]
+        cron_hour: "2"
+        cron_minute: "40"
+
+  roles:
+    # Baseline system config + firewall
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE (existing role — USE WHAT EXISTS, don't duplicate)
+    - role: docker
+      tags:
+        - docker
+        - install
+
+    # GitLab Runner installation + registration
+    - role: gitlab-runner
+      tags:
+        - gitlab-runner
+        - install
+        - configure
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Verify GitLab Runner is running
+      ansible.builtin.command:
+        cmd: gitlab-runner status
+      register: runner_status
+      changed_when: false
+      tags:
+        - verify
+
+    - name: List registered runners
+      ansible.builtin.command:
+        cmd: gitlab-runner list
+      register: runner_list
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Verify Docker is accessible
+      ansible.builtin.command:
+        cmd: docker info --format '{{ '{{' }}.ServerVersion{{ '}}' }}'
+      register: docker_version
+      changed_when: false
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "GitLab Runner Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "GitLab URL: {{ gitlab_runner_url }}"
+          - "Executor: {{ gitlab_runner_executor }}"
+          - "Docker image: {{ gitlab_runner_docker_image }}"
+          - "Concurrent jobs: {{ gitlab_runner_concurrent }}"
+          - "Docker version: {{ docker_version.stdout }}"
+          - ""
+          - "Service: {{ runner_status.stdout | default(runner_status.stderr) }}"
+          - "Registered: {{ runner_list.stderr_lines | default([]) }}"
+          - ""
+          - "Management:"
+          - "  sudo gitlab-runner status"
+          - "  sudo gitlab-runner list"
+          - "  sudo gitlab-runner verify"
+          - "  sudo journalctl -u gitlab-runner -f"
+          - "=========================================="
+      tags:
+        - verify

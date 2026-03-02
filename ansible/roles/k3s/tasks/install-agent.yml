@@ -1,0 +1,72 @@
+---
+# =============================================================================
+# K3s Agent Installation
+# =============================================================================
+# Installs and configures a K3s agent (worker) node.
+# Agents join the cluster via the API endpoint on port 6443.
+# Currently unused — all 3 RPi5 nodes are servers. Reserved for future
+# expansion (e.g., adding more RPi5s as dedicated worker nodes).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Install K3s Binary
+# ---------------------------------------------------------------------------
+- name: Install K3s agent
+  ansible.builtin.shell:
+    cmd: |
+      curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="{{ k3s_version }}" \
+        INSTALL_K3S_EXEC="agent" \
+        sh -
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Cluster Token
+# ---------------------------------------------------------------------------
+- name: Write cluster token file
+  ansible.builtin.copy:
+    content: "{{ k3s_cluster_token }}"
+    dest: "{{ k3s_config_dir }}/cluster-token"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  tags:
+    - install
+
+# ---------------------------------------------------------------------------
+# Agent Configuration
+# ---------------------------------------------------------------------------
+- name: Deploy K3s agent config
+  ansible.builtin.template:
+    src: k3s-agent-config.yaml.j2
+    dest: "{{ k3s_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart k3s-agent
+  tags:
+    - install
+    - configure
+
+# ---------------------------------------------------------------------------
+# Enable and Start
+# ---------------------------------------------------------------------------
+- name: Enable K3s agent service
+  ansible.builtin.systemd:
+    name: k3s-agent
+    enabled: true
+    daemon_reload: true
+  tags:
+    - install
+
+- name: Start K3s agent service
+  ansible.builtin.systemd:
+    name: k3s-agent
+    state: started
+  tags:
+    - install

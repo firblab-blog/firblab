@@ -1,0 +1,69 @@
+# =============================================================================
+# GitLab CI/CD Template for D2 (Diagram-as-Code)
+# =============================================================================
+# Reusable CI/CD jobs for rendering D2 diagram source files into SVG.
+# https://github.com/terrastruct/d2
+#
+# Jobs provided:
+#   .d2-render  - Compile all .d2 files in a directory to SVG
+#
+# D2 diagrams are human-authored architecture documentation that lives in
+# Git. This CI job renders them on every MR to catch syntax errors and
+# produce viewable SVG artifacts.
+#
+# Usage in .gitlab-ci.yml:
+#   include:
+#     - local: ci-templates/d2-ci.yml
+#
+#   d2:render-diagrams:
+#     extends: .d2-render
+#     variables:
+#       D2_SRC: docs/diagrams
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# D2 Render Job
+# -----------------------------------------------------------------------------
+# Finds all .d2 files in D2_SRC directory and renders each to SVG.
+# SVGs are stored as CI artifacts alongside the source .d2 files.
+# -----------------------------------------------------------------------------
+
+.d2-render:
+  stage: validate
+  image:
+    name: terrastruct/d2:latest
+    entrypoint: [""]
+  tags: [docker]
+  variables:
+    D2_SRC: docs/diagrams
+    D2_THEME: "300"
+    D2_LAYOUT: "elk"
+  script:
+    - echo "--- Rendering D2 diagrams from ${D2_SRC}/ ---"
+    - d2 version
+    - mkdir -p ${D2_SRC}/rendered
+    - |
+      FAIL=0
+      COUNT=0
+      for f in ${D2_SRC}/*.d2; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f" .d2)
+        echo "Rendering: $f -> ${D2_SRC}/rendered/${base}.svg"
+        if d2 --theme ${D2_THEME} --layout ${D2_LAYOUT} "$f" "${D2_SRC}/rendered/${base}.svg"; then
+          COUNT=$((COUNT + 1))
+        else
+          echo "ERROR: Failed to render $f"
+          FAIL=1
+        fi
+      done
+      echo "--- D2 rendering complete: ${COUNT} diagrams rendered ---"
+      ls -la ${D2_SRC}/rendered/ 2>/dev/null || true
+      if [ "$COUNT" -eq 0 ]; then
+        echo "ERROR: No .d2 files found in ${D2_SRC}/"
+        exit 1
+      fi
+      exit $FAIL
+  artifacts:
+    paths:
+      - ${D2_SRC}/rendered/
+    expire_in: 30 days

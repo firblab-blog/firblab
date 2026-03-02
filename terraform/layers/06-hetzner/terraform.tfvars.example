@@ -1,0 +1,46 @@
+# =============================================================================
+# Layer 06: Hetzner - Example Variable Values
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars to version control.
+# =============================================================================
+
+# ---------------------------------------------------------
+# Hetzner Cloud Connection
+# ---------------------------------------------------------
+hcloud_token = "your-hetzner-cloud-api-token"
+
+# ---------------------------------------------------------
+# Server Configuration
+# ---------------------------------------------------------
+server_name = "lab-gateway"
+server_type = "cpx21"
+location    = "fsn1"
+image       = "ubuntu-24.04"
+
+# ---------------------------------------------------------
+# SSH
+# ---------------------------------------------------------
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... your-key-comment"
+
+# ---------------------------------------------------------
+# Network / Firewall
+# ---------------------------------------------------------
+mgmt_cidr      = "203.0.113.0/24"  # Your home/office public IP range
+wireguard_port = 51820
+
+# ---------------------------------------------------------
+# Cloudflare DNS
+# ---------------------------------------------------------
+cloudflare_api_token = "your-cloudflare-api-token"
+domain_name          = "example.com"
+
+# Service subdomains to create CNAME records for
+services = ["ghost", "foundryvtt", "git", "monitor"]
+
+# ---------------------------------------------------------
+# Feature Flags
+# ---------------------------------------------------------
+stalwart_enabled = false
