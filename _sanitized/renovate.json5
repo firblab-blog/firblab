@@ -1,0 +1,321 @@
+// =============================================================================
+// Renovate Bot Configuration — FirbLab Monorepo
+// =============================================================================
+// Scans the repo for outdated versions and creates GitLab MRs with bumps.
+// Runs as a scheduled GitLab CI pipeline (see ci-templates/renovate-ci.yml).
+//
+// Managers enabled:
+//   - argocd:     Helm chart targetRevision in k8s/argocd/apps/*.yml
+//   - terraform:  Provider + module versions in terraform/**/*.tf
+//   - helm-values: Image tags in k8s/platform/**/values.yaml
+//   - ansible:    Galaxy collections in ansible/collections/requirements.yml
+//   - gitlabci:   Base image tags in .gitlab-ci.yml + ci-templates/*.yml
+//
+// Custom managers (regex):
+//   - Pattern A (preferred): Full image:tag variables (*_image: "registry/name:tag")
+//     in ansible/roles/*/defaults/main.yml — self-describing, no annotation needed.
+//     Convention: ALL Docker services MUST use *_image variables.
+//   - Pattern B (fallback):  Annotated version variables (# renovate: datasource=X depName=Y)
+//     in ansible/roles/*/defaults/main.yml and group_vars/*.yml.
+//     Used ONLY for non-Docker sources: GitHub release binaries, PyPI, apt packages.
+//
+// Disabled managers:
+//   - kubernetes: Container images in k8s/workloads/ are handled by ArgoCD Image
+//                 Updater (Git write-back) to avoid duplicate MRs.
+//
+// Security:
+//   - OSV vulnerability alerts enabled — creates immediate MRs for known CVEs.
+//   - Critical infrastructure (RKE2, GitLab, Authentik, Traefik) is NEVER auto-merged.
+//   - Database patch updates (postgres, mariadb, redis, mysql) auto-merge safely.
+//
+// Coverage validation:
+//   CI lint job (ci-templates/scripts/renovate-coverage-lint.sh) verifies every
+//   *_image and *_version variable has Renovate coverage. Fails MR pipeline on gaps.
+//
+// Schedule: Weekly (Monday before 6 AM) for non-vulnerability updates.
+// =============================================================================
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Manager Configuration
+  // ---------------------------------------------------------------------------
+  "enabledManagers": [
+    "argocd",
+    "helm-values",
+    "terraform",
+    "ansible",
+    "gitlabci",
+    "custom.regex"
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Custom Managers — Ansible Role Defaults & Inventory
+  // ---------------------------------------------------------------------------
+  // Two complementary patterns detect version pins in YAML files.
+  // Pattern A is preferred — it's self-describing and doesn't need annotations.
+  // Pattern B is the fallback for non-Docker sources that need explicit metadata.
+  "customManagers": [
+    // Pattern A: Full image:tag variables (e.g., authentik_image: "ghcr.io/goauthentik/server:2025.12.4")
+    // Matches any variable ending in _image whose value is "registry/name:tag".
+    // No annotation comment needed — depName and currentValue are extracted from the value.
+    // This is the PREFERRED pattern. All Docker services should use *_image variables.
+    {
+      "customType": "regex",
+      "description": "Docker image:tag variables in Ansible role defaults",
+      "fileMatch": [
+        "ansible/roles/.+/defaults/main\\.yml$"
+      ],
+      "matchStrings": [
+        "\\w+_image:\\s*\"(?<depName>[a-z0-9][a-z0-9._/-]+):(?<currentValue>[a-zA-Z0-9][a-zA-Z0-9._-]+)\"\\s*$"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    // Pattern B: Annotated version variables (fallback for non-Docker sources).
+    // Matches a "# renovate: datasource=X depName=Y [versioning=Z]" comment
+    // followed by a YAML variable with the version value on the next line.
+    // Used ONLY for: GitHub release binaries, PyPI packages, apt packages, RKE2.
+    // If you're adding a Docker service, use Pattern A (*_image) instead.
+    {
+      "customType": "regex",
+      "description": "Annotated version variables in Ansible defaults and inventory",
+      "fileMatch": [
+        "ansible/roles/.+/defaults/main\\.yml$",
+        "ansible/inventory/group_vars/.+\\.yml$"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+versioning=(?<versioning>[^\\s]+))?\\n[\\w]+:\\s*\"?(?<currentValue>[^\"\\s]+)\"?"
+      ]
+    }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // Security — Vulnerability Scanning
+  // ---------------------------------------------------------------------------
+  // OSV (Open Source Vulnerabilities) database scanning. Creates MRs immediately
+  // when a CVE is found, bypassing the weekly schedule. No API token required.
+  "osvVulnerabilityAlerts": true,
+
+  // ---------------------------------------------------------------------------
+  // Schedule & Rate Limiting
+  // ---------------------------------------------------------------------------
+  "schedule": ["before 6am on Monday"],
+  "timezone": "America/New_York",
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 5,
+  "branchPrefix": "renovate/",
+
+  // ---------------------------------------------------------------------------
+  // MR Behavior
+  // ---------------------------------------------------------------------------
+  "labels": ["type::renovate"],
+  "commitMessagePrefix": "chore(deps):",
+  "rebaseWhen": "behind-base-branch",
+
+  // ---------------------------------------------------------------------------
+  // Package Rules
+  // ---------------------------------------------------------------------------
+  // Evaluated top-to-bottom; later rules merge into earlier matches.
+  // Order: built-in managers → application grouping → data services →
+  //        tooling → critical infrastructure → exclusions → catch-all.
+  "packageRules": [
+
+    // =========================================================================
+    // Built-in Manager Rules
+    // =========================================================================
+
+    // -- Terraform providers: group into a single MR --
+    {
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["provider"],
+      "groupName": "terraform providers",
+      "groupSlug": "terraform-providers",
+      "commitMessageTopic": "Terraform providers"
+    },
+
+    // -- ArgoCD Helm charts: wave 0 (platform) grouped together --
+    {
+      "matchManagers": ["argocd"],
+      "matchFileNames": ["k8s/argocd/apps/metallb.yml", "k8s/argocd/apps/traefik.yml", "k8s/argocd/apps/cert-manager.yml", "k8s/argocd/apps/external-secrets.yml", "k8s/argocd/apps/gatekeeper.yml", "k8s/argocd/apps/longhorn.yml", "k8s/argocd/apps/monitoring-prometheus.yml", "k8s/argocd/apps/monitoring-loki.yml", "k8s/argocd/apps/trivy-operator.yml", "k8s/argocd/apps/argocd-image-updater.yml"],
+      "groupName": "platform helm charts (wave 0)",
+      "groupSlug": "platform-helm-charts"
+    },
+
+    // -- ArgoCD Helm charts: wave 2 (workloads) grouped together --
+    {
+      "matchManagers": ["argocd"],
+      "matchFileNames": ["k8s/argocd/apps/headlamp.yml"],
+      "groupName": "workload helm charts (wave 2)",
+      "groupSlug": "workload-helm-charts"
+    },
+
+    // -- GitLab CI base images: group together --
+    {
+      "matchManagers": ["gitlabci"],
+      "groupName": "CI/CD base images",
+      "groupSlug": "ci-base-images"
+    },
+
+    // -- Ansible collections: individual MRs --
+    {
+      "matchManagers": ["ansible"],
+      "commitMessageTopic": "Ansible collection {{depName}}"
+    },
+
+    // -- Terraform version constraint: don't propose downgrades --
+    {
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["required_version"],
+      "enabled": false
+    },
+
+    // =========================================================================
+    // Custom Regex — Application Grouping
+    // =========================================================================
+    // Group multi-image services so all containers update in a single MR.
+
+    // -- Archive appliance: group all images into one MR --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": ["ansible/roles/archive/defaults/main.yml"],
+      "groupName": "archive appliance images",
+      "groupSlug": "archive-images",
+      "commitMessageTopic": "archive appliance images"
+    },
+
+    // -- AI/GPU stack: group together --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": ["ansible/roles/ai-gpu/defaults/main.yml"],
+      "groupName": "AI/GPU stack images",
+      "groupSlug": "ai-gpu-images",
+      "commitMessageTopic": "AI/GPU stack images"
+    },
+
+    // -- PatchMon: group backend + frontend into one MR --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["ghcr.io/patchmon/patchmon-backend", "ghcr.io/patchmon/patchmon-frontend"],
+      "groupName": "PatchMon images",
+      "groupSlug": "patchmon-images",
+      "commitMessageTopic": "PatchMon images"
+    },
+
+    // -- Scanopy: group server + daemon into one MR --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["ghcr.io/scanopy/scanopy/server", "ghcr.io/scanopy/scanopy/daemon"],
+      "groupName": "Scanopy images",
+      "groupSlug": "scanopy-images",
+      "commitMessageTopic": "Scanopy images"
+    },
+
+    // =========================================================================
+    // Custom Regex — Data Services (auto-merge patches)
+    // =========================================================================
+    // Database patch updates are safe to auto-merge. Minor/major require review.
+
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["postgres", "mariadb", "redis", "mysql"],
+      "groupName": "database images",
+      "groupSlug": "database-images",
+      "commitMessageTopic": "database images",
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true
+    },
+
+    // =========================================================================
+    // Custom Regex — Tooling
+    // =========================================================================
+
+    // -- Backup tooling: group restic client + server + backrest --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["restic/restic", "restic/rest-server", "garethgeorge/backrest"],
+      "groupName": "backup tooling",
+      "groupSlug": "backup-tooling",
+      "commitMessageTopic": "backup tool versions"
+    },
+
+    // -- Monitoring agents: group node_exporter + promtail --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["prometheus/node_exporter", "grafana/loki", "grafana/promtail"],
+      "groupName": "monitoring agents",
+      "groupSlug": "monitoring-agents",
+      "commitMessageTopic": "monitoring agent versions"
+    },
+
+    // =========================================================================
+    // Custom Regex — Critical Infrastructure (NEVER auto-merge)
+    // =========================================================================
+    // These services are platform-wide — a bad upgrade breaks everything.
+    // Each MR gets the critical::true label and upgrade guidance in the body.
+    // Review changelogs and run deploy playbooks manually after merge.
+
+    // -- RKE2: requires sequential node drains --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["rancher/rke2"],
+      "automerge": false,
+      "labels": ["type::renovate", "critical::true"],
+      "commitMessageTopic": "RKE2 Kubernetes",
+      "prBodyNotes": ["⚠️ **Critical: RKE2 Kubernetes upgrade.** Requires sequential node drain-and-upgrade — never upgrade all nodes simultaneously. Check [RKE2 release notes](https://github.com/rancher/rke2/releases) and the [upgrade path](https://docs.rke2.io/upgrade/manual_upgrade) before merging."]
+    },
+
+    // -- GitLab CE: requires sequential major version stops --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["gitlab/gitlab-ce"],
+      "automerge": false,
+      "labels": ["type::renovate", "critical::true"],
+      "commitMessageTopic": "GitLab CE",
+      "prBodyNotes": ["⚠️ **Critical: GitLab CE upgrade.** GitLab requires sequential major version upgrades with required stops. Check the [upgrade path tool](https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/) before merging. Back up the instance first: `gitlab-backup create`."]
+    },
+
+    // -- Authentik SSO: gateway for all ForwardAuth services --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["ghcr.io/goauthentik/server"],
+      "automerge": false,
+      "labels": ["type::renovate", "critical::true"],
+      "commitMessageTopic": "Authentik SSO",
+      "prBodyNotes": ["⚠️ **Critical: Authentik SSO upgrade.** Authentik is the authentication gateway for all services behind ForwardAuth. Check [Authentik release notes](https://docs.goauthentik.io/docs/releases) for breaking changes. Test SSO login after deploy."]
+    },
+
+    // -- Traefik: reverse proxy for all services --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["traefik"],
+      "automerge": false,
+      "labels": ["type::renovate", "critical::true"],
+      "commitMessageTopic": "Traefik reverse proxy",
+      "prBodyNotes": ["⚠️ **Critical: Traefik reverse proxy upgrade.** Traefik routes all HTTPS traffic. Check [Traefik release notes](https://github.com/traefik/traefik/releases) for breaking changes in middleware, providers, or TLS configuration."]
+    },
+
+    // =========================================================================
+    // Custom Regex — Exclusions
+    // =========================================================================
+
+    // -- Cowrie: excluded (no versioned Docker tags available) --
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["cowrie/cowrie"],
+      "enabled": false
+    },
+
+    // =========================================================================
+    // Custom Regex — Default (catch-all)
+    // =========================================================================
+    // All custom.regex matches that don't hit a rule above: no auto-merge.
+    // This is the safety net — new services are manual-review by default.
+    {
+      "matchManagers": ["custom.regex"],
+      "automerge": false
+    }
+  ]
+}

@@ -86,6 +86,19 @@ locals {
       only_allow_merge_if_all_discussions_resolved = true
       remove_source_branch_after_merge             = true
     }
+    firblab_public = {
+      name                                         = "firblab-public"
+      path                                         = "firblab-public"
+      description                                  = "FirbLab — production-grade homelab infrastructure platform. Sanitized public portfolio showcasing Terraform, Ansible, Packer, Vault, RKE2 Kubernetes, and ArgoCD GitOps."
+      group_key                                    = "infrastructure"
+      visibility_level                             = "private"
+      wiki_enabled                                 = false
+      container_registry_enabled                   = false
+      only_allow_merge_if_pipeline_succeeds        = false
+      only_allow_merge_if_all_discussions_resolved = false
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
+    }
     ci_templates = {
       name                                  = "ci-templates"
       path                                  = "ci-templates"
@@ -216,6 +229,7 @@ locals {
   branch_protections = {
     firblab           = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     firblab_os        = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    firblab_public    = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     ci_templates      = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     cybersecurity     = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     security_policies = { push = "maintainer", merge = "maintainer", allow_force_push = false }
@@ -284,7 +298,7 @@ resource "gitlab_project" "projects" {
   visibility_level = each.value.visibility_level
 
   # Initialize with a README and set main as default branch
-  initialize_with_readme = true
+  initialize_with_readme = lookup(each.value, "initialize_with_readme", true)
   default_branch         = "main"
 
   # CI/CD
@@ -668,6 +682,71 @@ resource "vault_kv_secret_v2" "gitlab_homeassistant_push" {
 #
 # Reference: https://docs.gitlab.com/ee/api/settings.html
 ###############################################
+
+###############################################
+# GitHub Push Mirror — firblab-public
+#
+# Pushes firblab-public to a public GitHub repo (example-lab-blog/firblab).
+# Vault path: secret/services/github
+# Keys: mirror_token (fine-grained PAT, Contents RW), github_username
+###############################################
+
+data "vault_kv_secret_v2" "github" {
+  mount = "secret"
+  name  = "services/github"
+}
+
+resource "gitlab_project_mirror" "firblab_public_to_github" {
+  project                 = gitlab_project.projects["firblab_public"].id
+  url                     = "https://${data.vault_kv_secret_v2.github.data["github_username"]}:${data.vault_kv_secret_v2.github.data["mirror_token"]}@github.com/${data.vault_kv_secret_v2.github.data["github_username"]}/firblab.git"
+  enabled                 = true
+  keep_divergent_refs     = false
+  only_protected_branches = false
+}
+
+###############################################
+# Project Access Token: CI Sanitize Push
+###############################################
+# Write-capable token for the CI sanitize job to push sanitized
+# content from firblab → firblab-public. The token is stored as a
+# masked CI/CD variable on the firblab project (source repo).
+#
+# Vault path: secret/services/gitlab/sanitize-push
+###############################################
+
+resource "gitlab_project_access_token" "sanitize_push" {
+  project      = gitlab_project.projects["firblab_public"].id
+  name         = "ci-sanitize-push"
+  scopes       = ["read_repository", "write_repository"]
+  access_level = "maintainer"
+  expires_at   = "2027-03-01"
+
+  depends_on = [gitlab_project.projects]
+}
+
+resource "vault_kv_secret_v2" "gitlab_sanitize_push" {
+  mount = "secret"
+  name  = "services/gitlab/sanitize-push"
+
+  data_json = jsonencode({
+    username = "ci-sanitize-push"
+    token    = gitlab_project_access_token.sanitize_push.token
+  })
+
+  depends_on = [gitlab_project_access_token.sanitize_push]
+}
+
+# Inject the sanitize push token as a masked project-level CI/CD variable
+# on the firblab project (where the CI job runs).
+resource "gitlab_project_variable" "sanitize_push_token" {
+  project   = gitlab_project.projects["firblab"].id
+  key       = "SANITIZE_PUSH_TOKEN"
+  value     = gitlab_project_access_token.sanitize_push.token
+  protected = true
+  masked    = true
+
+  depends_on = [gitlab_project_access_token.sanitize_push]
+}
 
 resource "gitlab_application_settings" "this" {
   # --- Sign-in & Registration ---

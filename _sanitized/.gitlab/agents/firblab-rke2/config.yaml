@@ -1,0 +1,50 @@
+# =============================================================================
+# GitLab Agent for Kubernetes — firblab-rke2
+# =============================================================================
+# Agent configuration for the RKE2 cluster (VLAN 20, 10.0.20.40-52).
+# Registered by Terraform Layer 03-gitlab-config. Deployed by ArgoCD.
+#
+# This file must live at .gitlab/agents/<agent-name>/config.yaml in the
+# project where the agent is registered. The agent name must match the
+# Terraform gitlab_cluster_agent.name attribute ("firblab-rke2").
+#
+# Docs: https://docs.gitlab.com/ee/user/clusters/agent/work_with_agent.html
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# CI/CD Access — allow pipelines to interact with the cluster
+# ---------------------------------------------------------------------------
+# Projects and groups listed here can use this agent in CI/CD jobs via:
+#   kubectl config use-context infrastructure/firblab:firblab-rke2
+#
+# The agent's service account in K8s determines what kubectl can do.
+# For least-privilege, create RBAC roles scoped to specific namespaces.
+ci_access:
+  # Allow all projects in the Infrastructure group
+  groups:
+    - id: infrastructure
+  # Explicitly allow the firblab monorepo (redundant with group, but explicit)
+  projects:
+    - id: infrastructure/firblab
+
+# ---------------------------------------------------------------------------
+# User Access — kubectl from GitLab web terminal (optional)
+# ---------------------------------------------------------------------------
+# Uncomment to allow authenticated GitLab users to run kubectl commands
+# directly from the GitLab web UI against this cluster.
+#
+# user_access:
+#   projects:
+#     - id: infrastructure/firblab
+#       access_as:
+#         agent: {}
+
+# ---------------------------------------------------------------------------
+# Observability — cluster event collection (optional)
+# ---------------------------------------------------------------------------
+# Uncomment to enable sending cluster events to GitLab for the
+# Kubernetes dashboard and vulnerability scanning features.
+#
+# observability:
+#   logging:
+#     level: info

@@ -9,13 +9,11 @@ Last updated: 2026-03-02
 - [x] **Resume bullets** — drafted from real codebase audit (13K lines TF, 43 roles, 61 playbooks, 75 firewall policies, etc.)
 - [x] **LinkedIn project** — "FirbLab — Production-Grade Homelab Infrastructure Platform" created
 - [x] **Sanitization pipeline** — `scripts/sanitize.py` + `scripts/sanitize.yml` for repeatable firblab → firblab-public sync
+- [x] **firblab-public repo** — GitLab project (Terraform Layer 03), GitHub push mirror (`example-lab-blog/firblab`), PAT in Vault at `secret/services/github`
 
 ## In Progress
 
-- [ ] **firblab-public repo** — first sanitized sync, push to GitLab, configure GitHub push mirror
-  - GitLab project: add to `terraform/layers/03-gitlab-config/main.tf`
-  - GitHub repo: create public repo, store PAT in Vault at `secret/services/github/mirror_token`
-  - GitLab push mirror: `Settings → Mirroring` or `gitlab_project_mirror` Terraform resource
+(nothing currently)
 
 ## Planned
 

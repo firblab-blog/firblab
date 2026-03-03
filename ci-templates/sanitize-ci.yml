@@ -1,0 +1,73 @@
+# =============================================================================
+# GitLab CI/CD Template for Public Repo Sanitization
+# =============================================================================
+# Runs the sanitization pipeline (scripts/sanitize.py) against the firblab
+# source repo and pushes the sanitized output to the firblab-public repo.
+# The firblab-public GitLab push mirror then syncs to GitHub automatically.
+#
+# Jobs provided:
+#   .sanitize-publish  - Sanitize + push to firblab-public
+#
+# Prerequisites:
+#   - SANITIZE_PUSH_TOKEN CI/CD variable (project access token with
+#     read_repository + write_repository on firblab-public)
+#   - Managed by Terraform Layer 03-gitlab-config
+#
+# Usage in .gitlab-ci.yml:
+#   include:
+#     - local: ci-templates/sanitize-ci.yml
+#
+#   sanitize:publish:
+#     extends: .sanitize-publish
+# =============================================================================
+
+.sanitize-publish:
+  stage: publish
+  image: python:3.12-alpine
+  tags: [docker]
+  variables:
+    PUBLIC_REPO_PATH: infrastructure/firblab-public
+  script:
+    - apk add --no-cache git rsync
+    - pip install --quiet pyyaml
+    - git config --global user.email "ci@example-lab.org"
+    - git config --global user.name "GitLab CI"
+
+    # --- Run sanitization pipeline ---
+    - echo "--- Running sanitization pipeline ---"
+    - >
+      python scripts/sanitize.py
+      --config scripts/sanitize.yml
+      --source-dir "${CI_PROJECT_DIR}"
+      --output-dir "${CI_PROJECT_DIR}/_sanitized"
+      --skip-scanners
+
+    # --- Clone firblab-public ---
+    - echo "--- Cloning firblab-public ---"
+    - >
+      git clone --depth=1
+      "https://ci-sanitize-push:${SANITIZE_PUSH_TOKEN}@${CI_SERVER_HOST}/${PUBLIC_REPO_PATH}.git"
+      _public
+    - cd _public
+
+    # --- Sync sanitized output into the repo ---
+    # rsync with --delete removes files that no longer exist in the sanitized output.
+    # Exclude .git so we don't nuke the clone's git directory.
+    - echo "--- Syncing sanitized content ---"
+    - rsync -a --delete --exclude='.git' ../_sanitized/ ./
+
+    # --- Commit and push if changed ---
+    - git add -A
+    - |
+      if git diff --cached --quiet; then
+        echo "--- No changes — skipping push ---"
+      else
+        CHANGED=$(git diff --cached --stat | tail -1)
+        echo "--- Changes detected: ${CHANGED} ---"
+        git commit -m "ci: sync sanitized content from ${CI_COMMIT_SHORT_SHA}
+
+      Source commit: ${CI_COMMIT_SHA}
+      Pipeline: ${CI_PIPELINE_ID}"
+        git push origin HEAD:main
+        echo "--- firblab-public updated successfully ---"
+      fi
