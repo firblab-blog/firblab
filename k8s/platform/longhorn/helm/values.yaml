@@ -15,7 +15,7 @@ defaultSettings:
   # Longhorn PVCs (SonarQube 35Gi + Prometheus 55Gi + Loki 20Gi) are too large
   # for off-site S3. Local 6-hourly snapshots (12 retained, 3-day window) provide
   # sufficient protection. Re-enable if S3 budget allows.
-  # backupTarget: s3://example-lab-longhorn-backups@nbg1/
+  # backupTarget: s3://example-lab-longhorn-backups@region1/
   # backupTargetCredentialSecret: longhorn-s3-credentials
 
   # Storage over-provisioning percentage

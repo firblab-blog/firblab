@@ -34,7 +34,7 @@
 #   ansible-playbook -i inventory/hosts.yml playbooks/wireguard-deploy.yml \
 #     -e wg_s3_access_key="..." -e wg_s3_secret_key="..." \
 #     -e wg_s3_endpoint="region1.your-objectstorage.com" \
-#     -e wg_s3_bucket="firblab-wireguard" \
+#     -e wg_s3_bucket="example-lab-wireguard" \
 #     -e wg_hetzner_endpoint="203.0.113.10:51820"
 #
 # Tags:
@@ -117,7 +117,7 @@
     # WireGuard interface
     wg_interface: wg0
     # Hetzner S3 bucket name (Terraform-managed in Layer 06, not a secret)
-    wg_s3_bucket: "firblab-wireguard"
+    wg_s3_bucket: "example-lab-wireguard"
     # Hetzner server endpoint (public IP:port) — auto-detected from peer config
     # Override with -e wg_hetzner_endpoint="1.2.3.4:51820" if needed
     wg_hetzner_endpoint: ""

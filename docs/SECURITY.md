@@ -2,7 +2,7 @@
 
 This document is the authoritative security reference for the firblab homelab infrastructure. It covers the Vault HA cluster, secrets management, host hardening, certificate lifecycle, network isolation, Terraform secret integration, and the verification checklist used to validate the security posture of the entire environment.
 
-For network topology and firewall rule details, see [NETWORK.md](NETWORK.md). For Vault operational procedures (unseal, backup, restore, rotation), see [VAULT-OPERATIONS.md](VAULT-OPERATIONS.md). For disaster recovery procedures and backup restore runbooks, see [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md). For the overall system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For network topology and firewall rule details, see [NETWORK.md](NETWORK.md). For Vault operational procedures (unseal, backup, restore, rotation), see [VAULT-OPERATIONS.md](VAULT-OPERATIONS.md). For the overall system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

@@ -73,7 +73,7 @@ backup_services:
     # NOTE: Docker named volumes (gotify-data, uptime-kuma-data, wireguard-data)
     # are not backed up here. Gotify is stateless enough (app tokens re-seeded to Vault).
     # WireGuard peer configs are in /config inside wireguard-data volume — backed up
-    # at the S3 level (Phase 8.5 of cloud-init uploads peers to firblab-wireguard bucket).
+    # at the S3 level (Phase 8.5 of cloud-init uploads peers to example-lab-wireguard bucket).
 
 # ---------------------------------------------------------------------------
 # Gotify — apps to create (tokens stored in Vault)

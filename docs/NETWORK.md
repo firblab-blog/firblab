@@ -133,7 +133,7 @@ Two non-overlapping MetalLB pools on the Services VLAN. K3s pool defined in `k8s
 | 10.0.50.2 | vault-2 | Vault standby -- Proxmox VM (Rocky Linux 9 x86_64) |
 | 10.0.50.90 | lab-08 (vlan50) | Scanopy scanner sub-interface (RPi4, VLAN 50 L2 scanning) |
 
-> **Note:** GitLab CE is on Management VLAN 10 (10.0.10.50), NOT Security VLAN 50. Wazuh Manager is not deployed (removed due to lab-02 RAM constraint). See [CURRENT-STATE.md](CURRENT-STATE.md) for the authoritative inventory.
+> **Note:** GitLab CE is on Management VLAN 10 (10.0.10.50), NOT Security VLAN 50. Wazuh Manager is not deployed (removed due to lab-02 RAM constraint).
 
 ### IoT VLAN (60)
 

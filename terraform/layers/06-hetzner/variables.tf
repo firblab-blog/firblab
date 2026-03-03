@@ -211,7 +211,7 @@ variable "s3_endpoint" {
 variable "s3_bucket" {
   description = "Hetzner S3 bucket name for WireGuard peer configs (managed by Terraform)"
   type        = string
-  default     = "firblab-wireguard"
+  default     = "example-lab-wireguard"
 }
 
 # ---------------------------------------------------------

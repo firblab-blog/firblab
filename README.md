@@ -118,7 +118,6 @@ k8s/
   platform/           Cluster services (MetalLB, cert-manager, Longhorn, Traefik, monitoring)
   policies/           Gatekeeper constraint templates and constraints
 packer/               Hardened Ubuntu 24.04 + Rocky Linux 9 VM templates
-ci-templates/         Shared GitLab CI/CD pipeline templates (Terraform, Ansible, D2, Rover)
 scripts/              Bootstrap, backup, and utility scripts
 docs/                 Architecture, operations, DR, and runbook documentation
 ```
@@ -142,11 +141,9 @@ This repo is designed to be publicly hostable. All secrets are managed via Vault
 
 | Document | Description |
 |---|---|
-| [CURRENT-STATE.md](docs/CURRENT-STATE.md) | **Authoritative inventory** of all deployed infrastructure |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Architecture design and decisions |
 | [NETWORK.md](docs/NETWORK.md) | VLAN layout, firewall rules, WireGuard, reverse proxy |
 | [SECURITY.md](docs/SECURITY.md) | Vault cluster, hardening, PKI, secrets management |
-| [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) | DR runbook, restore procedures, RPO/RTO targets |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Complete bootstrap sequence |
 | [VAULT-OPERATIONS.md](docs/VAULT-OPERATIONS.md) | Vault unseal, backup, restore, rotation |
 | [MACHINE-ONBOARDING.md](docs/MACHINE-ONBOARDING.md) | How to add a new machine to the lab |
