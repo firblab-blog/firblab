@@ -1,6 +1,6 @@
 # firblab: Architecture & Design
 
-> **Note:** This document was written as the original architecture plan for the FirbLab rebuild. It describes the intended design and serves as a reference for architectural decisions. For the **actual deployed state** (what is running today, with real IPs and statuses), see [CURRENT-STATE.md](CURRENT-STATE.md). Some sections below reflect the original plan and may differ from reality (e.g., Wazuh is not deployed, vault-2 is on lab-02 not lab-01, RKE2 replaced k3s).
+> **Note:** This document was written as the original architecture plan for the FirbLab rebuild. It describes the intended design and serves as a reference for architectural decisions. For the **actual deployed state** (what is running today, with real IPs and statuses). Some sections below reflect the original plan and may differ from reality (e.g., Wazuh is not deployed, vault-2 is on lab-02 not lab-01, RKE2 replaced k3s).
 
 ## Overview
 
@@ -819,7 +819,7 @@ Vault seal event  → Vault telemetry → Prometheus → Alertmanager → Gotify
 
 ## 8. Backup Strategy
 
-> **Status:** Fully deployed as of 2026-02-15. See [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) for restore procedures.
+> **Status:** Fully deployed as of 2026-02-15.
 
 ### Full Backup Matrix
 

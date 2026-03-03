@@ -859,7 +859,6 @@ provider "unifi" {
 - **Architecture overview:** `docs/ARCHITECTURE.md`
 - **Security design (Vault, hardening, certificates):** `docs/SECURITY.md`
 - **Deployment procedures:** `docs/DEPLOYMENT.md`
-- **WireGuard tunnel setup:** `docs/WIREGUARD-SETUP.md`
 - **Proxmox bootstrap playbook:** `ansible/playbooks/proxmox-bootstrap.yml`
 - **WireGuard deployment playbook:** `ansible/playbooks/wireguard-deploy.yml`
 - **Layer 00 Terraform config:** `terraform/layers/00-network/`
