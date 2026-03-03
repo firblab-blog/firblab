@@ -18,7 +18,7 @@
 #   2. Extra-vars override: -e 'gitlab_runner_token=glrt-xxxxx'
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   export VAULT_ADDR=https://10.0.10.10:8200
 #   export VAULT_TOKEN=hvs.xxxxx
 #   export VAULT_CACERT=~/.lab/tls/ca/ca.pem

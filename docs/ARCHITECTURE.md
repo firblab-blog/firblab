@@ -4,7 +4,7 @@
 
 ## Overview
 
-Single consolidated repository at `~/repos/firb-lab/firblab/` managing all machines, networks, and services via IaC/GitOps. Replaces the scattered lab-01 through lab-05, lab-hetzner, firblab-aws, etc. with one source of truth.
+Single consolidated repository at `~/repos/firblab/` managing all machines, networks, and services via IaC/GitOps. Replaces the scattered lab-01 through lab-05, lab-hetzner, firblab-aws, etc. with one source of truth.
 
 **Core principles:** Cybersecurity-first, everything-as-code, GitOps-driven, minimal maintenance, portable, and designed for seamless iteration when adding new machines/services.
 
@@ -33,7 +33,7 @@ Single consolidated repository at `~/repos/firb-lab/firblab/` managing all machi
 
 ## 1. Repository Structure
 
-**Path:** `~/repos/firb-lab/firblab/`
+**Path:** `~/repos/firblab/`
 
 ```
 firblab/
@@ -877,7 +877,7 @@ Vault seal event  → Vault telemetry → Prometheus → Alertmanager → Gotify
 
 ## 10. Files to Create First (Implementation Order)
 
-1. Initialize repo at `~/repos/firb-lab/firblab/` with `.gitignore`, `.sops.yaml`, `.pre-commit-config.yaml`, `.editorconfig`
+1. Initialize repo at `~/repos/firblab/` with `.gitignore`, `.sops.yaml`, `.pre-commit-config.yaml`, `.editorconfig`
    - Copy this plan to `docs/ARCHITECTURE.md` as the living architecture document
 2. `terraform/modules/proxmox-lxc/` (main.tf, variables.tf, outputs.tf) — from `lab-01/mealie/main.tf`
 3. `terraform/modules/proxmox-vm/` (main.tf, variables.tf, outputs.tf) — from `lab-01/vault/main.tf`

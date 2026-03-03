@@ -37,7 +37,7 @@
 #   - Terraform apply for 02-vault-config completed (creates auth backend + roles)
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/k3s-vault-k8s-auth.yml
 #
 # Tags:

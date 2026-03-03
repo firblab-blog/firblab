@@ -18,7 +18,7 @@
 #   5. Post-deploy: label nodes, verify health
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/rke2-deploy.yml
 #
 # Tags:

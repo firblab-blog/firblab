@@ -3,7 +3,7 @@
 # macOS Host Bootstrap Playbook
 # =============================================================================
 # Hardens and configures macOS physical hosts (Mac Mini M4) for use as
-# infrastructure nodes in the firb-lab. Includes SSH hardening, pf firewall,
+# infrastructure nodes in the firblab. Includes SSH hardening, pf firewall,
 # and Homebrew package management. Vault runs natively as a LaunchDaemon.
 #
 # Prerequisites:

@@ -618,11 +618,11 @@ The `packer` Vault policy was added in Phase 3 (Layer 02-vault-config). ISOs are
 
 ```bash
 # Apply packer policy to Vault
-cd /Users/admin/repos/firb-lab/firblab/terraform/layers/02-vault-config
+cd /Users/admin/repos/firblab/terraform/layers/02-vault-config
 terraform apply -var-file=../../environments/vault-config.tfvars
 
 # Download ISOs to Proxmox (automated)
-cd /Users/admin/repos/firb-lab/firblab/terraform/layers/01-proxmox-base
+cd /Users/admin/repos/firblab/terraform/layers/01-proxmox-base
 terraform apply -var proxmox_node=lab-02
 ```
 
@@ -736,7 +736,7 @@ ssh -i ~/.ssh/id_ed25519_gitlab admin@10.0.10.50 hostname
 The Proxmox LXC provider injects SSH keys to **root only** (no username field). Run the LXC bootstrap playbook to create the `admin` user:
 
 ```bash
-cd ~/repos/firb-lab/firblab
+cd ~/repos/firblab
 ansible-playbook ansible/playbooks/lxc-bootstrap.yml --limit gitlab-runner -e "ansible_user=root"
 ```
 
@@ -816,7 +816,7 @@ export VAULT_ADDR=https://10.0.10.10:8200
 export VAULT_TOKEN=hvs.YOUR_ADMIN_TOKEN
 export VAULT_CACERT=~/.lab/tls/ca/ca.pem
 
-cd ~/repos/firb-lab/firblab
+cd ~/repos/firblab
 ansible-playbook ansible/playbooks/gitlab-runner-deploy.yml --limit gitlab-runner
 ```
 
@@ -972,7 +972,7 @@ git push gitlab test/ci-validation
 |---|---|---|
 | Terraform destroys GitLab VM on apply | `clone_template_vm_id` changed (e.g., 9000 → 0) | **Never** change this after initial deployment. Set default to `9000` in `variables.tf`. |
 | SSH to Runner LXC asks for password | LXC provider only injects keys to root | Run `lxc-bootstrap.yml` (Step 4.3) |
-| Ansible "No inventory was parsed" | Running from wrong directory | Run from repo root (`~/repos/firb-lab/firblab/`), not from `ansible/` |
+| Ansible "No inventory was parsed" | Running from wrong directory | Run from repo root (`~/repos/firblab/`), not from `ansible/` |
 | Docker role fails with dpkg lock | `unattended-upgrades` holding the lock | Wait 2 minutes and re-run. The dpkg lock wait task handles this automatically. |
 | `gitlab-runner register` rejects `--tag-list` | GitLab 18.x: tags are server-side with `glrt-` tokens | Tags are set in the GitLab UI, not via CLI |
 | GitLab health check returns 404 | GitLab 18.x: health endpoints are localhost-only | Use `http://127.0.0.1/-/health` from the remote host |

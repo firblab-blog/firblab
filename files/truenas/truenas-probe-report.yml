@@ -876,9 +876,9 @@ datasets:
     source: DEFAULT
     source_info: null
     value: 'OFF'
-  id: backups/firb-lab-02
-  mountpoint: /mnt/backups/firb-lab-02
-  name: backups/firb-lab-02
+  id: backups/lab-02
+  mountpoint: /mnt/backups/lab-02
+  name: backups/lab-02
   pool: backups
   quota:
     parsed: null
@@ -958,9 +958,9 @@ datasets:
     source: DEFAULT
     source_info: null
     value: 'OFF'
-  id: backups/firb-lab-01
-  mountpoint: /mnt/backups/firb-lab-01
-  name: backups/firb-lab-01
+  id: backups/lab-01
+  mountpoint: /mnt/backups/lab-01
+  name: backups/lab-01
   pool: backups
   quota:
     parsed: null
@@ -2963,7 +2963,7 @@ nfs_shares:
   maproot_group: null
   maproot_user: null
   networks: []
-  path: /mnt/backups/firb-lab-01
+  path: /mnt/backups/lab-01
   ro: false
 - aliases: []
   comment: ''
@@ -2975,7 +2975,7 @@ nfs_shares:
   maproot_group: null
   maproot_user: null
   networks: []
-  path: /mnt/backups/firb-lab-02
+  path: /mnt/backups/lab-02
   ro: false
 pools:
 - allocated: 619536117760
@@ -3066,9 +3066,9 @@ smb_shares:
   hostsallow: []
   hostsdeny: []
   id: 1
-  name: firb-lab-01
-  path: /mnt/backups/firb-lab-01
-  path_local: /mnt/backups/firb-lab-01
+  name: lab-01
+  path: /mnt/backups/lab-01
+  path_local: /mnt/backups/lab-01
   purpose: DEFAULT_SHARE
   ro: false
 - abe: false
@@ -3080,9 +3080,9 @@ smb_shares:
   hostsallow: []
   hostsdeny: []
   id: 2
-  name: firb-lab-02
-  path: /mnt/backups/firb-lab-02
-  path_local: /mnt/backups/firb-lab-02
+  name: lab-02
+  path: /mnt/backups/lab-02
+  path_local: /mnt/backups/lab-02
   purpose: DEFAULT_SHARE
   ro: false
 - abe: false
@@ -3102,7 +3102,7 @@ smb_shares:
 snapshot_tasks: []
 system:
   cores: 6
-  hostname: firb-lab-03
+  hostname: lab-03
   loadavg:
   - 0.556640625
   - 0.357421875

@@ -2,7 +2,7 @@
 # =============================================================================
 # TrueNAS — SMB Share Configuration
 # =============================================================================
-# Manages SMB/CIFS shares. Security fix: disables guest access on firb-lab-01
+# Manages SMB/CIFS shares. Security fix: disables guest access on lab-01
 # share (probe found guestok=true). Adds hostsallow for subnet restriction.
 #
 # Uses arensb.truenas.sharing_smb module (wraps midclt call sharing.smb.*).

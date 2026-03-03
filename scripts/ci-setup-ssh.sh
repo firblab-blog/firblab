@@ -10,7 +10,7 @@
 #   1. Reads the SSH_HOSTS env var (comma-separated list of Vault hostnames)
 #   2. For each host, fetches secret/compute/<host> from Vault via API
 #   3. Writes the key to the exact path the Ansible inventory expects
-#   4. Creates a symlink so ~/repos/firb-lab/firblab → $CI_PROJECT_DIR
+#   4. Creates a symlink so ~/repos/firblab → $CI_PROJECT_DIR
 #      (inventory uses absolute paths with ~ expansion)
 #
 # Required env vars:
@@ -38,9 +38,9 @@ mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
 
 # Create repo path symlink so inventory ~ paths resolve in the CI container.
-# Inventory references: ~/repos/firb-lab/firblab/terraform/layers/.../.secrets/
-mkdir -p "$HOME/repos/firb-lab"
-ln -sf "${CI_PROJECT_DIR}" "$HOME/repos/firb-lab/firblab"
+# Inventory references: ~/repos/firblab/terraform/layers/.../.secrets/
+mkdir -p "$HOME/repos/firblab"
+ln -sf "${CI_PROJECT_DIR}" "$HOME/repos/firblab"
 
 # Also create .secrets/ directories that Terraform keys expect
 mkdir -p "${CI_PROJECT_DIR}/terraform/layers/03-core-infra/.secrets"

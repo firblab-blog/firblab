@@ -31,7 +31,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 GITLAB_HOST="10.0.10.50"
 GITLAB_API="http://${GITLAB_HOST}/api/v4"
-REPOS_DIR="/Users/admin/repos/firb-lab"
+REPOS_DIR="/Users/admin/repos/firblab"
 
 if [ -z "${GITLAB_TOKEN:-}" ]; then
   echo "ERROR: GITLAB_TOKEN environment variable is required" >&2

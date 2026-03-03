@@ -32,7 +32,7 @@
 #   - Vault CA cert at ~/.lab/tls/ca/ca.pem
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/vault-k8s-auth.yml
 #
 # Tags:

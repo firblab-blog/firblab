@@ -126,7 +126,7 @@ Dedicated 10 Gbps DAC link for NFS/iSCSI storage traffic between lab-01 and True
 | TrueNAS | Mellanox CX4121C Port 2 | — | 10.10.10.2/30 | lab-01 | 9000 |
 
 **IaC:** `proxmox_storage_bridge_ports` / `proxmox_storage_ip` in `host_vars/lab-01.yml`, template `proxmox-interfaces.j2`. TrueNAS side configured via `playbooks/truenas-storage-link.yml`.
-**NFS Storage:** `truenas-10g` registered on lab-01 via Terraform Layer 01 (`storage.tf`) — NFS mount at `10.10.10.2:/mnt/backups/firb-lab-01` over 10G DAC. Content types: backup, iso, vztmpl, snippets. NFS export ACL includes `10.10.10.0/30` (Ansible: `truenas` role defaults).
+**NFS Storage:** `truenas-10g` registered on lab-01 via Terraform Layer 01 (`storage.tf`) — NFS mount at `10.10.10.2:/mnt/backups/lab-01` over 10G DAC. Content types: backup, iso, vztmpl, snippets. NFS export ACL includes `10.10.10.0/30` (Ansible: `truenas` role defaults).
 **Note:** Uses `10.10.10.0/30` (not a VLAN 40 subset) because TrueNAS middleware rejects overlapping networks across interfaces.
 
 ### Internal DNS (`*.home.example-lab.org`)

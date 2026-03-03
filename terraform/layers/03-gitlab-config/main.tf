@@ -10,9 +10,9 @@
 #   - Branch protection on infrastructure projects
 #   - Instance-level CI/CD variables (Vault AppRole for all pipelines)
 #
-# This replaces the old firb-lab-01 GitLab which had 18+ projects in a messy
-# hierarchy. The new structure consolidates all per-node repos (firb-lab-01,
-# firb-lab-02, firb-lab-05, firb-lab-macmini, firb-lab-rpi5, firb-lab-aws,
+# This replaces the old lab-01 GitLab which had 18+ projects in a messy
+# hierarchy. The new structure consolidates all per-node repos (lab-01,
+# lab-02, firblab-05, firblab-macmini, firblab-rpi5, firblab-aws,
 # lab-hetzner, firblab-win) into a single "firblab" monorepo.
 #
 # NOTE: The GitLab provider requires a PAT with 'api' scope. This is read

@@ -190,7 +190,7 @@
 
           Security Fixes Applied:
             - NFS shares restricted to Management + LAN subnets
-            - SMB firb-lab-01 guest access DISABLED
+            - SMB lab-01 guest access DISABLED
             - SMB shares restricted via hostsallow
 
           Protection Added:

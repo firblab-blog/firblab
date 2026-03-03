@@ -32,7 +32,7 @@
 #         vault kv put secret/services/grafana username=admin password=<pw>
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/argocd-bootstrap.yml
 #
 # Tags:

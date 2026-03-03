@@ -36,7 +36,7 @@ Extract and generalize the Packer templates (`packer/ubuntu-24.04/`, `packer/roc
 3. **Vault Cluster with Transit Auto-Unseal** — Building a 3-node Raft cluster on consumer hardware with a separate unseal Vault instance. The chicken-and-egg problem and how transit seal solves it.
 
 ### firblab-os (Separate Project)
-The portable "build your own FirbLab" product. Different from firblab-public (which is the portfolio). Existing scaffolding in `/Users/admin/repos/firb-lab/firblab-os/`. Needs the stripping work completed per `docs/STRIPPING-HANDOFF.md`.
+The portable "build your own FirbLab" product. Different from firblab-public (which is the portfolio). Existing scaffolding in `/Users/admin/repos/firblab-os/`. Needs the stripping work completed per `docs/STRIPPING-HANDOFF.md`.
 
 ## Target Roles
 - Platform Engineer

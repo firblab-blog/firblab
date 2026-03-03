@@ -33,7 +33,7 @@ truenas_services:
 #   maproot_user, maproot_group, mapall_user, mapall_group, enabled,
 #   readonly, state.
 truenas_nfs_shares:
-  - path: /mnt/backups/firb-lab-01
+  - path: /mnt/backups/lab-01
     comment: "Proxmox backup target — lab-01"
     networks:
       - "10.0.10.0/24"     # Management VLAN 10 — Proxmox nodes
@@ -44,7 +44,7 @@ truenas_nfs_shares:
     enabled: true
     readonly: false
 
-  - path: /mnt/backups/firb-lab-02
+  - path: /mnt/backups/lab-02
     comment: "Proxmox backup target — lab-02"
     networks:
       - "10.0.10.0/24"     # Management VLAN 10 — Proxmox nodes
@@ -57,11 +57,11 @@ truenas_nfs_shares:
 # ---------------------------------------------------------------------------
 # SMB Shares
 # ---------------------------------------------------------------------------
-# SECURITY FIX: firb-lab-01 share had guestok=true. All shares now enforce
+# SECURITY FIX: lab-01 share had guestok=true. All shares now enforce
 # authentication. hostsallow restricts by subnet for defense in depth.
 truenas_smb_shares:
-  - name: firb-lab-01
-    path: /mnt/backups/firb-lab-01
+  - name: lab-01
+    path: /mnt/backups/lab-01
     comment: "Proxmox backup share — lab-01"
     purpose: DEFAULT_SHARE
     guestok: false            # SECURITY FIX: was true
@@ -71,8 +71,8 @@ truenas_smb_shares:
       - "10.0.10.0/24"
       - "10.0.4.0/24"
 
-  - name: firb-lab-02
-    path: /mnt/backups/firb-lab-02
+  - name: lab-02
+    path: /mnt/backups/lab-02
     comment: "Proxmox backup share — lab-02"
     purpose: DEFAULT_SHARE
     guestok: false

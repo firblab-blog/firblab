@@ -18,7 +18,7 @@
 #     hosting the LXC, used to refresh ARP via pct exec.
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/lxc-bootstrap.yml \
 #     --limit gitlab-runner -e "ansible_user=root"
 #

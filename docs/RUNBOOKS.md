@@ -147,7 +147,7 @@ systemctl restart wg-quick@wg0
 
 **Step 4 -- If the tunnel comes up but drops again, check for firewall drift:**
 ```bash
-cd ~/repos/firb-lab/firblab/terraform/layers/00-network
+cd ~/repos/firblab/terraform/layers/00-network
 terraform plan
 ```
 If there is drift in the gw-01 firewall rules (port forwarding, WireGuard allow rules), apply to restore:

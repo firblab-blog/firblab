@@ -21,7 +21,7 @@
 #   5. Post-deploy: remove server taints, label nodes, verify health
 #
 # Usage (run from repo root):
-#   cd ~/repos/firb-lab/firblab
+#   cd ~/repos/firblab
 #   ansible-playbook ansible/playbooks/k3s-deploy.yml
 #
 # Tags:

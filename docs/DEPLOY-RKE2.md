@@ -20,7 +20,7 @@ RKE2 cluster is **deployed and operational**:
 # Load SSH key for Proxmox SFTP (cloud-init snippet uploads)
 ssh-add ~/.ssh/id_ed25519_lab-01
 
-cd ~/repos/firb-lab/firblab/terraform/layers/04-rke2-cluster
+cd ~/repos/firblab/terraform/layers/04-rke2-cluster
 terraform init
 terraform plan -var proxmox_node=lab-01
 terraform apply -var proxmox_node=lab-01
@@ -51,7 +51,7 @@ terraform plan -var proxmox_node=lab-01 \
 ### Step 2: Ansible — Deploy RKE2
 
 ```bash
-cd ~/repos/firb-lab/firblab
+cd ~/repos/firblab
 
 # Add all node SSH keys
 for key in terraform/layers/04-rke2-cluster/.secrets/*_ssh_key; do
@@ -157,7 +157,7 @@ The auth backend and roles already exist in Vault (Terraform 02-vault-config). A
 cluster is live, configure the auth backend with the Ansible playbook:
 
 ```bash
-cd ~/repos/firb-lab/firblab
+cd ~/repos/firblab
 export VAULT_ADDR=https://10.0.10.10:8200
 export VAULT_TOKEN=hvs.xxxxx
 export VAULT_CACERT=~/.lab/tls/ca/ca.pem
@@ -180,7 +180,7 @@ the full bootstrap: installing ArgoCD, configuring the GitLab repo, and applying
 root app-of-apps. After that, ArgoCD manages everything.
 
 ```bash
-cd ~/repos/firb-lab/firblab
+cd ~/repos/firblab
 ansible-playbook ansible/playbooks/argocd-bootstrap.yml
 ```
 

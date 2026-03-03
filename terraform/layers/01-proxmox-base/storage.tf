@@ -17,7 +17,7 @@
 resource "proxmox_virtual_environment_storage_nfs" "truenas_10g" {
   id      = "truenas-10g"
   server  = "10.10.10.2"
-  export  = "/mnt/backups/firb-lab-01"
+  export  = "/mnt/backups/lab-01"
   nodes   = ["lab-01"]
   content = ["backup", "iso", "vztmpl", "snippets"]
   options = "vers=4.2"
