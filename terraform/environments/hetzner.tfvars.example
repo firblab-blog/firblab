@@ -31,7 +31,7 @@ wireguard_endpoint   = "10.0.30.10"
 wireguard_public_key = "CHANGE_ME"
 
 # Hetzner Object Storage (for TF state backend and backups)
-s3_endpoint     = "https://fsn1.your-objectstorage.com"
+s3_endpoint     = "https://region2.your-objectstorage.com"
 s3_access_key   = "CHANGE_ME"
 s3_secret_key   = "CHANGE_ME"
 s3_state_bucket = "firblab-tfstate"

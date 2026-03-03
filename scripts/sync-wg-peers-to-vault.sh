@@ -28,7 +28,7 @@
 #   ./sync-wg-peers-to-vault.sh
 #
 # Or with explicit S3 credentials:
-#   S3_ACCESS_KEY=xxx S3_SECRET_KEY=xxx S3_ENDPOINT=nbg1.your-objectstorage.com \
+#   S3_ACCESS_KEY=xxx S3_SECRET_KEY=xxx S3_ENDPOINT=region1.your-objectstorage.com \
 #   S3_BUCKET=firblab-wireguard ./sync-wg-peers-to-vault.sh
 # =============================================================================
 

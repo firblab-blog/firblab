@@ -45,7 +45,7 @@ gitlab_backup_enabled: false
 gitlab_backup_cron_hour: "2"
 gitlab_backup_cron_minute: "0"
 # S3 off-site backup target (Hetzner Object Storage)
-gitlab_backup_s3_bucket: "firblab-gitlab-backups"
+gitlab_backup_s3_bucket: "example-lab-gitlab-backups"
 gitlab_backup_s3_retention_days: 30
 # Incremental backup: only backs up changes since last full backup.
 # Each incremental is independently restorable (no chain dependency).

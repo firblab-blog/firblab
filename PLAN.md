@@ -469,7 +469,7 @@ From the codebase exploration, these are the categories of values being extracte
 | Vault config | 15+ refs | https://10.0.10.10:8200, secret/infra/* | `site.yml` vault section |
 | SSH key paths | 15+ | ~/.ssh/id_ed25519_lab-* | `site.yml` per-node ssh_key |
 | Storage pools | 3 | local-lvm, hdd-data-0 | `site.yml` per-node storage_pools |
-| S3 buckets | 4 | firblab-vault-backups | Derived from `site.yml` site_name |
+| S3 buckets | 4 | example-lab-vault-backups | Derived from `site.yml` site_name |
 | Git repo URLs | 10+ | http://10.0.10.50/infrastructure/firblab.git | Derived from GitLab IP + site_name |
 
 ---

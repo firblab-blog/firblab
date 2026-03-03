@@ -76,7 +76,7 @@ backup_cron_minute: "0"
 # ---------------------------------------------------------------------------
 # S3 Configuration (Hetzner Object Storage)
 # ---------------------------------------------------------------------------
-backup_s3_bucket: "firblab-service-backups"
+backup_s3_bucket: "example-lab-service-backups"
 backup_s3_retention_days: 30
 # Set by playbook from Vault:
 # backup_s3_access_key

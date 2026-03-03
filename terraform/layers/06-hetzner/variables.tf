@@ -203,7 +203,7 @@ variable "s3_secret_key" {
 }
 
 variable "s3_endpoint" {
-  description = "Hetzner S3 endpoint (e.g., nbg1.your-objectstorage.com) — only used when use_vault=false"
+  description = "Hetzner S3 endpoint (e.g., region1.your-objectstorage.com) — only used when use_vault=false"
   type        = string
   default     = ""
 }

@@ -314,7 +314,7 @@ Each layer has its own Terraform state, applied in order:
 backend "s3" {
   bucket                      = "firblab-tfstate"
   key                         = "layers/03-core-infra/terraform.tfstate"
-  endpoints                   = { s3 = "https://nbg1.your-objectstorage.com" }
+  endpoints                   = { s3 = "https://region1.your-objectstorage.com" }
   region                      = "nbg1"
   skip_credentials_validation = true
   skip_metadata_api_check     = true
@@ -508,7 +508,7 @@ seal "transit" {
 Backup script (`scripts/vault-backup.sh`):
 1. `vault operator raft snapshot save /tmp/vault-snapshot-$(date +%Y%m%d%H%M).snap`
 2. Encrypt with age: `age -r <public-key> -o snapshot.snap.age snapshot.snap`
-3. Upload to Hetzner S3: `aws s3 cp --endpoint-url https://nbg1.your-objectstorage.com snapshot.snap.age s3://firblab-vault-backups/`
+3. Upload to Hetzner S3: `aws s3 cp --endpoint-url https://region1.your-objectstorage.com snapshot.snap.age s3://example-lab-vault-backups/`
 4. SCP to RPi5: `scp snapshot.snap.age vault-backup@10.0.10.13:/backups/vault/`
 5. Clean up snapshots older than 30 days locally, 90 days on S3
 6. Runs as cron job on vault-1 (or Ansible-deployed systemd timer)
@@ -837,12 +837,12 @@ Vault seal event  → Vault telemetry → Prometheus → Alertmanager → Gotify
 
 | Bucket | Purpose | Managed By |
 |---|---|---|
-| firblab-vault-backups | Vault Raft snapshots | vault-backup-setup.yml (LaunchDaemon) |
-| firblab-gitlab-backups | GitLab backups + secrets.json | gitlab role (cron) |
-| firblab-longhorn-backups | Longhorn PVC backups | Longhorn RecurringJob (ArgoCD) |
-| firblab-service-backups | Docker volume backups | backup role (cron) |
-| firblab-proxmox-backups | vzdump snapshots | proxmox-backup-setup.yml (cron) |
-| firblab-tfstate-backups | Terraform state files | CI pipeline (per-apply) |
+| example-lab-vault-backups | Vault Raft snapshots | vault-backup-setup.yml (LaunchDaemon) |
+| example-lab-gitlab-backups | GitLab backups + secrets.json | gitlab role (cron) |
+| example-lab-longhorn-backups | Longhorn PVC backups | Longhorn RecurringJob (ArgoCD) |
+| example-lab-service-backups | Docker volume backups | backup role (cron) |
+| example-lab-proxmox-backups | vzdump snapshots | proxmox-backup-setup.yml (cron) |
+| example-lab-tfstate-backups | Terraform state files | CI pipeline (per-apply) |
 
 ---
 

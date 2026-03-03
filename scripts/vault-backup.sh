@@ -30,8 +30,8 @@ BACKUP_DIR="${BACKUP_DIR:-/tmp/vault-backups}"
 AGE_RECIPIENT="${AGE_RECIPIENT:?ERROR: Set AGE_RECIPIENT to your age public key}"
 
 # S3 configuration (Hetzner Object Storage)
-S3_ENDPOINT="${S3_ENDPOINT:-https://fsn1.your-objectstorage.com}"
-S3_BUCKET="${S3_BUCKET:-firblab-vault-backups}"
+S3_ENDPOINT="${S3_ENDPOINT:-https://region2.your-objectstorage.com}"
+S3_BUCKET="${S3_BUCKET:-example-lab-vault-backups}"
 
 # Local backup target (RPi5 or secondary node)
 LOCAL_BACKUP_HOST="${LOCAL_BACKUP_HOST:-10.0.10.13}"

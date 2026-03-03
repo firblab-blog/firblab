@@ -557,13 +557,13 @@ Hetzner Object Storage supports S3-compatible object lock (WORM — Write Once R
 # Create bucket with object lock enabled (must be set at bucket creation)
 aws s3api create-bucket \
   --bucket firblab-backups-immutable \
-  --endpoint-url https://nbg1.your-objectstorage.com \
+  --endpoint-url https://region1.your-objectstorage.com \
   --object-lock-enabled-for-bucket
 
 # Set default retention policy (e.g., 30 days governance mode)
 aws s3api put-object-lock-configuration \
   --bucket firblab-backups-immutable \
-  --endpoint-url https://nbg1.your-objectstorage.com \
+  --endpoint-url https://region1.your-objectstorage.com \
   --object-lock-configuration '{
     "ObjectLockEnabled": "Enabled",
     "Rule": {

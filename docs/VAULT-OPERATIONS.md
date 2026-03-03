@@ -216,9 +216,9 @@ age -r <public-key> -o /tmp/vault-snapshot-$(date +%Y%m%d%H%M).snap.age \
 
 # 3. Upload encrypted snapshot to Hetzner Object Storage (S3-compatible)
 aws s3 cp \
-  --endpoint-url https://nbg1.your-objectstorage.com \
+  --endpoint-url https://region1.your-objectstorage.com \
   /tmp/vault-snapshot-$(date +%Y%m%d%H%M).snap.age \
-  s3://firblab-vault-backups/
+  s3://example-lab-vault-backups/
 
 # 4. Copy encrypted snapshot to RPi5 local storage
 scp /tmp/vault-snapshot-$(date +%Y%m%d%H%M).snap.age \
@@ -263,8 +263,8 @@ Periodically test that backups are valid and restorable:
 ```bash
 # List recent backups on Hetzner
 aws s3 ls \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  s3://firblab-vault-backups/ \
+  --endpoint-url https://region1.your-objectstorage.com \
+  s3://example-lab-vault-backups/ \
   | tail -5
 
 # List recent backups on RPi5
@@ -306,8 +306,8 @@ Use this when restoring from the RPi5 or Hetzner Object Storage:
 ```bash
 # Download from Hetzner if needed
 aws s3 cp \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  s3://firblab-vault-backups/vault-snapshot-YYYYMMDDHHMM.snap.age \
+  --endpoint-url https://region1.your-objectstorage.com \
+  s3://example-lab-vault-backups/vault-snapshot-YYYYMMDDHHMM.snap.age \
   /tmp/
 
 # Or copy from RPi5

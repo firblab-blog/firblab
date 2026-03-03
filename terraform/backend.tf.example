@@ -22,7 +22,7 @@ terraform {
     key    = "layers/LAYER_NAME/terraform.tfstate"
 
     endpoints = {
-      s3 = "https://fsn1.your-objectstorage.com"
+      s3 = "https://region2.your-objectstorage.com"
     }
 
     region = "fsn1"

@@ -1380,7 +1380,7 @@ terraform {
   backend "s3" {
     bucket                      = "firblab-tfstate"
     key                         = "layers/03-core-infra/terraform.tfstate"
-    endpoints                   = { s3 = "https://nbg1.your-objectstorage.com" }
+    endpoints                   = { s3 = "https://region1.your-objectstorage.com" }
     region                      = "nbg1"
     skip_credentials_validation = true
     skip_metadata_api_check     = true
@@ -1515,7 +1515,7 @@ cat terraform.tfstate | jq .
 sops --decrypt terraform.tfstate.sops.json | jq .
 
 # For S3 state (layers 03-06), download and inspect
-aws s3 cp --endpoint-url https://nbg1.your-objectstorage.com \
+aws s3 cp --endpoint-url https://region1.your-objectstorage.com \
   s3://firblab-tfstate/layers/03-core-infra/terraform.tfstate .
 ```
 

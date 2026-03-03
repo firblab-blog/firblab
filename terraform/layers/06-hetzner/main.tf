@@ -77,7 +77,7 @@ resource "aws_s3_bucket" "wireguard_peers" {
 # ---------------------------------------------------------
 
 resource "aws_s3_bucket" "vault_backups" {
-  bucket = "firblab-vault-backups"
+  bucket = "example-lab-vault-backups"
 
   # Server-side 30-day expiration — replaces script-based cleanup.
   # Uses inline lifecycle_rule for Hetzner S3-compatible API compatibility.
@@ -93,7 +93,7 @@ resource "aws_s3_bucket" "vault_backups" {
 }
 
 resource "aws_s3_bucket" "gitlab_backups" {
-  bucket = "firblab-gitlab-backups"
+  bucket = "example-lab-gitlab-backups"
 
   lifecycle_rule {
     id      = "expire-after-30-days"
@@ -107,7 +107,7 @@ resource "aws_s3_bucket" "gitlab_backups" {
 }
 
 resource "aws_s3_bucket" "longhorn_backups" {
-  bucket = "firblab-longhorn-backups"
+  bucket = "example-lab-longhorn-backups"
 
   lifecycle_rule {
     id      = "expire-after-30-days"
@@ -121,7 +121,7 @@ resource "aws_s3_bucket" "longhorn_backups" {
 }
 
 resource "aws_s3_bucket" "service_backups" {
-  bucket = "firblab-service-backups"
+  bucket = "example-lab-service-backups"
 
   lifecycle_rule {
     id      = "expire-after-30-days"
@@ -135,7 +135,7 @@ resource "aws_s3_bucket" "service_backups" {
 }
 
 resource "aws_s3_bucket" "proxmox_backups" {
-  bucket = "firblab-proxmox-backups"
+  bucket = "example-lab-proxmox-backups"
 
   lifecycle_rule {
     id      = "expire-after-30-days"
@@ -149,7 +149,7 @@ resource "aws_s3_bucket" "proxmox_backups" {
 }
 
 resource "aws_s3_bucket" "tfstate_backups" {
-  bucket = "firblab-tfstate-backups"
+  bucket = "example-lab-tfstate-backups"
 }
 
 # ---------------------------------------------------------

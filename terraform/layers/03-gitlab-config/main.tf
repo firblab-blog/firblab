@@ -406,14 +406,14 @@ resource "gitlab_instance_variable" "vault_secret_id" {
 
 resource "gitlab_instance_variable" "tfstate_backup_bucket" {
   key       = "TFSTATE_BACKUP_BUCKET"
-  value     = "firblab-tfstate-backups"
+  value     = "example-lab-tfstate-backups"
   protected = false
   masked    = false
 }
 
 resource "gitlab_instance_variable" "tfstate_s3_endpoint" {
   key       = "TFSTATE_S3_ENDPOINT"
-  value     = "nbg1.your-objectstorage.com"
+  value     = "region1.your-objectstorage.com"
   protected = false
   masked    = false
 }
@@ -708,8 +708,8 @@ resource "gitlab_project_mirror" "firblab_public_to_github" {
 # GitHub Repository: example-lab-blog/firblab
 ###############################################
 # Manages security and merge settings on the public GitHub
-# mirror of firblab-public. The repo was created manually —
-# imported into Terraform state via the import block below.
+# mirror of firblab-public. The repo was created manually
+# and imported into Terraform state.
 #
 # NOTE: security_and_analysis may cause 422 errors on some
 # user-owned public repos (provider bug #2190). If apply
@@ -721,11 +721,6 @@ resource "gitlab_project_mirror" "firblab_public_to_github" {
 #   Contents: Read
 #   Metadata: Read (implicit)
 ###############################################
-
-import {
-  to = github_repository.firblab
-  id = "firblab"
-}
 
 resource "github_repository" "firblab" {
   name        = "firblab"

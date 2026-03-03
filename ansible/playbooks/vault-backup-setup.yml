@@ -262,7 +262,7 @@
           VAULT_CACERT={{ vault_cacert_path }}
           AGE_RECIPIENT={{ age_public_key }}
           S3_ENDPOINT=https://{{ s3_endpoint }}
-          S3_BUCKET=firblab-vault-backups
+          S3_BUCKET=example-lab-vault-backups
           LOCAL_BACKUP_HOST=10.0.10.13
           LOCAL_BACKUP_USER=vault-backup
           LOCAL_BACKUP_PATH=/backups/vault
@@ -381,13 +381,13 @@
           - "Wrapper:   /opt/firblab/scripts/vault-backup-wrapper.sh"
           - "Schedule:  Every {{ backup_interval_seconds // 3600 }} hours (LaunchDaemon)"
           - "Log:       {{ backup_log_path }}"
-          - "S3 Bucket: firblab-vault-backups"
+          - "S3 Bucket: example-lab-vault-backups"
           - "Local:     vault-backup@10.0.10.13:/backups/vault/"
           - ""
           - "Verify:"
           - "  launchctl print system/{{ backup_launchd_label }}"
           - "  tail -f {{ backup_log_path }}"
-          - "  aws s3 ls --endpoint-url https://{{ s3_endpoint }} s3://firblab-vault-backups/"
+          - "  aws s3 ls --endpoint-url https://{{ s3_endpoint }} s3://example-lab-vault-backups/"
           - "=========================================="
 
 # =========================================================================
