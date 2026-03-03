@@ -11,7 +11,7 @@
 #   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
 #   terraform apply
 #
-# Emergency fallback (Vault unreachable):
+# Emergency fallback (Vault unreachable — GitLab only, GitHub requires Vault):
 #   terraform apply -var use_vault=false \
 #     -var gitlab_token="glpat-xxxx"
 # =============================================================================
@@ -59,8 +59,8 @@ locals {
     fileexists(local._vault_cacert_local_path)
     ? file(local._vault_cacert_local_path)
     : fileexists(local._vault_cacert_env_path)
-      ? file(local._vault_cacert_env_path)
-      : ""
+    ? file(local._vault_cacert_env_path)
+    : ""
   )
 }
 
@@ -71,4 +71,25 @@ locals {
 provider "gitlab" {
   base_url = var.gitlab_base_url
   token    = local.gitlab_token
+}
+
+# ---------------------------------------------------------
+# GitHub Provider
+# ---------------------------------------------------------
+# Manages the public example-lab-blog/firblab GitHub repository
+# (security settings, branch protection). Authenticates with
+# a fine-grained PAT stored in Vault at secret/services/github
+# (key: admin_token, Administration RW + Contents Read).
+#
+# Separate from mirror_token (Contents RW only) used by the
+# GitLab push mirror — least privilege separation.
+#
+# NOTE: Always requires Vault (no use_vault=false fallback).
+# The data.vault_kv_secret_v2.github data source in main.tf
+# has no count guard — the mirror already requires it.
+# ---------------------------------------------------------
+
+provider "github" {
+  owner = data.vault_kv_secret_v2.github.data["github_username"]
+  token = data.vault_kv_secret_v2.github.data["admin_token"]
 }

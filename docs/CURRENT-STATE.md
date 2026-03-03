@@ -1,6 +1,6 @@
 # FirbLab Current State Inventory
 
-Last updated: 2026-03-01 (Home Assistant deployed on CM4 8GB NVMe — monitoring integrations added)
+Last updated: 2026-03-03 (GitHub public repo security hardened via Terraform — branch protection, Dependabot, settings)
 
 This document is the **source of truth** for what is actually deployed and running in the homelab. It reflects real Terraform state, Ansible inventory, and verified infrastructure — not aspirational plans.
 
@@ -329,6 +329,7 @@ secret/
 - **Cluster Agent:** ✅ `firblab-rke2` registered by Terraform Layer 03, token in Vault (`secret/k8s/gitlab-agent`). Agent deployed by ArgoCD (wave 0) via ESO token sync. Config at `.gitlab/agents/firblab-rke2/config.yaml`. Helm values corrected: `podSecurityContext` (pod-level) + `securityContext` (container-level) + `seccompProfile: RuntimeDefault` for PodSecurity `restricted` compliance
 - **Renovate Bot:** Scheduled pipeline (Monday 5:00 AM) scans for outdated Helm charts, Terraform providers, Ansible collections, CI base images → creates MRs
 - **ArgoCD Image Updater deploy token:** `argocd-image-updater` with `read_repository` + `write_repository` scopes, stored in Vault (`secret/services/gitlab/image-updater`)
+- **GitHub Public Mirror:** `example-lab-blog/firblab` (public portfolio repo). GitLab push mirror from `firblab-public` project. Mirror token in Vault (`secret/services/github`, key: `mirror_token`, Contents RW). Admin token for Terraform repo management (`admin_token`, Administration RW). Security settings managed by Terraform Layer 03: branch protection (no force push/deletion), Dependabot alerts, Projects disabled, auto-delete branches, commit signoff required. Secret scanning + push protection enabled by default (GitHub platform-level for public repos).
 
 ### Wazuh SIEM
 
@@ -695,7 +696,7 @@ To add/change a Traefik route: edit `templates/traefik-services.yml.j2`, run `ga
 | 02-vault-infra | `terraform/layers/02-vault-infra/` | vault-2 VM | ✅ tfstate present | ✅ Deployed |
 | 02-vault-config | `terraform/layers/02-vault-config/` | KV, PKI, policies, AppRole, secrets | ✅ tfstate present | ✅ Deployed |
 | 03-core-infra | `terraform/layers/03-core-infra/` | GitLab VM, Runner LXC | ✅ tfstate present | ✅ Deployed |
-| 03-gitlab-config | `terraform/layers/03-gitlab-config/` | Groups, projects, labels, CI/CD vars | ✅ tfstate present | ✅ Deployed |
+| 03-gitlab-config | `terraform/layers/03-gitlab-config/` | Groups, projects, labels, CI/CD vars, GitHub repo security | ✅ tfstate present | ✅ Deployed (GitHub provider added for public repo management) |
 | 04-rke2-cluster | `terraform/layers/04-rke2-cluster/` | 3 server + 3 agent VMs | ✅ tfstate present | ✅ Deployed, all workloads healthy |
 | 05-standalone-services | `terraform/layers/05-standalone-services/` | Ghost, FoundryVTT, Roundcube, Mealie, WireGuard, NetBox, PBS, Authentik, PatchMon, Actual Budget, Traefik Proxy, AI GPU, Vaultwarden | ✅ tfstate present | ✅ Authentik PBS-restored + `authentik_storage_pool` added (nvme-thin-1). AI GPU + Vaultwarden applied. |
 | 06-hetzner | `terraform/layers/06-hetzner/` | Hetzner VPS (gateway + honeypot), Cloudflare DNS, 7 S3 buckets (WireGuard + 6 backup), 30-day lifecycle expiration on 5 backup buckets, Vault IP + credentials writeback | ✅ tfstate present | ✅ Applied (gateway + honeypot IPs + credentials in Vault at `secret/infra/hetzner/server_ips` + `secret/infra/hetzner/credentials`) |

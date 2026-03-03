@@ -705,6 +705,85 @@ resource "gitlab_project_mirror" "firblab_public_to_github" {
 }
 
 ###############################################
+# GitHub Repository: example-lab-blog/firblab
+###############################################
+# Manages security and merge settings on the public GitHub
+# mirror of firblab-public. The repo was created manually —
+# imported into Terraform state via the import block below.
+#
+# NOTE: security_and_analysis may cause 422 errors on some
+# user-owned public repos (provider bug #2190). If apply
+# fails on this block, remove it and enable secret scanning
+# via gh api instead.
+#
+# Fine-grained PAT permissions required (admin_token):
+#   Administration: Read & Write
+#   Contents: Read
+#   Metadata: Read (implicit)
+###############################################
+
+import {
+  to = github_repository.firblab
+  id = "firblab"
+}
+
+resource "github_repository" "firblab" {
+  name        = "firblab"
+  description = "FirbLab — production-grade homelab infrastructure platform. Terraform, Ansible, Packer, Vault, RKE2 Kubernetes, and ArgoCD GitOps."
+  visibility  = "public"
+
+  # Features
+  has_issues      = true
+  has_wiki        = false
+  has_projects    = false
+  has_downloads   = true
+  has_discussions = false
+
+  # Merge behavior
+  delete_branch_on_merge = true
+
+  # Commit signing
+  web_commit_signoff_required = true
+
+  # Dependabot vulnerability alerts
+  vulnerability_alerts = true
+
+  # Secret scanning + push protection (free for public repos)
+  security_and_analysis {
+    secret_scanning {
+      status = "enabled"
+    }
+    secret_scanning_push_protection {
+      status = "enabled"
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+###############################################
+# GitHub Branch Protection: main
+###############################################
+# Protects main from force pushes and deletion. Direct
+# pushes ARE allowed — the GitLab CI mirror pushes directly
+# to main (no PRs, no status checks in this workflow).
+###############################################
+
+resource "github_branch_protection" "firblab_main" {
+  repository_id = github_repository.firblab.node_id
+  pattern       = "main"
+
+  # Block destructive operations
+  allows_force_pushes = false
+  allows_deletions    = false
+
+  # Do NOT enforce for admins — mirror token needs to push
+  enforce_admins = false
+}
+
+###############################################
 # Project Access Token: CI Sanitize Push
 ###############################################
 # Write-capable token for the CI sanitize job to push sanitized
@@ -750,9 +829,9 @@ resource "gitlab_project_variable" "sanitize_push_token" {
 
 resource "gitlab_application_settings" "this" {
   # --- Sign-in & Registration ---
-  signup_enabled                          = false  # No open registration — users via OIDC or admin-created
-  password_authentication_enabled_for_web = true   # Allow local login (root, service accounts, emergency access)
-  password_authentication_enabled_for_git = true   # Deploy tokens + PATs use password auth for Git over HTTPS
+  signup_enabled                           = false # No open registration — users via OIDC or admin-created
+  password_authentication_enabled_for_web  = true  # Allow local login (root, service accounts, emergency access)
+  password_authentication_enabled_for_git  = true  # Deploy tokens + PATs use password auth for Git over HTTPS
   require_admin_approval_after_user_signup = true  # Safety net if signup is ever re-enabled
 
   # --- OAuth / Authentik SSO ---
