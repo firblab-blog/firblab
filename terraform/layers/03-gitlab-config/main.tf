@@ -5,7 +5,7 @@
 # Creates the organizational structure for a clean, consolidated GitLab:
 #   - Instance-level application settings (sign-in, auth, security)
 #   - 4 top-level groups (Infrastructure, Applications, Personal, Documentation)
-#   - 13 projects across those groups
+#   - 14 projects across those groups
 #   - Standard labels on all projects
 #   - Branch protection on infrastructure projects
 #   - Instance-level CI/CD variables (Vault AppRole for all pipelines)
@@ -136,6 +136,19 @@ locals {
       wiki_enabled                     = true
       remove_source_branch_after_merge = true
     }
+    cc_recall = {
+      name                                         = "cc-recall"
+      path                                         = "cc-recall"
+      description                                  = "MCP server that gives Claude Code searchable long-term memory by indexing conversation histories into SQLite FTS5"
+      group_key                                    = "infrastructure"
+      visibility_level                             = "private"
+      wiki_enabled                                 = true
+      container_registry_enabled                   = true
+      only_allow_merge_if_pipeline_succeeds        = true
+      only_allow_merge_if_all_discussions_resolved = true
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
+    }
 
     # --- Applications ---
     tavkit = {
@@ -233,6 +246,7 @@ locals {
     ci_templates      = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     cybersecurity     = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     security_policies = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    cc_recall         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
   }
 
   # ---------------------------------------------------------------------------
