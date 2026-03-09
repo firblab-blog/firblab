@@ -12,9 +12,10 @@
 # Secrets: Vault secret/services/sonarqube → ESO → sonarqube-admin/sonarqube-oauth K8s Secrets
 #
 # Helm chart: https://SonarSource.github.io/helm-chart-sonarqube
-# IMPORTANT: Verify chart targetRevision against the index — chart version ≠ app version.
-#            SonarQube CE app version: 26.x (lts-community tag).
-#            Chart version: run `helm search repo sonarqube` after adding the repo.
+# IMPORTANT: Chart version follows SonarQube's date-based versioning (2025.x, 2026.x).
+#            Chart 2025.x bundles Bitnami PostgreSQL subchart 10.15.0.
+#            Chart 2026.x DROPS embedded PostgreSQL (requires external DB).
+#            Use 2025.* to retain embedded PostgreSQL.
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -28,7 +29,7 @@ spec:
   sources:
     - repoURL: https://SonarSource.github.io/helm-chart-sonarqube
       chart: sonarqube
-      targetRevision: "10.*"
+      targetRevision: "2025.*"
       helm:
         releaseName: sonarqube
         valueFiles:
