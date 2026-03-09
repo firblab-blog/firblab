@@ -142,6 +142,11 @@ persistence:
 # ---------------------------------------------------------------------------
 postgresql:
   enabled: true
+  # Override subchart image — bundled tag (11.14.0-debian-10-r22) was removed
+  # from Docker Hub when Bitnami dropped debian-10 images. PG 15 is within
+  # SonarQube 26.x supported range (PG 11-16).
+  image:
+    tag: "15"
   persistence:
     storageClass: longhorn
     size: 8Gi

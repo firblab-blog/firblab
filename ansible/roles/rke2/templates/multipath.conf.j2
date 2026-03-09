@@ -1,0 +1,30 @@
+# =============================================================================
+# Multipath Configuration — FirbLab RKE2 Nodes
+# =============================================================================
+# Blacklists Longhorn iSCSI block devices (vendor: IET, product: VIRTUAL-DISK)
+# to prevent multipathd from claiming them and blocking Longhorn CSI formatting.
+#
+# Problem: multipathd sees Longhorn iSCSI targets (presented by the in-kernel
+# iSCSI initiator via iscsi_tcp) and creates DM multipath devices (dm-0/mpatha).
+# When a Longhorn volume is deleted and re-created, the old DM holder persists
+# and mke2fs fails with "apparently in use by the system" (exit code 1).
+#
+# Fix: blacklist IET VIRTUAL-DISK devices. multipathd ignores them on (re)start,
+# so no DM holders are created and Longhorn CSI can format volumes normally.
+#
+# Managed by Ansible (ansible/roles/rke2/templates/multipath.conf.j2).
+# Do NOT edit manually.
+# =============================================================================
+
+defaults {
+    user_friendly_names yes
+    find_multipaths yes
+}
+
+blacklist {
+    # Longhorn iSCSI targets (iSCSI Enterprise Target / open-iscsi)
+    device {
+        vendor "IET"
+        product "VIRTUAL-DISK"
+    }
+}

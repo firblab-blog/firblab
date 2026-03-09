@@ -80,6 +80,7 @@
         tasks_from: prerequisites.yml
       tags:
         - prerequisites
+        - multipath
         - rke2
 
     # Deploy STIG configs (audit policy, encryption config) before install

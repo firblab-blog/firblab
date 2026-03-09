@@ -83,6 +83,35 @@
     - packages
 
 # ---------------------------------------------------------------------------
+# Multipath — Blacklist Longhorn iSCSI Devices
+# ---------------------------------------------------------------------------
+# multipathd claims Longhorn iSCSI block devices and creates DM holders
+# (dm-0/mpatha). These holders persist after PVC deletion and block
+# mke2fs from formatting new Longhorn volumes ("apparently in use by
+# the system"). Blacklist IET VIRTUAL-DISK devices to prevent this.
+- name: Deploy multipath.conf to blacklist Longhorn iSCSI devices
+  ansible.builtin.template:
+    src: multipath.conf.j2
+    dest: /etc/multipath.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart multipathd
+  tags:
+    - prerequisites
+    - multipath
+
+- name: Flush stale Longhorn multipath maps if present
+  ansible.builtin.command:
+    cmd: multipath -F
+  register: multipath_flush
+  failed_when: false
+  changed_when: multipath_flush.rc == 0
+  tags:
+    - prerequisites
+    - multipath
+
+# ---------------------------------------------------------------------------
 # Longhorn Data Disk (format + mount)
 # ---------------------------------------------------------------------------
 # Terraform provisions a dedicated data disk on scsi1 (/dev/sdb) for Longhorn
