@@ -33,7 +33,7 @@ gitlab_runner_tags: "docker,linux,firblab"
 # ---------------------------------------------------------------------------
 gitlab_runner_executor: "docker"
 gitlab_runner_docker_image: "alpine:latest"
-gitlab_runner_docker_privileged: false
+gitlab_runner_docker_privileged: true  # Required for Docker-in-Docker (DinD) builds
 gitlab_runner_docker_volumes:
   - "/cache"
 

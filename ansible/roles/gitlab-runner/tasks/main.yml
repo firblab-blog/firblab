@@ -190,6 +190,21 @@
     - register
 
 # ---------------------------------------------------------------------------
+# Docker Privileged Mode (required for Docker-in-Docker builds)
+# ---------------------------------------------------------------------------
+# The register command sets this at registration time, but for already-
+# registered runners we patch config.toml directly, like extra_hosts.
+- name: Set Docker privileged mode in runner config
+  ansible.builtin.lineinfile:
+    path: "{{ gitlab_runner_config_path }}"
+    regexp: '^\s*privileged\s*='
+    line: '    privileged = {{ gitlab_runner_docker_privileged | lower }}'
+    insertafter: '^\s*\[runners\.docker\]'
+  notify: Restart gitlab-runner
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
 # Docker Extra Hosts (split-horizon DNS for executor containers)
 # ---------------------------------------------------------------------------
 # Docker containers don't inherit /etc/hosts from the host. Inject the
