@@ -31,11 +31,11 @@ stages:
 variables:
   # Docker BuildKit for efficient layer caching
   DOCKER_BUILDKIT: "1"
-  # DinD TLS — runner shares /certs volume between dind service and job container.
-  # dind generates certs at /certs/server and /certs/client; docker client
-  # auto-detects them. Without this, dind listens on 2376 (TLS) but client
-  # tries 2375 (plain) and fails to connect.
-  DOCKER_TLS_CERTDIR: "/certs"
+  # Disable DinD TLS so it listens on 2375 (plain), matching the default
+  # DOCKER_HOST the client uses. TLS cert sharing requires runner-level
+  # volume configuration not present on this runner.
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
   # Registry namespace — CI_REGISTRY_IMAGE is auto-set to:
   # registry.gitlab.home.example-lab.org/firblab/applications/war
   IMAGE_BASE: $CI_REGISTRY_IMAGE
