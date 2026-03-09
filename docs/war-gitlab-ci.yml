@@ -40,7 +40,7 @@ variables:
   IMAGE_BASE: "registry.gitlab.home.example-lab.org/applications/war"
   CI_REGISTRY: "registry.gitlab.home.example-lab.org"
   # firblab GitOps repo URL (uses GITOPS_PUSH_TOKEN for auth)
-  GITOPS_REPO: "https://oauth2:${GITOPS_PUSH_TOKEN}@gitlab.home.example-lab.org/firblab/infrastructure/firblab.git"
+  GITOPS_REPO: "https://oauth2:${GITOPS_PUSH_TOKEN}@gitlab.home.example-lab.org/infrastructure/firblab.git"
   # Path to image variable file in the firblab repo
   WAR_DEFAULTS: "ansible/roles/war/defaults/main.yml"
 
@@ -116,7 +116,9 @@ build-push:images:
 
 update-gitops:
   stage: update-gitops
-  image: alpine/git:latest
+  image:
+    name: alpine/git:latest
+    entrypoint: [""]  # alpine/git sets ENTRYPOINT ["git"]; clear it so the runner can exec sh
   tags: [docker]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
