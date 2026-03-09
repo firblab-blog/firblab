@@ -1,0 +1,6 @@
+---
+- name: Restart freshrss
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ freshrss_install_dir }}"
+  listen: Restart freshrss

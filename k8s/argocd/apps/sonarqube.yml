@@ -1,0 +1,54 @@
+# SonarQube CE — static code analysis with GitLab ALM integration
+# Wave 2: Workload (depends on ingress, TLS, ESO, Longhorn)
+#
+# Auth: GitLab OAuth (native first-party integration, NOT generic OIDC)
+#       sonar.auth.gitlab.* properties injected via ExternalSecret env vars.
+#
+# GitLab integration:
+#   - Users log in with GitLab accounts (sonar.auth.gitlab.enabled=true)
+#   - CI pipelines post analysis via sonar-scanner + SONAR_TOKEN (Layer 03 CI var)
+#   - SonarQube decorates GitLab MRs with quality gate results via ALM token
+#
+# Secrets: Vault secret/services/sonarqube → ESO → sonarqube-admin/sonarqube-oauth K8s Secrets
+#
+# Helm chart: https://SonarSource.github.io/helm-chart-sonarqube
+# IMPORTANT: Verify chart targetRevision against the index — chart version ≠ app version.
+#            SonarQube CE app version: 26.x (lts-community tag).
+#            Chart version: run `helm search repo sonarqube` after adding the repo.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sonarqube
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  sources:
+    - repoURL: https://SonarSource.github.io/helm-chart-sonarqube
+      chart: sonarqube
+      targetRevision: "10.*"
+      helm:
+        releaseName: sonarqube
+        valueFiles:
+          - $values/k8s/platform/sonarqube/helm/values.yaml
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sonarqube
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        # baseline required: initSysctl privileged init container sets vm.max_map_count
+        # (Elasticsearch requirement). Restricted PSA blocks privileged containers.
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,265 @@
+---
+# =============================================================================
+# changedetection.io Deployment Playbook
+# =============================================================================
+# Deploys changedetection.io via Docker Compose on an LXC container. Web page
+# change monitoring for GovDeals/AllSurplus auction listings and other sites.
+# Includes Playwright browser sidecar for JavaScript rendering and a custom
+# listing watcher that sends Gotify alerts for new auction finds.
+#
+# Prerequisites:
+#   - changedetection LXC provisioned by Terraform Layer 05
+#   - Gotify app created: ansible-playbook playbooks/gateway-deploy.yml --tags gotify
+#   - Vault secrets seeded:
+#       vault kv patch secret/services/changedetection api_key=$(openssl rand -hex 16)
+#     (gotify_token is auto-stored by the gotify tag above)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/changedetection-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common            # Only baseline system config
+#   ansible-playbook ... --tags docker            # Only Docker installation
+#   ansible-playbook ... --tags changedetection   # Only app deployment
+#   ansible-playbook ... --tags seed              # Only API seeding (watches)
+#   ansible-playbook ... --tags verify            # Only health checks
+#   ansible-playbook ... --tags backup            # Only backup automation
+# =============================================================================
+
+- name: Deploy changedetection.io web page monitor
+  hosts: changedetection
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying changedetection.io on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # changedetection secrets from Vault (API key + Gotify token)
+    # -----------------------------------------------------------------
+    - name: Read changedetection secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/changedetection
+      register: vault_changedetection_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [changedetection, seed]
+
+    - name: Set changedetection secrets
+      ansible.builtin.set_fact:
+        changedetection_api_key: "{{ (vault_changedetection_read.stdout | from_json).data.data.api_key | default('') }}"
+        listing_watcher_gotify_token: "{{ (vault_changedetection_read.stdout | from_json).data.data.gotify_token | default('') }}"
+      when:
+        - vault_changedetection_read.rc is defined and vault_changedetection_read.rc == 0
+      no_log: true
+      tags: [changedetection, seed]
+
+    - name: Warn if changedetection Vault secrets unavailable
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Vault secrets for changedetection not available
+          (secret/services/changedetection). API seeding will be skipped
+          and listing watcher will run without Gotify notifications.
+          Run gateway-deploy.yml --tags gotify first, then
+          vault kv patch secret/services/changedetection api_key=$(openssl rand -hex 16)
+      when: vault_changedetection_read.rc is not defined or vault_changedetection_read.rc != 0
+      tags: [changedetection, seed]
+
+    # -----------------------------------------------------------------
+    # Backup secrets from Vault (for backup role)
+    # -----------------------------------------------------------------
+    - name: Read Hetzner S3 credentials from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json infra/hetzner
+      register: vault_hetzner_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Read age public key from Vault (for backup)
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/age-key
+      register: vault_age_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup]
+
+    - name: Set backup secrets
+      ansible.builtin.set_fact:
+        backup_s3_access_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_access_key }}"
+        backup_s3_secret_key: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_secret_key }}"
+        backup_s3_endpoint: "{{ (vault_hetzner_read.stdout | from_json).data.data.s3_endpoint }}"
+        backup_age_recipient: "{{ (vault_age_read.stdout | from_json).data.data.public_key }}"
+      when:
+        - vault_hetzner_read.rc is defined and vault_hetzner_read.rc == 0
+        - vault_age_read.rc is defined and vault_age_read.rc == 0
+      no_log: true
+      tags: [backup]
+
+    - name: Disable S3 backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        backup_enabled: false
+      when: backup_s3_access_key is not defined
+      tags: [backup]
+
+    # -----------------------------------------------------------------
+    # Restic backup secrets from Vault (for restic-backup role)
+    # -----------------------------------------------------------------
+    - name: Read Restic credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json backup/restic
+      register: vault_restic_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Set Restic backup secrets
+      ansible.builtin.set_fact:
+        restic_repo_password: "{{ (vault_restic_read.stdout | from_json).data.data.repo_password }}"
+        restic_repo_url: "rest:http://lab-03:{{ (vault_restic_read.stdout | from_json).data.data.firblab03_pass }}@{{ restic_server_ip }}:{{ restic_server_port }}/lab-03/"
+      when:
+        - vault_restic_read.rc is defined and vault_restic_read.rc == 0
+      no_log: true
+      tags: [backup, restic-backup]
+
+    - name: Disable Restic backup if Vault secrets unavailable
+      ansible.builtin.set_fact:
+        restic_backup_enabled: false
+      when: restic_repo_password is not defined
+      tags: [backup, restic-backup]
+
+  vars:
+    # Backup configuration (S3 off-site for datastore)
+    backup_enabled: true
+    backup_cron_hour: "4"
+    backup_cron_minute: "30"
+    backup_services:
+      - name: changedetection
+        compose_path: /opt/changedetection
+        paths:
+          - /opt/changedetection/data
+          - /opt/changedetection/watcher-data
+
+    # Restic backup configuration (local backup to hdd-mirror-0 on lab-01)
+    restic_backup_enabled: true
+    restic_backup_services:
+      - name: changedetection
+        stop_compose: /opt/changedetection
+        paths:
+          - /opt/changedetection/data
+          - /opt/changedetection/watcher-data
+        tags: ["changedetection", "monitoring"]
+        cron_hour: "1"
+        cron_minute: "30"
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # changedetection.io (Docker Compose: app + Playwright browser + listing watcher)
+    - role: changedetection
+      tags:
+        - changedetection
+        - seed
+
+    # Automated S3 backup (daily, age-encrypted)
+    - role: backup
+      tags:
+        - backup
+
+    # Restic backup to hdd-mirror-0 (local, dedup, verified)
+    - role: restic-backup
+      tags:
+        - backup
+        - restic-backup
+
+  post_tasks:
+    - name: Wait for changedetection to be accessible
+      ansible.builtin.uri:
+        url: "http://localhost:{{ changedetection_port | default(5000) }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      register: changedetection_health
+      retries: 15
+      delay: 10
+      until: changedetection_health.status is defined and changedetection_health.status in [200, 301, 302]
+      failed_when: false
+      tags:
+        - verify
+
+    - name: Fail if changedetection never became accessible
+      ansible.builtin.fail:
+        msg: "changedetection.io failed to respond after 150 seconds. Last status: {{ changedetection_health.status | default('connection refused') }}"
+      when: changedetection_health.status is not defined or changedetection_health.status not in [200, 301, 302]
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "changedetection.io Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ changedetection_port | default(5000) }}"
+          - "DNS: https://changedetection.home.example-lab.org"
+          - "Port: {{ changedetection_port | default(5000) }}"
+          - "Image: {{ changedetection_image }}"
+          - "Browser: {{ 'Playwright (sockpuppetbrowser)' if changedetection_browser_enabled | default(true) else 'Disabled (HTTP-only)' }}"
+          - "Watcher: {{ 'Enabled (Gotify alerts)' if listing_watcher_enabled | default(false) else 'Disabled' }}"
+          - "API Key: {{ 'Set' if changedetection_api_key is defined and changedetection_api_key else 'Not set (seed Vault)' }}"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/changedetection/docker-compose.yml ps"
+          - "  docker compose -f /opt/changedetection/docker-compose.yml logs -f"
+          - "  docker compose -f /opt/changedetection/docker-compose.yml logs listing-watcher"
+          - "=========================================="
+      tags:
+        - verify

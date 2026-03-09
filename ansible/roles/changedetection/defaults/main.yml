@@ -1,0 +1,117 @@
+---
+# =============================================================================
+# changedetection.io Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+#
+# Secrets (from Vault, injected by playbook):
+#   changedetection_api_key        — API key for changedetection.io REST API
+#   listing_watcher_gotify_token   — Gotify app token for new-listing alerts
+# =============================================================================
+
+# changedetection.io image — pinned for reproducibility
+# https://github.com/dgtlmoon/changedetection.io/releases
+changedetection_image: "ghcr.io/dgtlmoon/changedetection.io:0.49.4"
+
+# Playwright browser sidecar for JavaScript-rendered pages
+changedetection_browser_enabled: true
+changedetection_browser_image: "dgtlmoon/sockpuppetbrowser:latest"
+
+# Port exposed on the host (maps to container port 5000)
+changedetection_port: 5000
+
+# Install directory
+changedetection_install_dir: /opt/changedetection
+
+# Base URL for the web UI (used for notifications, links)
+changedetection_base_url: "https://changedetection.home.example-lab.org"
+
+# ---------------------------------------------------------------------------
+# changedetection.io watches — seeded via API on deploy (tag: seed)
+# ---------------------------------------------------------------------------
+# Each entry creates a watch in changedetection.io. Requires changedetection_api_key.
+# GovDeals and AllSurplus are both owned by Liquidity Services — agencies post on either.
+changedetection_watches:
+  # GovDeals — keyword searches
+  - url: "https://www.govdeals.com/search?kWord=thinkcentre"
+    tag: "govdeals"
+    title: "GovDeals - ThinkCentre"
+  - url: "https://www.govdeals.com/search?kWord=optiplex%20micro"
+    tag: "govdeals"
+    title: "GovDeals - OptiPlex Micro"
+  - url: "https://www.govdeals.com/search?kWord=elitedesk%20mini"
+    tag: "govdeals"
+    title: "GovDeals - EliteDesk Mini"
+  - url: "https://www.govdeals.com/search?kWord=micro%20desktop"
+    tag: "govdeals"
+    title: "GovDeals - Micro Desktop"
+  - url: "https://www.govdeals.com/search?kWord=m920"
+    tag: "govdeals"
+    title: "GovDeals - Lenovo M920"
+  - url: "https://www.govdeals.com/search?kWord=optiplex%207070"
+    tag: "govdeals"
+    title: "GovDeals - OptiPlex 7070"
+  # GovDeals — category browse (catches listings with bad titles)
+  - url: "https://www.govdeals.com/en/computers-parts-supplies"
+    tag: "govdeals"
+    title: "GovDeals - Computers Category"
+  # AllSurplus — keyword searches
+  - url: "https://www.allsurplus.com/search?kWord=thinkcentre"
+    tag: "allsurplus"
+    title: "AllSurplus - ThinkCentre"
+  - url: "https://www.allsurplus.com/search?kWord=optiplex%20micro"
+    tag: "allsurplus"
+    title: "AllSurplus - OptiPlex Micro"
+  - url: "https://www.allsurplus.com/search?kWord=elitedesk%20mini"
+    tag: "allsurplus"
+    title: "AllSurplus - EliteDesk Mini"
+
+# ---------------------------------------------------------------------------
+# Listing watcher — lightweight scraper running alongside changedetection.io
+# ---------------------------------------------------------------------------
+# Scrapes auction search pages, extracts individual listings, filters by keyword,
+# and sends Gotify alerts for new finds. Catches specific listings faster than
+# changedetection.io's page-level change detection.
+listing_watcher_enabled: true
+
+# Check interval in seconds (1800 = 30 minutes)
+listing_watcher_check_interval: 1800
+
+# Gotify endpoint for notifications (reachable from Services VLAN 20 via Traefik)
+listing_watcher_gotify_url: "https://gotify.home.example-lab.org"
+
+# Keywords to match in listing titles (case-insensitive, any match = alert)
+# Applied to ALL search results including category pages
+listing_watcher_keywords:
+  - thinkcentre
+  - optiplex
+  - elitedesk
+  - m720
+  - m920
+  - micro desktop
+  - optiplex 7070
+  - elitedesk 800
+  - tiny
+
+# Search URLs to scrape (same sites as changedetection watches)
+listing_watcher_searches:
+  - name: "GovDeals - ThinkCentre"
+    url: "https://www.govdeals.com/search?kWord=thinkcentre"
+  - name: "GovDeals - OptiPlex Micro"
+    url: "https://www.govdeals.com/search?kWord=optiplex%20micro"
+  - name: "GovDeals - EliteDesk Mini"
+    url: "https://www.govdeals.com/search?kWord=elitedesk%20mini"
+  - name: "GovDeals - Micro Desktop"
+    url: "https://www.govdeals.com/search?kWord=micro%20desktop"
+  - name: "GovDeals - Lenovo M920"
+    url: "https://www.govdeals.com/search?kWord=m920"
+  - name: "GovDeals - OptiPlex 7070"
+    url: "https://www.govdeals.com/search?kWord=optiplex%207070"
+  - name: "GovDeals - Computers Category"
+    url: "https://www.govdeals.com/en/computers-parts-supplies"
+  - name: "AllSurplus - ThinkCentre"
+    url: "https://www.allsurplus.com/search?kWord=thinkcentre"
+  - name: "AllSurplus - OptiPlex Micro"
+    url: "https://www.allsurplus.com/search?kWord=optiplex%20micro"
+  - name: "AllSurplus - EliteDesk Mini"
+    url: "https://www.allsurplus.com/search?kWord=elitedesk%20mini"

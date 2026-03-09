@@ -1,0 +1,53 @@
+# =============================================================================
+# FreshRSS Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  freshrss:
+    image: {{ freshrss_image }}
+    container_name: freshrss
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ freshrss_port }}:80"
+    volumes:
+      - {{ freshrss_install_dir }}/data:/var/www/FreshRSS/data
+      - {{ freshrss_install_dir }}/extensions:/var/www/FreshRSS/extensions
+{% if freshrss_oidc_enabled %}
+      # Bypass the FreshRSS image's broken OIDCXForwardedHeaders template logic.
+      # See templates/oidc-forwarded.conf.j2 for full explanation.
+      - {{ freshrss_install_dir }}/oidc-forwarded.conf:/etc/apache2/conf-enabled/oidc-forwarded.conf:ro
+{% endif %}
+    environment:
+      TZ: "{{ freshrss_timezone }}"
+      CRON_MIN: "*/15"           # Feed refresh interval (minutes)
+      # ---------------------------------------------------------------------------
+      # Initial admin setup — only effective on first launch (creates the account)
+      # ---------------------------------------------------------------------------
+      ADMIN_LOGIN: "{{ freshrss_admin_user }}"
+      ADMIN_PASS: "{{ freshrss_admin_pass }}"
+      ADMIN_EMAIL: "{{ freshrss_admin_email }}"
+      # ---------------------------------------------------------------------------
+      # OIDC — Authentik native OIDC integration
+      # ---------------------------------------------------------------------------
+{% if freshrss_oidc_enabled %}
+      OIDC_ENABLED: "1"
+      OIDC_PROVIDER_METADATA_URL: "{{ freshrss_oidc_provider_metadata_url }}"
+      OIDC_CLIENT_ID: "{{ freshrss_oidc_client_id }}"
+      OIDC_CLIENT_SECRET: "{{ freshrss_oidc_client_secret }}"
+      OIDC_REDIRECT_URI: "{{ freshrss_oidc_redirect_uri }}"
+      OIDC_SCOPES: "{{ freshrss_oidc_scopes }}"
+      OIDC_REMOTE_USER_CLAIM: "{{ freshrss_oidc_remote_user_claim }}"
+      # mod_auth_openidc requires actual HTTP header names, not CGI env var names.
+      # X-Forwarded-Host is required so the relative OIDCRedirectURI (/i/oidc/)
+      # is computed as https://freshrss.home.example-lab.org/i/oidc/ rather than
+      # using the backend IP, which would mismatch the Authentik registered URI.
+      OIDC_X_FORWARDED_HEADERS: "X-Forwarded-Host X-Forwarded-Port X-Forwarded-Proto Forwarded"
+      # Required by mod_auth_openidc to encrypt session cookies (injected from Vault)
+      OIDC_CLIENT_CRYPTO_KEY: "{{ freshrss_oidc_crypto_key }}"
+{% endif %}

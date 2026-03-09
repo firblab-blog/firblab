@@ -1,0 +1,45 @@
+# =============================================================================
+# SonarQube IngressRoute — Traefik TLS Termination + cert-manager
+# =============================================================================
+# Exposes SonarQube at https://sonarqube.home.example-lab.org via Traefik.
+# DNS record: Layer 00 dns.tf → Traefik VIP 10.0.20.220 → sonarqube.home.example-lab.org
+#
+# NO ForwardAuth middleware — SonarQube handles its own auth via GitLab OAuth.
+# (sonar.forceAuthentication=true ensures all access requires login.)
+#
+# Service name: sonarqube-sonarqube (Helm release=sonarqube + chart=sonarqube)
+# Port: 9000 (SonarQube default web interface)
+# =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sonarqube-tls
+  namespace: sonarqube
+spec:
+  secretName: sonarqube-tls
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  dnsNames:
+    - sonarqube.home.example-lab.org
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sonarqube
+  namespace: sonarqube
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`sonarqube.home.example-lab.org`)
+      kind: Rule
+      services:
+        - name: sonarqube-sonarqube
+          port: 9000
+      middlewares:
+        - name: default-headers
+          namespace: traefik
+  tls:
+    secretName: sonarqube-tls

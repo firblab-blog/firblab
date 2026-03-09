@@ -1,0 +1,189 @@
+---
+# =============================================================================
+# Gotify Role - Tasks
+# =============================================================================
+# Deploys Gotify push notification server via Docker Compose in an LXC
+# container. Expects the docker role to be applied first.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create Gotify directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ gotify_install_dir }}"
+    - "{{ gotify_install_dir }}/data"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template Gotify Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ gotify_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart gotify
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER containers
+# are running, killing them.
+- name: Flush handlers before starting Gotify container
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull Gotify container image
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ gotify_install_dir }}"
+  register: gotify_pull_result
+  changed_when: "'Pull complete' in gotify_pull_result.stdout or 'Downloaded' in gotify_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start Gotify container
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ gotify_install_dir }}"
+  register: gotify_up_result
+  changed_when: "'Started' in gotify_up_result.stderr or 'Creating' in gotify_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for Gotify to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ gotify_port }}/"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: gotify_health
+  retries: 15
+  delay: 5
+  until: gotify_health.status is defined and gotify_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if Gotify never became accessible
+  ansible.builtin.fail:
+    msg: "Gotify failed to respond after 75 seconds. Last status: {{ gotify_health.status | default('connection refused') }}"
+  when: gotify_health.status is not defined or gotify_health.status not in [200, 301, 302]
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# App Seeding — create notification apps via API (tag: seed)
+# ---------------------------------------------------------------------------
+# Creates apps in Gotify and stores their tokens in Vault. Idempotent: checks
+# existing apps first, only creates missing ones. Vault write uses 'vault kv
+# patch' (merge) or 'vault kv put' (replace) per app config.
+#
+# Requires: gotify_admin_pass (injected by playbook from Vault)
+#           gotify_apps list (defined in group_vars/gotify.yml)
+- name: Build Basic auth header for Gotify API
+  ansible.builtin.set_fact:
+    _gotify_auth: "{{ (gotify_admin_user + ':' + gotify_admin_pass) | b64encode }}"
+    existing_gotify_app_names: []
+  tags:
+    - seed
+
+- name: Get existing Gotify applications
+  ansible.builtin.uri:
+    url: "http://localhost:{{ gotify_port }}/application"
+    method: GET
+    headers:
+      Authorization: "Basic {{ _gotify_auth }}"
+    return_content: true
+    status_code: [200]
+  register: existing_gotify_apps_response
+  failed_when: false
+  tags:
+    - seed
+
+- name: Debug Gotify API response
+  ansible.builtin.debug:
+    msg: "Gotify API: status={{ existing_gotify_apps_response.status | default('no response') }}, apps={{ existing_gotify_apps_response.json | length if existing_gotify_apps_response.json is sequence else 0 }}"
+  tags:
+    - seed
+
+- name: Build list of existing app names
+  ansible.builtin.set_fact:
+    existing_gotify_app_names: "{{ existing_gotify_apps_response.json | map(attribute='name') | list }}"
+  when:
+    - existing_gotify_apps_response.status is defined
+    - existing_gotify_apps_response.status == 200
+    - existing_gotify_apps_response.json is sequence
+  tags:
+    - seed
+
+- name: Create Gotify apps
+  ansible.builtin.uri:
+    url: "http://localhost:{{ gotify_port }}/application"
+    method: POST
+    headers:
+      Authorization: "Basic {{ _gotify_auth }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ item.name }}"
+      description: "{{ item.description | default('') }}"
+    status_code: [200]
+  register: created_gotify_apps
+  loop: "{{ gotify_apps }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.name not in existing_gotify_app_names
+  tags:
+    - seed
+
+- name: Store Gotify app tokens in Vault (patch — preserves other keys)
+  ansible.builtin.command:
+    cmd: "vault kv patch {{ item.item.vault_path }} {{ item.item.vault_key }}={{ item.json.token }}"
+  delegate_to: localhost
+  become: false
+  loop: "{{ created_gotify_apps.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - item.skipped is not defined or not item.skipped
+    - item.json is defined
+    - item.json.token is defined
+    - item.item.vault_merge | default(true)
+  no_log: true
+  tags:
+    - seed
+
+- name: Store Gotify app tokens in Vault (put — creates new path)
+  ansible.builtin.command:
+    cmd: "vault kv put {{ item.item.vault_path }} {{ item.item.vault_key }}={{ item.json.token }}"
+  delegate_to: localhost
+  become: false
+  loop: "{{ created_gotify_apps.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when:
+    - item.skipped is not defined or not item.skipped
+    - item.json is defined
+    - item.json.token is defined
+    - not (item.item.vault_merge | default(true))
+  no_log: true
+  tags:
+    - seed

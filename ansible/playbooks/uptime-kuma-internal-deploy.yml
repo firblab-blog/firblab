@@ -179,7 +179,7 @@
         UK_USERNAME: "{{ uk_username }}"
         UK_PASSWORD: "{{ uk_password }}"
         UK_GOTIFY_TOKEN: "{{ uk_gotify_token }}"
-        GOTIFY_URL: "https://gotify.example-lab.org"
+        GOTIFY_URL: "http://10.0.10.20"    # Internal Gotify (VLAN 10, lab-03)
         UK_MONITORS_JSON: "{{ hostvars['uptime-kuma-internal']['uptime_kuma_monitors'] | to_json }}"
       delegate_to: "uptime-kuma-internal"
       register: uk_result

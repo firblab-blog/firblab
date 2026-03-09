@@ -1,0 +1,37 @@
+# =============================================================================
+# FreshRSS — mod_auth_openidc X-Forwarded-Headers Override
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The FreshRSS Docker image sets OIDCXForwardedHeaders via this pattern in
+# its Apache config template:
+#
+#   Define "Test_${OIDC_X_FORWARDED_HEADERS}"
+#   <IfDefine !Test_${VStart}OIDC_X_FORWARDED_HEADERS${VEnd}>
+#       OIDCXForwardedHeaders ${OIDC_X_FORWARDED_HEADERS}
+#   </IfDefine>
+#
+# When OIDC_X_FORWARDED_HEADERS contains multiple space-separated values
+# (e.g. "X-Forwarded-Host X-Forwarded-Port X-Forwarded-Proto Forwarded"),
+# Apache's Define directive treats only the first word as the name and the
+# rest as its value. The subsequent IfDefine check then silently evaluates
+# against the wrong token — OIDCXForwardedHeaders is never applied.
+#
+# Without OIDCXForwardedHeaders, mod_auth_openidc cannot trust
+# X-Forwarded-Proto from Traefik. It falls back to the raw backend scheme
+# (http://) when computing the OIDCRedirectURI callback, causing Authentik's
+# strict redirect URI check to fail (registered: https://, received: http://).
+#
+# This file is dropped into /etc/apache2/conf-enabled/ and loaded
+# automatically by Apache2 via IncludeOptional, setting the directive
+# directly and bypassing the broken template logic.
+# =============================================================================
+
+# Traefik sends X-Forwarded-* headers (not RFC 7239 "Forwarded").
+# Listing "Forwarded" would generate noisy warnings on every request.
+OIDCXForwardedHeaders X-Forwarded-Host X-Forwarded-Port X-Forwarded-Proto

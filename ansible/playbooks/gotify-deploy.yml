@@ -1,0 +1,145 @@
+---
+# =============================================================================
+# Gotify Internal Deployment Playbook
+# =============================================================================
+# Deploys the internal Gotify push notification server via Docker Compose on
+# an LXC container (lab-03, Management VLAN 10, 10.0.10.20). Receives
+# alerts from internal services: uptime-kuma-internal, changedetection listing
+# watcher, and any other homelab service that needs push notifications.
+#
+# Architecture:
+#   - This instance handles INTERNAL notifications (homelab services)
+#   - The Hetzner gateway Gotify handles EXTERNAL alerts (Alertmanager, public)
+#   - Traefik standalone proxies this at https://gotify.home.example-lab.org
+#   - Clients connect to https://gotify.home.example-lab.org (from within homelab
+#     or via WireGuard VPN when remote)
+#
+# Prerequisites:
+#   - LXC provisioned by Terraform Layer 05 (gotify module)
+#   - Vault secret seeded:
+#       vault kv put secret/services/gotify-internal \
+#         admin_pass=$(openssl rand -hex 16)
+#   - For app token seeding (--tags seed), the service secrets must exist:
+#       secret/services/uptime-kuma-internal (username+password already set)
+#       secret/services/changedetection (api_key already set)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/gotify-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags gotify      # Only Gotify app deployment
+#   ansible-playbook ... --tags seed        # Only app creation + Vault token storage
+#   ansible-playbook ... --tags verify      # Only health checks
+# =============================================================================
+
+- name: Deploy internal Gotify notification server
+  hosts: gotify
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying Gotify internal on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # Gotify admin password from Vault
+    # -----------------------------------------------------------------
+    - name: Read Gotify internal credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/gotify-internal
+      register: vault_gotify_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [gotify, seed]
+
+    - name: Set Gotify admin password
+      ansible.builtin.set_fact:
+        gotify_admin_pass: "{{ (vault_gotify_read.stdout | from_json).data.data.admin_pass }}"
+      when:
+        - vault_gotify_read.rc is defined and vault_gotify_read.rc == 0
+      no_log: true
+      tags: [gotify, seed]
+
+    - name: Fail if Gotify Vault secret unavailable
+      ansible.builtin.fail:
+        msg: >
+          Vault secret not found (secret/services/gotify-internal, key: admin_pass).
+          Seed it first:
+            vault kv put secret/services/gotify-internal admin_pass=$(openssl rand -hex 16)
+      when: vault_gotify_read.rc is not defined or vault_gotify_read.rc != 0
+      tags: [gotify, seed]
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # Gotify (Docker Compose: single container, SQLite-backed)
+    - role: gotify
+      tags:
+        - gotify
+        - seed
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Gotify Internal Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ gotify_port | default(80) }}"
+          - "DNS: https://gotify.home.example-lab.org"
+          - "Port: {{ gotify_port | default(80) }}"
+          - "Image: {{ gotify_image }}"
+          - ""
+          - "Next steps:"
+          - "  1. Run --tags seed to create notification apps + store tokens in Vault"
+          - "  2. Re-deploy uptime-kuma-internal to pick up new Gotify URL:"
+          - "       ansible-playbook ... playbooks/uptime-kuma-internal-deploy.yml --tags configure-uk"
+          - "  3. Re-deploy changedetection to pick up new Gotify token:"
+          - "       ansible-playbook ... playbooks/changedetection-deploy.yml --tags changedetection"
+          - "  4. Update Traefik to route gotify.home.example-lab.org to internal Gotify:"
+          - "       ansible-playbook ... playbooks/traefik-deploy.yml --tags traefik"
+          - "  docker compose -f /opt/gotify/docker-compose.yml ps"
+          - "  docker compose -f /opt/gotify/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

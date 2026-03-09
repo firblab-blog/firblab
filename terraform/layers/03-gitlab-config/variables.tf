@@ -78,3 +78,13 @@ variable "vault_approle_secret_id" {
   sensitive   = true
   default     = ""
 }
+
+# ---------------------------------------------------------
+# SonarQube
+# ---------------------------------------------------------
+
+variable "sonarqube_ci_ready" {
+  description = "Set true after SonarQube is deployed and analysis_token stored in Vault at secret/services/sonarqube. Enables SONAR_TOKEN GitLab CI variable."
+  type        = bool
+  default     = false
+}

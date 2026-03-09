@@ -11,6 +11,7 @@
 #   - FoundryVTT (VM)   : Virtual tabletop for gaming             — lab-03
 #   - Roundcube (LXC)   : Webmail client (Docker-in-LXC)         — lab-03
 #   - Mealie (LXC)      : Recipe manager (Docker-in-LXC)         — lab-03
+#   - changedetection (LXC): Web page change monitor (Docker-in-LXC) — lab-03
 #   - Actual Budget (LXC): Personal finance (Docker-in-LXC)      — lab-03
 #   - WireGuard (LXC)   : Site-to-site VPN gateway (DMZ VLAN 30) — lab-03
 #   - NetBox (VM)        : DCIM/IPAM infrastructure mapping       — lab-04
@@ -21,6 +22,7 @@
 #   - Archive (VM)        : Offline archive hub with TrueNAS NFS        — lab-04
 #   - AI GPU (VM)          : GPU-accelerated AI/ML workloads (Ollama)    — lab-01
 #   - Traefik Proxy (LXC): Reverse proxy for standalone services (Mgmt VLAN 10) — lab-04
+#   - FreshRSS (LXC)      : RSS feed aggregator (Docker-in-LXC)       — lab-03
 # =============================================================================
 
 # ---------------------------------------------------------
@@ -491,6 +493,49 @@ module "patchmon" {
 }
 
 # ---------------------------------------------------------
+# changedetection.io (LXC) — lab-03, Services VLAN 20
+# ---------------------------------------------------------
+# Web page change monitoring and alerting. Watches GovDeals
+# and other auction sites for homelab hardware listings.
+# Playwright browser sidecar for JavaScript rendering.
+# Deployed as an LXC (Docker-in-LXC) — same pattern as
+# Vaultwarden, Mealie, Ghost.
+# ---------------------------------------------------------
+
+module "changedetection" {
+  source = "../../modules/proxmox-lxc/"
+
+  # Identity
+  name        = var.changedetection_name
+  description = "changedetection.io - Web page change monitoring and alerts"
+  vm_id       = var.changedetection_vm_id
+  tags        = ["changedetection", "monitoring", "services"]
+
+  # Proxmox placement
+  proxmox_node = var.proxmox_node
+
+  # Compute resources — 2GB for Playwright/Chromium browser sidecar
+  cpu_cores    = var.changedetection_cpu_cores
+  memory_mb    = var.changedetection_memory_mb
+  disk_size_gb = var.changedetection_disk_size_gb
+  storage_pool = var.storage_pool
+
+  # Container configuration
+  docker_enabled = true
+
+  # Network
+  network_bridge = var.network_bridge
+  vlan_tag       = var.vlan_tag
+  ip_address     = var.changedetection_ip_address
+  gateway        = var.gateway
+  domain_name    = var.domain_name
+  dns_servers    = var.dns_servers
+
+  # SSH
+  additional_ssh_key = var.ssh_public_key
+}
+
+# ---------------------------------------------------------
 # Actual Budget (LXC) — lab-03, Services VLAN 20
 # ---------------------------------------------------------
 # Local-first personal finance app with envelope budgeting.
@@ -782,5 +827,99 @@ module "uptime_kuma_internal" {
   additional_ssh_key = var.ssh_public_key
 
   # Startup — monitoring should come up after core services
+  startup_order = "3"
+}
+
+# ---------------------------------------------------------
+# FreshRSS (LXC) — lab-03, Services VLAN 20
+# ---------------------------------------------------------
+# Self-hosted RSS feed aggregator with multi-user support.
+# Extremely lightweight: PHP + SQLite, single container, no
+# external database. Native OIDC via Authentik — each user's
+# feeds are private to their account.
+#
+# Deployed as an LXC (Docker-in-LXC) — same pattern as
+# Ghost, Mealie, Vaultwarden.
+# ---------------------------------------------------------
+
+module "freshrss" {
+  source = "../../modules/proxmox-lxc/"
+
+  # Identity
+  name        = var.freshrss_name
+  description = "FreshRSS - Self-hosted RSS feed aggregator"
+  vm_id       = var.freshrss_vm_id
+  tags        = ["freshrss", "rss", "services"]
+
+  # Proxmox placement
+  proxmox_node = var.proxmox_node
+
+  # Compute resources — very lightweight (PHP, SQLite, no external DB)
+  cpu_cores    = var.freshrss_cpu_cores
+  memory_mb    = var.freshrss_memory_mb
+  disk_size_gb = var.freshrss_disk_size_gb
+  storage_pool = var.storage_pool
+
+  # Container configuration
+  docker_enabled = true
+
+  # Network — Services VLAN 20
+  network_bridge = var.network_bridge
+  vlan_tag       = var.vlan_tag
+  ip_address     = var.freshrss_ip_address
+  gateway        = var.gateway
+  domain_name    = var.domain_name
+  dns_servers    = var.dns_servers
+
+  # SSH
+  additional_ssh_key = var.ssh_public_key
+}
+
+# ---------------------------------------------------------
+# Gotify Internal (LXC) — lab-03, Management VLAN 10
+# ---------------------------------------------------------
+# Internal push notification server. Receives alerts from all
+# homelab services: uptime-kuma-internal, changedetection listing
+# watcher, etc. Go binary + SQLite — extremely lightweight.
+# Port 80 — Traefik proxies as gotify.home.example-lab.org.
+# Paired with the Hetzner Gotify (external alerts: Alertmanager,
+# public Uptime Kuma, gateway notifications).
+# ---------------------------------------------------------
+
+module "gotify" {
+  source = "../../modules/proxmox-lxc/"
+
+  # Identity
+  name        = var.gotify_name
+  description = "Gotify (Internal) - Push notification server for homelab services"
+  vm_id       = var.gotify_vm_id
+  tags        = ["gotify", "notifications", "infra"]
+
+  # Proxmox placement — lab-03 (same node as uptime-kuma-internal)
+  proxmox_node = var.proxmox_node
+
+  # Compute resources — extremely lightweight (Go binary, SQLite, no external DB)
+  cpu_cores    = var.gotify_cpu_cores
+  memory_mb    = var.gotify_memory_mb
+  disk_size_gb = var.gotify_disk_size_gb
+  storage_pool = var.storage_pool
+
+  # Container configuration
+  docker_enabled = true
+
+  # Network — Management VLAN 10 (untagged on vmbr0, same as uptime-kuma-internal)
+  network_bridge = var.network_bridge
+  vlan_tag       = null
+  ip_address     = var.gotify_ip_address
+  gateway        = var.gotify_gateway
+  domain_name    = var.domain_name
+  # Override layer-wide DNS: must resolve *.home.example-lab.org (UDM Pro serves
+  # this zone on all VLAN interfaces; use the Management VLAN 10 gateway).
+  dns_servers    = ["10.0.10.1"]
+
+  # SSH
+  additional_ssh_key = var.ssh_public_key
+
+  # Startup — notifications should come up after core services
   startup_order = "3"
 }

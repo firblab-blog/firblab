@@ -1,0 +1,193 @@
+---
+# =============================================================================
+# changedetection.io Role - Web Page Change Monitor via Docker Compose
+# =============================================================================
+# Deploys changedetection.io using Docker Compose in an LXC container. Expects
+# the docker role to be applied first.
+#
+# Stack: changedetection.io container + optional Playwright browser sidecar
+#        + optional listing watcher (auction scraper with Gotify alerts).
+# Data is stored in a flat-file datastore (no external database).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create changedetection directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ changedetection_install_dir }}"
+    - "{{ changedetection_install_dir }}/data"
+  tags:
+    - configure
+    - directories
+
+- name: Create listing watcher directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ changedetection_install_dir }}/watcher"
+    - "{{ changedetection_install_dir }}/watcher-data"
+  when: listing_watcher_enabled | default(false)
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Listing Watcher Files
+# ---------------------------------------------------------------------------
+- name: Deploy listing watcher script
+  ansible.builtin.copy:
+    src: watcher.py
+    dest: "{{ changedetection_install_dir }}/watcher/watcher.py"
+    owner: root
+    group: root
+    mode: "0644"
+  when: listing_watcher_enabled | default(false)
+  notify: Restart changedetection
+  tags:
+    - configure
+
+- name: Deploy listing watcher Dockerfile
+  ansible.builtin.copy:
+    src: Dockerfile.watcher
+    dest: "{{ changedetection_install_dir }}/watcher/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  when: listing_watcher_enabled | default(false)
+  notify: Restart changedetection
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template changedetection Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ changedetection_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart changedetection
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start Containers
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER containers
+# are running, killing them.
+- name: Flush handlers before starting changedetection containers
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull changedetection container images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ changedetection_install_dir }}"
+  register: changedetection_pull_result
+  changed_when: "'Pull complete' in changedetection_pull_result.stdout or 'Downloaded' in changedetection_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Build and start changedetection containers
+  ansible.builtin.command:
+    cmd: docker compose up -d --build
+    chdir: "{{ changedetection_install_dir }}"
+  register: changedetection_up_result
+  changed_when: "'Started' in changedetection_up_result.stderr or 'Creating' in changedetection_up_result.stderr or 'Built' in changedetection_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for changedetection to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ changedetection_port }}"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: changedetection_health
+  retries: 15
+  delay: 10
+  until: changedetection_health.status is defined and changedetection_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if changedetection never became accessible
+  ansible.builtin.fail:
+    msg: "changedetection.io failed to respond after 150 seconds. Last status: {{ changedetection_health.status | default('connection refused') }}"
+  when: changedetection_health.status is not defined or changedetection_health.status not in [200, 301, 302]
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# API Seeding — create watches programmatically (tag: seed)
+# ---------------------------------------------------------------------------
+# Works with or without API key. If CHANGEDETECTION_API_KEY is set (from Vault),
+# sends x-api-key header. If not, the API is unauthenticated by default.
+- name: Build API headers for changedetection
+  ansible.builtin.set_fact:
+    _cd_api_headers: "{{ (changedetection_api_key is defined and changedetection_api_key | length > 0) | ternary({'x-api-key': changedetection_api_key | default('')}, {}) }}"
+    existing_watch_urls: []
+  tags:
+    - seed
+
+- name: Get existing changedetection watches
+  ansible.builtin.uri:
+    url: "http://localhost:{{ changedetection_port }}/api/v1/watch"
+    headers: "{{ _cd_api_headers }}"
+    method: GET
+    return_content: true
+  register: existing_watches
+  failed_when: false
+  tags:
+    - seed
+
+- name: Debug existing watches API response
+  ansible.builtin.debug:
+    msg: "changedetection API: status={{ existing_watches.status | default('no response') }}, watches={{ existing_watches.json | length if existing_watches.json is mapping else 0 }}"
+  tags:
+    - seed
+
+- name: Build list of existing watch URLs
+  ansible.builtin.set_fact:
+    existing_watch_urls: "{{ existing_watches.json.values() | map(attribute='url') | list }}"
+  when:
+    - existing_watches.status is defined and existing_watches.status == 200
+    - existing_watches.json is mapping
+  tags:
+    - seed
+
+- name: Seed changedetection watches
+  ansible.builtin.uri:
+    url: "http://localhost:{{ changedetection_port }}/api/v1/watch"
+    headers: "{{ _cd_api_headers }}"
+    method: POST
+    body_format: json
+    body:
+      url: "{{ item.url }}"
+      tag: "{{ item.tag | default('') }}"
+      title: "{{ item.title | default('') }}"
+    status_code: [200, 201]
+  loop: "{{ changedetection_watches }}"
+  loop_control:
+    label: "{{ item.title | default(item.url) }}"
+  when:
+    - item.url not in existing_watch_urls
+  tags:
+    - seed

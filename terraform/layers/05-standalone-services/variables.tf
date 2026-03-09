@@ -590,6 +590,50 @@ variable "patchmon_ip_address" {
 }
 
 # ---------------------------------------------------------
+# changedetection.io (LXC) — lab-03, Services VLAN 20
+# ---------------------------------------------------------
+# Web page change monitoring and alerting. Watches GovDeals
+# and other auction sites for homelab hardware listings.
+# Playwright browser sidecar for JavaScript rendering.
+# ---------------------------------------------------------
+
+variable "changedetection_vm_id" {
+  description = "Proxmox VM ID for changedetection.io container"
+  type        = number
+  default     = 5016
+}
+
+variable "changedetection_name" {
+  description = "Hostname for changedetection.io container"
+  type        = string
+  default     = "changedetection"
+}
+
+variable "changedetection_cpu_cores" {
+  description = "Number of CPU cores for changedetection.io"
+  type        = number
+  default     = 1
+}
+
+variable "changedetection_memory_mb" {
+  description = "Memory in MB for changedetection.io (2GB for Playwright browser sidecar)"
+  type        = number
+  default     = 2048
+}
+
+variable "changedetection_disk_size_gb" {
+  description = "Disk size in GB for changedetection.io"
+  type        = number
+  default     = 8
+}
+
+variable "changedetection_ip_address" {
+  description = "Static IP address for changedetection.io in CIDR notation"
+  type        = string
+  default     = "10.0.20.17/24"
+}
+
+# ---------------------------------------------------------
 # Actual Budget (LXC) — lab-03, Services VLAN 20
 # ---------------------------------------------------------
 # Local-first personal finance app. Minimal resource needs:
@@ -857,4 +901,99 @@ variable "uptime_kuma_internal_gateway" {
   description = "Gateway for internal Uptime Kuma on Management VLAN 10"
   type        = string
   default     = "10.0.10.1"
+}
+
+# ---------------------------------------------------------
+# Gotify Internal (LXC) — lab-03, Management VLAN 10
+# ---------------------------------------------------------
+# Internal push notification server. Receives alerts from all homelab
+# services: uptime-kuma-internal, changedetection listing watcher, etc.
+# Paired with the Hetzner Gotify (external alerts: Alertmanager, etc.).
+# Accessible at https://gotify.home.example-lab.org via Traefik standalone.
+# ---------------------------------------------------------
+
+variable "gotify_vm_id" {
+  description = "Proxmox VM ID for internal Gotify container"
+  type        = number
+  default     = 5042
+}
+
+variable "gotify_name" {
+  description = "Hostname for internal Gotify container"
+  type        = string
+  default     = "gotify"
+}
+
+variable "gotify_cpu_cores" {
+  description = "Number of CPU cores for internal Gotify (single Go binary, very lightweight)"
+  type        = number
+  default     = 1
+}
+
+variable "gotify_memory_mb" {
+  description = "Memory in MB for internal Gotify (SQLite + Go binary)"
+  type        = number
+  default     = 256
+}
+
+variable "gotify_disk_size_gb" {
+  description = "Disk size in GB for internal Gotify"
+  type        = number
+  default     = 4
+}
+
+variable "gotify_ip_address" {
+  description = "Static IP address for internal Gotify on Management VLAN 10 in CIDR notation"
+  type        = string
+  default     = "10.0.10.20/24"
+}
+
+variable "gotify_gateway" {
+  description = "Gateway for internal Gotify on Management VLAN 10"
+  type        = string
+  default     = "10.0.10.1"
+}
+
+# ---------------------------------------------------------
+# FreshRSS (LXC) — lab-03, Services VLAN 20
+# ---------------------------------------------------------
+# Self-hosted RSS feed aggregator. Lightweight LXC with Docker
+# Compose. Native OIDC via Authentik — each user gets their own
+# feed collection. Port 80.
+# ---------------------------------------------------------
+
+variable "freshrss_vm_id" {
+  description = "Proxmox VM ID for FreshRSS container"
+  type        = number
+  default     = 5043
+}
+
+variable "freshrss_name" {
+  description = "Hostname for FreshRSS container"
+  type        = string
+  default     = "freshrss"
+}
+
+variable "freshrss_cpu_cores" {
+  description = "Number of CPU cores for FreshRSS"
+  type        = number
+  default     = 1
+}
+
+variable "freshrss_memory_mb" {
+  description = "Memory in MB for FreshRSS"
+  type        = number
+  default     = 512
+}
+
+variable "freshrss_disk_size_gb" {
+  description = "Disk size in GB for FreshRSS"
+  type        = number
+  default     = 8
+}
+
+variable "freshrss_ip_address" {
+  description = "Static IP address for FreshRSS in CIDR notation"
+  type        = string
+  default     = "10.0.20.21/24"
 }

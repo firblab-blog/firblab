@@ -8,11 +8,13 @@
 #   - FoundryVTT (VM)  : Virtual tabletop — port 30000   — lab-03
 #   - Mealie (LXC)     : Recipe manager — port 9000      — lab-03
 #   - Actual Budget (LXC): Personal finance — port 5006  — lab-03
+#   - changedetection (LXC): Web page monitor — port 5000 — lab-03
 #   - Vaultwarden (LXC): Password vault — port 8000      — lab-03
 #   - NetBox (VM)       : DCIM/IPAM — port 8080          — lab-04
 #   - Archive (VM)      : Archive hub — port 8080         — lab-04
 #   - PatchMon (VM)     : Patch monitoring — port 3000   — lab-04
 #   - AI GPU (VM)       : Ollama/OpenWebUI/n8n — 11434/3000/5678 — lab-01
+#   - FreshRSS (LXC)    : RSS feed aggregator — port 80          — lab-03
 #
 # All on Services VLAN 20 (10.0.20.0/24).
 # =============================================================================
@@ -31,9 +33,11 @@ standalone_services_firewall_ports:
   - { port: "8080", proto: tcp, comment: "NetBox DCIM/IPAM" }
   - { port: "3000", proto: tcp, comment: "PatchMon / Open WebUI" }
   - { port: "5006", proto: tcp, comment: "Actual Budget finance" }
+  - { port: "5000", proto: tcp, comment: "changedetection.io web monitor" }
   - { port: "8000", proto: tcp, comment: "Vaultwarden password vault" }
   - { port: "11434", proto: tcp, comment: "Ollama LLM API" }
   - { port: "5678", proto: tcp, comment: "n8n workflow automation" }
+  - { port: "80", proto: tcp, comment: "FreshRSS feed aggregator" }
 
 standalone_services_firewall_sources:
   - "{{ management_network }}"

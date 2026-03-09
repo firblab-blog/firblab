@@ -1,0 +1,182 @@
+# =============================================================================
+# SonarQube CE Helm Values — FirbLab RKE2 Cluster
+# =============================================================================
+# SonarQube CE for static code analysis with GitLab ALM integration.
+#
+# Chart:  https://SonarSource.github.io/helm-chart-sonarqube
+# Docs:   https://docs.sonarsource.com/sonarqube-community-build/
+#
+# Auth:   GitLab OAuth (native sonar.auth.gitlab.* integration, NOT generic OIDC)
+#         OAuth credentials injected as env vars from sonarqube-oauth K8s Secret.
+#         SonarQube maps env vars to properties automatically:
+#           SONAR_AUTH_GITLAB_APPLICATIONID → sonar.auth.gitlab.applicationId
+#           SONAR_AUTH_GITLAB_SECRET        → sonar.auth.gitlab.secret
+#
+# Secrets: Vault secret/services/sonarqube → ESO → K8s Secrets:
+#            sonarqube-admin  (admin password for account.existingSecret)
+#            sonarqube-oauth  (GitLab OAuth client credentials as env vars)
+#
+# Storage: Longhorn RWO PVCs for app data (10Gi) and PostgreSQL (8Gi).
+#          MUST use deploymentStrategy.type=Recreate to avoid RWO multi-attach
+#          deadlock during rolling updates (same constraint as Mealie).
+#
+# Node requirement: vm.max_map_count >= 262144 on all agent nodes.
+#   initSysctl sets this via privileged init container (requires baseline PSA).
+#   Check current value: kubectl debug node/<agent> -- sysctl vm.max_map_count
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+image:
+  tag: lts-community  # Floating LTS community tag. Pin after first deploy.
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Deployment — MUST be Recreate for RWO PVC
+# ---------------------------------------------------------------------------
+# RollingUpdate with ReadWriteOnce volumes deadlocks: new pod waits for volume
+# to detach from old pod, old pod waits for new pod to become Ready. Use Recreate.
+deploymentStrategy:
+  type: Recreate
+
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# Admin Account
+# ---------------------------------------------------------------------------
+# K8s Secret 'sonarqube-admin' created by ExternalSecret from Vault.
+# Keys: 'password' (new admin password), 'currentPassword' (default 'admin').
+account:
+  existingSecret: sonarqube-admin
+  adminPasswordSecretKey: password
+  currentAdminPasswordSecretKey: currentPassword
+
+# ---------------------------------------------------------------------------
+# Security Context
+# ---------------------------------------------------------------------------
+# SonarQube runs as UID 1000 / GID 0 (OpenShift convention — root group).
+# fsGroup MUST be 0, not 1000. GID 1000 causes 'permission denied' on entrypoint.sh.
+podSecurityContext:
+  fsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 0
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Init: vm.max_map_count (Elasticsearch requirement)
+# ---------------------------------------------------------------------------
+# Sets vm.max_map_count=262144 via privileged init container.
+# Requires baseline PSA on the namespace (set in ArgoCD Application manifest).
+initSysctl:
+  enabled: true
+  vmMaxMapCount: 524288
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+
+jvmOpts: "-Xms1g -Xmx2g"
+jvmCeOpts: "-Xms512m -Xmx1g"
+
+# ---------------------------------------------------------------------------
+# SonarQube Properties (non-secret)
+# ---------------------------------------------------------------------------
+# Secret properties (GitLab OAuth credentials) are NOT here — they are injected
+# via extraEnvVars from the sonarqube-oauth K8s Secret. SonarQube automatically
+# maps env var SONAR_<SECTION>_<KEY> to sonar.<section>.<key>.
+sonarProperties:
+  sonar.core.serverBaseURL: "https://sonarqube.home.example-lab.org"
+  sonar.forceAuthentication: "true"
+  # GitLab OAuth — non-secret properties only
+  sonar.auth.gitlab.enabled: "true"
+  sonar.auth.gitlab.url: "https://gitlab.home.example-lab.org"
+  sonar.auth.gitlab.allowUsersToSignUp: "false"
+  sonar.auth.gitlab.syncUserGroups: "true"
+
+# ---------------------------------------------------------------------------
+# Secret Properties via Env Vars (GitLab OAuth credentials)
+# ---------------------------------------------------------------------------
+# sonarqube-oauth K8s Secret (created by ExternalSecret) must contain:
+#   SONAR_AUTH_GITLAB_APPLICATIONID: <oauth_client_id from Vault>
+#   SONAR_AUTH_GITLAB_SECRET:        <oauth_client_secret from Vault>
+# SonarQube maps these to sonar.auth.gitlab.applicationId / .secret automatically.
+extraEnvVars:
+  - name: SONAR_AUTH_GITLAB_APPLICATIONID
+    valueFrom:
+      secretKeyRef:
+        name: sonarqube-oauth
+        key: SONAR_AUTH_GITLAB_APPLICATIONID
+  - name: SONAR_AUTH_GITLAB_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: sonarqube-oauth
+        key: SONAR_AUTH_GITLAB_SECRET
+
+# ---------------------------------------------------------------------------
+# Persistence (Longhorn)
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  storageClass: longhorn
+  size: 10Gi
+  accessMode: ReadWriteOnce
+
+# ---------------------------------------------------------------------------
+# Bundled PostgreSQL
+# ---------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  persistence:
+    storageClass: longhorn
+    size: 8Gi
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  externalPort: 9000
+  internalPort: 9000
+
+# ---------------------------------------------------------------------------
+# Ingress — disabled (Traefik IngressRoute in manifests/ingress.yaml)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Monitoring — disabled (Prometheus is on K3s cluster, not RKE2)
+# ---------------------------------------------------------------------------
+prometheusExporter:
+  enabled: false
+prometheusMonitoring:
+  podMonitor:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Node affinity — schedule on agent nodes only
+# ---------------------------------------------------------------------------
+# Agent nodes (10.0.20.50-51) have 8GB RAM; server nodes (4GB) run etcd.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-role.kubernetes.io/agent
+              operator: Exists

@@ -5,7 +5,7 @@
 # Creates the organizational structure for a clean, consolidated GitLab:
 #   - Instance-level application settings (sign-in, auth, security)
 #   - 4 top-level groups (Infrastructure, Applications, Personal, Documentation)
-#   - 14 projects across those groups
+#   - 19 projects across those groups
 #   - Standard labels on all projects
 #   - Branch protection on infrastructure projects
 #   - Instance-level CI/CD variables (Vault AppRole for all pipelines)
@@ -149,6 +149,19 @@ locals {
       remove_source_branch_after_merge             = true
       initialize_with_readme                       = false
     }
+    guardrail = {
+      name                                         = "guardrail"
+      path                                         = "guardrail"
+      description                                  = "Trusted guidance and guardrails for coding agents — stores approved project guidance with provenance, scope, and instruction sync support"
+      group_key                                    = "infrastructure"
+      visibility_level                             = "private"
+      wiki_enabled                                 = true
+      container_registry_enabled                   = true
+      only_allow_merge_if_pipeline_succeeds        = true
+      only_allow_merge_if_all_discussions_resolved = true
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
+    }
 
     # --- Applications ---
     tavkit = {
@@ -180,6 +193,19 @@ locals {
       wiki_enabled                     = true
       container_registry_enabled       = true
       remove_source_branch_after_merge = true
+    }
+    war = {
+      name                                         = "war"
+      path                                         = "war"
+      description                                  = "Unified platform for multi-agent adjudication, critique, and synthesis — planning and eventual implementation home for the WAR platform"
+      group_key                                    = "applications"
+      visibility_level                             = "private"
+      wiki_enabled                                 = true
+      container_registry_enabled                   = true
+      only_allow_merge_if_pipeline_succeeds        = true
+      only_allow_merge_if_all_discussions_resolved = true
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
     }
     iron_cohort_game = {
       name                             = "iron-cohort-game"
@@ -237,7 +263,7 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # Branch Protection — infrastructure projects get maintainer-level protection
+  # Branch Protection — selected projects get maintainer-level protection
   # ---------------------------------------------------------------------------
   branch_protections = {
     firblab           = { push = "maintainer", merge = "maintainer", allow_force_push = false }
@@ -247,6 +273,8 @@ locals {
     cybersecurity     = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     security_policies = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     cc_recall         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    guardrail         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    war               = { push = "maintainer", merge = "maintainer", allow_force_push = false }
   }
 
   # ---------------------------------------------------------------------------
@@ -834,6 +862,100 @@ resource "gitlab_project_variable" "sanitize_push_token" {
   masked    = true
 
   depends_on = [gitlab_project_access_token.sanitize_push]
+}
+
+###############################################
+# SonarQube — GitLab OAuth + ALM Integration
+###############################################
+# Creates:
+#   1. GitLab OAuth application — users log in to SonarQube with GitLab credentials
+#   2. Group access token — SonarQube posts quality gate decoration to GitLab MRs
+#   3. Random admin password for SonarQube initial setup
+#   4. Vault secret at secret/services/sonarqube (consumed by ESO on RKE2)
+#   5. Instance CI/CD variable SONAR_HOST_URL (all pipelines inherit it)
+#   6. Instance CI/CD variable SONAR_TOKEN (added after SonarQube analysis token
+#      is created — set sonarqube_ci_ready=true then re-apply)
+#
+# OAuth redirect: https://sonarqube.home.example-lab.org/oauth2/callback/gitlab
+# Vault path:     secret/services/sonarqube
+###############################################
+
+resource "gitlab_application" "sonarqube" {
+  name         = "SonarQube"
+  redirect_url = "https://sonarqube.home.example-lab.org/oauth2/callback/gitlab"
+  scopes       = ["read_user"]
+  confidential = true
+}
+
+# Group access token scoped to Infrastructure group.
+# SonarQube uses this to post quality gate decoration to GitLab MRs.
+# Requires developer access_level: posting notes/statuses is a developer operation.
+resource "gitlab_group_access_token" "sonarqube_alm" {
+  group        = gitlab_group.groups["infrastructure"].id
+  name         = "sonarqube-alm"
+  access_level = "developer"
+  scopes       = ["api"]
+  expires_at   = "2027-03-01"  # GitLab enforces 1-year max from creation date
+
+  depends_on = [gitlab_group.groups]
+}
+
+resource "random_password" "sonarqube_admin" {
+  length  = 24
+  special = false
+}
+
+# Write all SonarQube secrets to Vault in one pass.
+# Terraform Layer 03 owns this path — do not manually write to it.
+resource "vault_kv_secret_v2" "sonarqube" {
+  mount = "secret"
+  name  = "services/sonarqube"
+
+  data_json = jsonencode({
+    admin_password         = random_password.sonarqube_admin.result
+    admin_password_current = "admin"  # SonarQube default; consumed by chart init job
+    gitlab_oauth_client_id     = gitlab_application.sonarqube.application_id
+    gitlab_oauth_client_secret = gitlab_application.sonarqube.secret
+    gitlab_alm_token           = gitlab_group_access_token.sonarqube_alm.token
+  })
+
+  depends_on = [
+    gitlab_application.sonarqube,
+    gitlab_group_access_token.sonarqube_alm,
+  ]
+}
+
+###############################################
+# Instance CI/CD Variables — SonarQube
+###############################################
+
+resource "gitlab_instance_variable" "sonar_host_url" {
+  key       = "SONAR_HOST_URL"
+  value     = "https://sonarqube.home.example-lab.org"
+  protected = false
+  masked    = false
+}
+
+# SONAR_TOKEN is added only after SonarQube is deployed and running:
+#   1. Log into SonarQube admin UI (password from Vault admin_password)
+#   2. Administration → Security → Users → Tokens → create "ci-analysis" token
+#   3. vault kv patch secret/services/sonarqube analysis_token=<token>
+#   4. Set sonarqube_ci_ready = true in variables.tf (or override in tfvars)
+#   5. Re-run: terraform -chdir=terraform/layers/03-gitlab-config apply
+data "vault_kv_secret_v2" "sonarqube_ci" {
+  count = var.sonarqube_ci_ready ? 1 : 0
+  mount = "secret"
+  name  = "services/sonarqube"
+}
+
+resource "gitlab_instance_variable" "sonar_token" {
+  count     = var.sonarqube_ci_ready ? 1 : 0
+  key       = "SONAR_TOKEN"
+  value     = data.vault_kv_secret_v2.sonarqube_ci[0].data["analysis_token"]
+  protected = false
+  masked    = true
+
+  depends_on = [data.vault_kv_secret_v2.sonarqube_ci]
 }
 
 resource "gitlab_application_settings" "this" {

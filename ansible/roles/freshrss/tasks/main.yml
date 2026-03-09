@@ -1,0 +1,264 @@
+---
+# =============================================================================
+# FreshRSS Role - Tasks
+# =============================================================================
+# Deploys FreshRSS RSS feed aggregator via Docker Compose in an LXC
+# container. Expects the docker role to be applied first.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create FreshRSS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ freshrss_install_dir }}"
+    - "{{ freshrss_install_dir }}/data"
+    - "{{ freshrss_install_dir }}/extensions"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# mod_auth_openidc X-Forwarded-Headers fix
+# ---------------------------------------------------------------------------
+# The FreshRSS image's Apache config template silently fails to apply
+# OIDCXForwardedHeaders when the value contains multiple space-separated
+# header names (Define/IfDefine bug). Without it, mod_auth_openidc computes
+# the OIDC redirect URI using the raw backend scheme (http://) rather than
+# trusting X-Forwarded-Proto from Traefik (https://), breaking Authentik's
+# redirect URI check. This conf file is mounted into /etc/apache2/conf-enabled/
+# and loaded automatically by Apache, bypassing the broken template logic.
+# This task must run BEFORE the docker-compose template so the file exists
+# on disk when Docker bind-mounts it into the container.
+- name: Template mod_auth_openidc forwarded-headers conf
+  ansible.builtin.template:
+    src: oidc-forwarded.conf.j2
+    dest: "{{ freshrss_install_dir }}/oidc-forwarded.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: freshrss_oidc_enabled
+  notify: Restart freshrss
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template FreshRSS Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ freshrss_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart freshrss
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+# Flush pending handlers (especially "Restart docker" from the docker role)
+# BEFORE starting containers. Without this, Docker restarts AFTER containers
+# are running, killing them.
+- name: Flush handlers before starting FreshRSS container
+  ansible.builtin.meta: flush_handlers
+
+- name: Pull FreshRSS container image
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ freshrss_install_dir }}"
+  register: freshrss_pull_result
+  changed_when: "'Pull complete' in freshrss_pull_result.stdout or 'Downloaded' in freshrss_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start FreshRSS container
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ freshrss_install_dir }}"
+  register: freshrss_up_result
+  changed_when: "'Started' in freshrss_up_result.stderr or 'Creating' in freshrss_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+- name: Wait for FreshRSS to be accessible
+  ansible.builtin.uri:
+    url: "http://localhost:{{ freshrss_port }}/"
+    method: GET
+    status_code: [200, 301, 302]
+    follow_redirects: none
+  register: freshrss_health
+  retries: 15
+  delay: 5
+  until: freshrss_health.status is defined and freshrss_health.status in [200, 301, 302]
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if FreshRSS never became accessible
+  ansible.builtin.fail:
+    msg: "FreshRSS failed to respond after 75 seconds. Last status: {{ freshrss_health.status | default('connection refused') }}"
+  when: freshrss_health.status is not defined or freshrss_health.status not in [200, 301, 302]
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# FreshRSS Initialization — ensure installed + admin user exists
+# ---------------------------------------------------------------------------
+# The Docker entrypoint auto-install (ADMIN_LOGIN/ADMIN_PASS env vars) only
+# runs do-install.php when data/config.php is absent — i.e. once. If the
+# container crash-looped during first start, config.php may exist but the
+# admin user was never created. We make this explicit and idempotent.
+- name: Check if FreshRSS data config exists
+  ansible.builtin.stat:
+    path: "{{ freshrss_install_dir }}/data/config.php"
+  register: freshrss_config_stat
+  tags:
+    - deploy
+    - seed
+
+- name: Initialize FreshRSS installation (first-time only)
+  ansible.builtin.command:
+    cmd: >
+      docker exec freshrss php /var/www/FreshRSS/cli/do-install.php
+      --default_user {{ freshrss_admin_user }}
+      --base_url {{ freshrss_base_url }}
+      --db-type sqlite
+  when: not freshrss_config_stat.stat.exists
+  changed_when: true
+  tags:
+    - deploy
+    - seed
+
+- name: List existing FreshRSS users
+  ansible.builtin.command:
+    cmd: docker exec freshrss php /var/www/FreshRSS/cli/list-users.php
+  register: freshrss_users
+  changed_when: false
+  tags:
+    - deploy
+    - seed
+
+- name: Create FreshRSS admin user (if not exists)
+  ansible.builtin.command:
+    cmd: >
+      docker exec freshrss php /var/www/FreshRSS/cli/create-user.php
+      --user {{ freshrss_admin_user }}
+      --password {{ freshrss_admin_pass }}
+      --email {{ freshrss_admin_email }}
+  when: freshrss_admin_user not in (freshrss_users.stdout | default(''))
+  changed_when: true
+  no_log: true
+  tags:
+    - deploy
+    - seed
+
+# ---------------------------------------------------------------------------
+# OPML Auto-Sync Cron (tag: configure)
+# ---------------------------------------------------------------------------
+# Weekly cron job that re-downloads and re-imports the OPML URL, picking up
+# new feeds added to the source list over time. FreshRSS import is additive
+# only — feeds removed from the OPML are NOT deleted.
+- name: Install weekly OPML auto-sync cron job
+  ansible.builtin.cron:
+    name: "FreshRSS OPML auto-sync"
+    weekday: "{{ freshrss_opml_autosync_weekday }}"
+    hour: "{{ freshrss_opml_autosync_hour }}"
+    minute: "{{ freshrss_opml_autosync_minute }}"
+    user: root
+    job: >
+      curl -fsSL '{{ freshrss_import_opml_url }}' -o /tmp/freshrss-sync.opml &&
+      docker cp /tmp/freshrss-sync.opml freshrss:/tmp/import.opml &&
+      docker exec freshrss php /var/www/FreshRSS/cli/import-for-user.php
+      --user {{ freshrss_import_opml_user }} --filename /tmp/import.opml
+      >> /var/log/freshrss-opml-sync.log 2>&1
+    state: "{{ 'present' if freshrss_opml_autosync_enabled and freshrss_import_opml_url | length > 0 else 'absent' }}"
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# OPML Seed Import (tag: seed)
+# ---------------------------------------------------------------------------
+# Downloads an OPML file and imports it via the FreshRSS CLI inside the
+# container. Idempotent: existing feeds are updated, new ones added.
+# Skipped if freshrss_import_opml_url is empty.
+#
+# FreshRSS does NOT auto-create accounts on first OIDC login — the account
+# must exist before mod_auth_openidc can map preferred_username → FreshRSS user.
+# When seeding for a non-admin OIDC user (e.g. jadmin, buser), create
+# the account first. Password is irrelevant for OIDC-only users (authentication
+# is handled by Apache mod_auth_openidc, not FreshRSS's own login form).
+- name: List existing FreshRSS users (for OPML import target check)
+  ansible.builtin.command:
+    cmd: docker exec freshrss php /var/www/FreshRSS/cli/list-users.php
+  register: freshrss_users_opml
+  changed_when: false
+  when: freshrss_import_opml_url | length > 0
+  tags:
+    - seed
+
+- name: Create FreshRSS user account for OPML import target (if not exists)
+  ansible.builtin.command:
+    cmd: >
+      docker exec freshrss php /var/www/FreshRSS/cli/create-user.php
+      --user {{ freshrss_import_opml_user }}
+      --password {{ lookup('password', '/dev/null length=32 chars=hexdigits') }}
+      --email {{ freshrss_admin_email }}
+  when:
+    - freshrss_import_opml_url | length > 0
+    - freshrss_import_opml_user not in (freshrss_users_opml.stdout | default(''))
+  changed_when: true
+  no_log: true
+  tags:
+    - seed
+
+- name: Download OPML feed list for import
+  ansible.builtin.get_url:
+    url: "{{ freshrss_import_opml_url }}"
+    dest: /tmp/freshrss-import.opml
+    mode: "0644"
+    force: true
+  when: freshrss_import_opml_url | length > 0
+  tags:
+    - seed
+
+- name: Copy OPML into FreshRSS container
+  ansible.builtin.command:
+    cmd: docker cp /tmp/freshrss-import.opml freshrss:/tmp/import.opml
+  when: freshrss_import_opml_url | length > 0
+  changed_when: true
+  tags:
+    - seed
+
+- name: Import OPML feeds via FreshRSS CLI
+  ansible.builtin.command:
+    cmd: >
+      docker exec freshrss php /var/www/FreshRSS/cli/import-for-user.php
+      --user {{ freshrss_import_opml_user }}
+      --filename /tmp/import.opml
+  when: freshrss_import_opml_url | length > 0
+  register: freshrss_opml_import
+  changed_when: "'feeds' in freshrss_opml_import.stdout or freshrss_opml_import.rc == 0"
+  tags:
+    - seed
+
+- name: Show OPML import result
+  ansible.builtin.debug:
+    msg: "OPML import result: {{ freshrss_opml_import.stdout | default('no output') }}"
+  when:
+    - freshrss_import_opml_url | length > 0
+    - freshrss_opml_import is defined
+  tags:
+    - seed

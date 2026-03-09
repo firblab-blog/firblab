@@ -82,6 +82,27 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
 
+# --- Egress: GitLab (OAuth token exchange + ALM/MR decoration) --------------
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gitlab-egress
+  namespace: sonarqube
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.10.50/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
 # --- Egress: DNS ------------------------------------------------------------
 ---
 apiVersion: networking.k8s.io/v1

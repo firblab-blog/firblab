@@ -100,11 +100,10 @@ gotify_apps:
     vault_key: "token"
     vault_merge: false
 
-  - name: "Uptime Kuma (Internal)"
-    description: "Internal homelab Uptime Kuma monitor-down notifications"
-    vault_path: "secret/services/uptime-kuma-internal"
-    vault_key: "gotify_token"
-    vault_merge: true   # path already has username+password from prerequisite vault kv put
+  # NOTE: "Uptime Kuma (Internal)" and "Listing Watcher" apps have been moved
+  # to the internal Gotify instance (gotify.home.example-lab.org, 10.0.10.20).
+  # Internal homelab services use the internal Gotify; only external/gateway
+  # alerts (Alertmanager, public Uptime Kuma) remain on the Hetzner Gotify.
 
 # ---------------------------------------------------------------------------
 # Uptime Kuma — monitor definitions (PUBLIC / HETZNER-REACHABLE only)

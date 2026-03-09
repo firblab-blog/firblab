@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# changedetection.io Role - Handlers
+# =============================================================================
+
+- name: Restart changedetection
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ changedetection_install_dir }}"
+  listen: Restart changedetection

@@ -243,6 +243,36 @@ output "patchmon_ssh_private_key_path" {
 }
 
 # ---------------------------------------------------------
+# changedetection.io Outputs
+# ---------------------------------------------------------
+
+output "changedetection_container_id" {
+  description = "Proxmox container ID for changedetection.io"
+  value       = module.changedetection.container_id
+}
+
+output "changedetection_ipv4_addresses" {
+  description = "IPv4 addresses assigned to changedetection.io"
+  value       = module.changedetection.ipv4_addresses
+}
+
+output "changedetection_ssh_private_key" {
+  description = "SSH private key for changedetection.io"
+  value       = module.changedetection.ssh_private_key
+  sensitive   = true
+}
+
+output "changedetection_ssh_public_key" {
+  description = "SSH public key for changedetection.io"
+  value       = module.changedetection.ssh_public_key
+}
+
+output "changedetection_ssh_private_key_path" {
+  description = "Path to the SSH private key for changedetection.io"
+  value       = module.changedetection.ssh_private_key_path
+}
+
+# ---------------------------------------------------------
 # Actual Budget Outputs
 # ---------------------------------------------------------
 
@@ -330,4 +360,34 @@ output "uptime_kuma_internal_ssh_public_key" {
 output "uptime_kuma_internal_ssh_private_key_path" {
   description = "Path to the SSH private key for internal Uptime Kuma"
   value       = module.uptime_kuma_internal.ssh_private_key_path
+}
+
+# ---------------------------------------------------------
+# Gotify Internal Outputs
+# ---------------------------------------------------------
+
+output "gotify_container_id" {
+  description = "Proxmox container ID for internal Gotify"
+  value       = module.gotify.container_id
+}
+
+output "gotify_ipv4_addresses" {
+  description = "IPv4 addresses assigned to internal Gotify"
+  value       = module.gotify.ipv4_addresses
+}
+
+output "gotify_ssh_private_key" {
+  description = "SSH private key for internal Gotify"
+  value       = module.gotify.ssh_private_key
+  sensitive   = true
+}
+
+output "gotify_ssh_public_key" {
+  description = "SSH public key for internal Gotify"
+  value       = module.gotify.ssh_public_key
+}
+
+output "gotify_ssh_private_key_path" {
+  description = "Path to the SSH private key for internal Gotify"
+  value       = module.gotify.ssh_private_key_path
 }

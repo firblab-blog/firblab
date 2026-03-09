@@ -91,11 +91,16 @@ except Exception as e:
 # succeeds (ok=True). On subsequent runs Uptime Kuma returns ok=False with
 # "Setup is done" — that is not an error, just means we skip ahead to login.
 # This replaces the old POST /setup REST approach which does not exist in 1.23.x.
-setup_result = sio.call("setup", (UK_USERNAME, UK_PASSWORD), timeout=15)
-# ok=True  → first-run: admin account just created, proceed to login.
-# ok=False → already initialized (any message): not an error, proceed to login.
-#            If credentials are actually wrong, login below will fail clearly.
-# None     → timeout or connection drop: login will also fail and surface the error.
+try:
+    setup_result = sio.call("setup", (UK_USERNAME, UK_PASSWORD), timeout=15)
+    # ok=True  → first-run: admin account just created, proceed to login.
+    # ok=False → already initialized ("Setup is done"): not an error, proceed to login.
+except Exception:
+    # Uptime Kuma 2.x silently ignores the "setup" event when the instance is
+    # already initialized — it never fires the callback, so sio.call() raises
+    # TimeoutError. Treat this identically to ok=False: proceed to login.
+    # If credentials are wrong, login below will fail and surface the error.
+    setup_result = None
 
 # ---------------------------------------------------------------------------
 # Login
@@ -128,30 +133,32 @@ gotify_notif_id = next(
 )
 
 # ---------------------------------------------------------------------------
-# Create Gotify notification channel (idempotent)
+# Create or update Gotify notification channel (idempotent upsert)
 # ---------------------------------------------------------------------------
-# addNotification(notification, notificationID, callback) — pass None for new
-if gotify_notif_id is None:
-    notif_result = sio.call(
-        "addNotification",
-        (
-            {
-                "name": "Gotify",
-                "type": "gotify",
-                "gotifyserverurl": GOTIFY_URL,
-                "gotifyapplicationToken": UK_GOTIFY_TOKEN,
-                "gotifyPriority": 5,
-                "isDefault": True,
-                "active": True,
-                "applyExisting": False,
-            },
-            None,  # notificationID = None → create new
-        ),
-        timeout=15,
-    )
-    if not notif_result or not notif_result.get("ok"):
-        fail(f"Failed to create Gotify notification: {notif_result}")
-    gotify_notif_id = notif_result["id"]
+# addNotification(notification, notificationID) — None → create, ID → update.
+# Always call regardless of whether the channel already exists: this ensures
+# the gotifyserverurl and token stay in sync with the current config (e.g. if
+# GOTIFY_URL changed from the Hetzner instance to the internal one).
+notif_result = sio.call(
+    "addNotification",
+    (
+        {
+            "name": "Gotify",
+            "type": "gotify",
+            "gotifyserverurl": GOTIFY_URL,
+            "gotifyapplicationToken": UK_GOTIFY_TOKEN,
+            "gotifyPriority": 5,
+            "isDefault": True,
+            "active": True,
+            "applyExisting": False,
+        },
+        gotify_notif_id,  # None → create new; existing ID → update in place
+    ),
+    timeout=15,
+)
+if not notif_result or not notif_result.get("ok"):
+    fail(f"Failed to create/update Gotify notification: {notif_result}")
+gotify_notif_id = notif_result["id"]
 
 # ---------------------------------------------------------------------------
 # Reconcile: delete monitors that are no longer in the desired config.

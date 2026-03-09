@@ -273,6 +273,25 @@ locals {
       meta_icon       = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/mailarchiver.svg"
       vault_path      = "services/mailarchiver/oidc"
     }
+    freshrss = {
+      name      = "FreshRSS"
+      client_id = "freshrss"
+      redirect_uris = [
+        { matching_mode = "strict", url = "https://freshrss.home.example-lab.org/i/oidc/" },
+        # http:// URI required because the FreshRSS image's Apache template has a bug:
+        # OIDCXForwardedHeaders is silently not applied when the env var contains
+        # multiple space-separated header names (Define/IfDefine pattern fails with
+        # spaces in the Define name). Without OIDCXForwardedHeaders, mod_auth_openidc
+        # cannot trust X-Forwarded-Proto from Traefik and falls back to http://.
+        # A custom conf-enabled volume mount (oidc-forwarded.conf) also fixes this
+        # properly — both URIs remain registered as belt-and-suspenders.
+        { matching_mode = "strict", url = "http://freshrss.home.example-lab.org/i/oidc/" },
+      ]
+      app_group       = "Applications"
+      meta_launch_url = "https://freshrss.home.example-lab.org"
+      meta_icon       = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/freshrss.svg"
+      vault_path      = "services/freshrss/oidc"
+    }
   }
 
   # ---------------------------------------------------------------------------
@@ -313,6 +332,13 @@ locals {
       external_host = "https://n8n.home.example-lab.org"
       app_group     = "AI"
       meta_icon     = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/n8n.svg"
+    }
+
+    changedetection = {
+      name          = "changedetection.io"
+      external_host = "https://changedetection.home.example-lab.org"
+      app_group     = "Applications"
+      meta_icon     = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/changedetection-io.svg"
     }
 
     # Archive appliance (lab-09) — 6 services behind Traefik ForwardAuth

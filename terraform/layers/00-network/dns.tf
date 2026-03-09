@@ -58,7 +58,8 @@ locals {
     "gitlab",        # Management VM — source control (native OIDC)
     "auth",          # Management VM — Authentik SSO/IDP
     "pbs",           # Management VM — Proxmox Backup Server (ForwardAuth)
-    "vaultwarden",   # Standalone LXC — password vault (native OIDC)
+    "vaultwarden",       # Standalone LXC — password vault (native OIDC)
+    "changedetection",   # Standalone LXC — web page change monitor (ForwardAuth)
     "openwebui",     # Standalone VM — AI chat UI (ForwardAuth)
     "n8n",           # Standalone VM — workflow automation (ForwardAuth)
     # Archive appliance (ZimaBlade 7700 bare-metal, Services VLAN 20)
@@ -71,9 +72,10 @@ locals {
     "backrest",      # Management LXC — Backrest backup monitoring UI (ForwardAuth)
     "status",        # Management LXC — Uptime Kuma internal monitoring (ForwardAuth)
     "homeassistant", # IoT RPi5 — Home Assistant (native OIDC)
+    "freshrss",      # Standalone LXC — RSS feed aggregator (native OIDC)
+    # Internal notification server (LXC on Management VLAN 10, 10.0.10.20)
+    "gotify",        # Management LXC — internal push notification server (native app-token auth)
     # Hetzner gateway services — proxied via standalone Traefik to *.example-lab.org
-    # Accessible from workstation; internal names keep traffic consistent with homelab DNS
-    "gotify",        # Hetzner — notification server (native auth)
     "adguard",       # Hetzner — DNS-level ad blocking (native auth)
     # TrueNAS apps (Storage VLAN 40, 10.0.40.2)
     "archiver",      # Mail Archiver (native OIDC)

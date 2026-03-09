@@ -1,0 +1,54 @@
+---
+# =============================================================================
+# Gotify Internal Configuration
+# =============================================================================
+# Group variables for the internal Gotify LXC on lab-03 (Management
+# VLAN 10, 10.0.10.20). Receives push notifications from all internal
+# homelab services.
+#
+# Paired with the Hetzner Gotify (gotify.example-lab.org) which handles external
+# alerts: K8s Alertmanager, Hetzner Uptime Kuma, general gateway notifications.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Firewall Rules (consumed by common role)
+# ---------------------------------------------------------------------------
+# Port 80: Gotify HTTP — Traefik proxy + direct access from all service VLANs.
+# Notification clients (uptime-kuma-internal, changedetection listing watcher)
+# may POST directly via IP or via Traefik. Open to all internal VLANs.
+gotify_firewall_ports:
+  - { port: "80", proto: tcp, comment: "Gotify HTTP (Traefik proxy + internal service notifications)" }
+
+gotify_firewall_sources:
+  - "{{ management_network }}"    # VLAN 10 — Traefik proxy, admin, uptime-kuma-internal
+  - "{{ services_network }}"      # VLAN 20 — changedetection, other service VMs
+  - "{{ lan_network }}"           # VLAN 1  — Jordan's workstation
+
+# Map to common role's generic firewall interface
+firewall_additional_ports: "{{ gotify_firewall_ports }}"
+firewall_additional_sources: "{{ gotify_firewall_sources }}"
+
+# Docker networking — Docker manages its own iptables for container → host routing.
+# UFW allow-from rules above cover host-level access to port 80.
+firewall_docker_forwarding: false
+
+# ---------------------------------------------------------------------------
+# Gotify Apps — notification apps to create (tag: seed)
+# ---------------------------------------------------------------------------
+# These apps are for INTERNAL homelab services. External services (Alertmanager,
+# Hetzner Uptime Kuma) continue to use the Hetzner Gotify instance.
+#
+# vault_merge: true  → vault kv patch (adds gotify_token to an existing secret)
+# vault_merge: false → vault kv put   (creates a new secret at the path)
+gotify_apps:
+  - name: "Uptime Kuma (Internal)"
+    description: "Internal homelab Uptime Kuma monitor-down notifications"
+    vault_path: "secret/services/uptime-kuma-internal"
+    vault_key: "gotify_token"
+    vault_merge: true   # path already has username+password from prerequisite vault kv put
+
+  - name: "Listing Watcher"
+    description: "GovDeals/AllSurplus new auction listing alerts from changedetection LXC"
+    vault_path: "secret/services/changedetection"
+    vault_key: "gotify_token"
+    vault_merge: true   # path already has api_key from changedetection-deploy.yml

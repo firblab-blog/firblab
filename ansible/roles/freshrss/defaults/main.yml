@@ -1,0 +1,72 @@
+---
+# =============================================================================
+# FreshRSS Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+#
+# Secrets (from Vault, injected by freshrss-deploy.yml pre_tasks):
+#   freshrss_admin_pass         — Admin user initial password
+#   freshrss_oidc_crypto_key    — mod_auth_openidc session cookie encryption key
+#   freshrss_oidc_client_id     — Authentik OIDC client ID (from Layer 07)
+#   freshrss_oidc_client_secret — Authentik OIDC client secret (from Layer 07)
+# =============================================================================
+
+# FreshRSS image — pinned for reproducibility
+# https://github.com/FreshRSS/FreshRSS/releases
+freshrss_image: "freshrss/freshrss:1.24.3"
+
+# Port exposed on the host (maps to container port 80)
+freshrss_port: 80
+
+# Install directory
+freshrss_install_dir: /opt/freshrss
+
+# Initial admin credentials (password injected from Vault by deploy playbook)
+freshrss_admin_user: "admin"
+freshrss_admin_email: "admin@example-lab.org"
+freshrss_admin_pass: ""   # injected from Vault
+
+# Timezone
+freshrss_timezone: "America/New_York"
+
+# FreshRSS base URL (used for OIDC redirect and self-referential links)
+freshrss_base_url: "https://freshrss.home.example-lab.org"
+
+# ---------------------------------------------------------------------------
+# OIDC Configuration (Authentik, native FreshRSS OIDC)
+# ---------------------------------------------------------------------------
+# OIDC credentials injected from Vault (services/freshrss/oidc).
+# Provider metadata URL uses Authentik's standard well-known endpoint.
+freshrss_oidc_enabled: true
+freshrss_oidc_provider_metadata_url: "https://auth.home.example-lab.org/application/o/freshrss/.well-known/openid-configuration"
+freshrss_oidc_crypto_key: ""     # injected from Vault (mod_auth_openidc session cookie key)
+freshrss_oidc_client_id: ""      # injected from Vault
+freshrss_oidc_client_secret: ""  # injected from Vault
+freshrss_oidc_redirect_uri: "https://freshrss.home.example-lab.org/i/oidc/"
+freshrss_oidc_scopes: "openid email profile"
+# Map OIDC claim to FreshRSS username. 'preferred_username' maps Authentik
+# username (e.g., jadmin) to the matching FreshRSS account.
+freshrss_oidc_remote_user_claim: "preferred_username"
+
+# ---------------------------------------------------------------------------
+# OPML Seed Import (tag: seed)
+# ---------------------------------------------------------------------------
+# If set, the playbook will download this OPML and import it via the
+# FreshRSS CLI for the admin user. Run with --tags seed after first deploy.
+# Tom Lawrence's (Lawrence Systems) curated feed list is the default.
+# Set to "" to skip import.
+freshrss_import_opml_url: "https://raw.githubusercontent.com/lawrencesystems/Tom_OPML_FreshRSS/refs/heads/main/FreshRSS_OPML.xml"
+# Which FreshRSS user to import feeds into (must exist in FreshRSS)
+freshrss_import_opml_user: "{{ freshrss_admin_user }}"
+
+# ---------------------------------------------------------------------------
+# OPML Auto-Sync (weekly cron, tag: configure)
+# ---------------------------------------------------------------------------
+# Weekly cron job that re-imports the OPML URL, picking up any new feeds
+# added to the source list. Existing feeds are updated; removed feeds are
+# NOT deleted (FreshRSS import only adds, never removes).
+# Set to false to disable automatic sync (manual --tags seed only).
+freshrss_opml_autosync_enabled: true
+freshrss_opml_autosync_weekday: "0"   # Sunday
+freshrss_opml_autosync_hour: "3"      # 3 AM
+freshrss_opml_autosync_minute: "0"

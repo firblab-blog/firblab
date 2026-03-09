@@ -118,6 +118,12 @@ traefik_backends:
     forwardauth: false            # Native OIDC via Authentik, no ForwardAuth
     insecure_backend: false
     websocket: true               # Bitwarden clients use WebSocket for live sync
+  changedetection:
+    subdomain: changedetection
+    backend_url: "http://10.0.20.17:5000"
+    forwardauth: true             # Require Authentik SSO
+    insecure_backend: false
+    websocket: true               # Live update feed uses WebSocket
   # Archive appliance (ZimaBlade 7700 bare-metal, Services VLAN 20)
   archive:
     subdomain: archive
@@ -289,17 +295,26 @@ traefik_backends:
     insecure_backend: false
     websocket: true     # Uptime Kuma uses Socket.IO — websocket passthrough required
   # -------------------------------------------------------------------------
-  # Hetzner Gateway services — proxied to *.example-lab.org public HTTPS endpoints
-  # Both have their own native auth — no ForwardAuth wrapper.
-  # NOTE: Gotify cannot use ForwardAuth: notification clients (Uptime Kuma,
-  # Alertmanager) authenticate via app tokens and don't follow SSO redirects.
+  # Gotify Internal (Management VLAN 10, 10.0.10.20, lab-03)
+  # Native app-token auth — ForwardAuth intentionally omitted: notification
+  # clients (Uptime Kuma, changedetection, Alertmanager) authenticate via
+  # app tokens and don't follow SSO redirects.
   # -------------------------------------------------------------------------
   gotify:
     subdomain: gotify
-    backend_url: "https://gotify.example-lab.org"
+    backend_url: "http://10.0.10.20:80"
     forwardauth: false
     insecure_backend: false
-    websocket: true               # Gotify uses WebSocket for real-time push
+    websocket: true               # Gotify uses WebSocket for real-time push (Android app)
+  # -------------------------------------------------------------------------
+  # Hetzner Gateway services — proxied to *.example-lab.org public HTTPS endpoints
+  # -------------------------------------------------------------------------
+  freshrss:
+    subdomain: freshrss
+    backend_url: "http://10.0.20.21:80"
+    forwardauth: false            # Native OIDC via Authentik
+    insecure_backend: false
+    websocket: false
   adguard:
     subdomain: adguard
     backend_url: "https://adguard.example-lab.org"

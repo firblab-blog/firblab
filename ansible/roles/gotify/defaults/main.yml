@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# Gotify Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+#
+# Secrets (from Vault, injected by gotify-deploy.yml pre_tasks):
+#   gotify_admin_pass  — Admin user password (GOTIFY_DEFAULTUSER_PASS env var)
+# =============================================================================
+
+# Gotify server image — pinned for reproducibility
+# https://github.com/gotify/server/releases
+gotify_image: "gotify/server:2.9.1"
+
+# Port exposed on the host
+gotify_port: 80
+
+# Install directory
+gotify_install_dir: /opt/gotify
+
+# Default admin username (password injected from Vault)
+gotify_admin_user: admin
+
+# Timezone
+gotify_timezone: "America/New_York"
+
+# ---------------------------------------------------------------------------
+# Apps to create (seeded via API after deploy, tag: seed)
+# ---------------------------------------------------------------------------
+# Adding an app: add one entry here, run gotify-deploy.yml --tags seed
+#
+# vault_merge: true  → vault kv patch (preserves other keys at same path)
+# vault_merge: false → vault kv put   (creates new secret at the path)
+#
+# Defined in group_vars/gotify.yml (instance-specific):
+gotify_apps: []

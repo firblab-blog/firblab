@@ -1,0 +1,78 @@
+# =============================================================================
+# changedetection.io Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+#
+# Services:
+#   changedetection  — Web page change monitor (port {{ changedetection_port }})
+{% if changedetection_browser_enabled %}
+#   browser          — Playwright/sockpuppetbrowser sidecar (JS rendering)
+{% endif %}
+{% if listing_watcher_enabled | default(false) %}
+#   listing-watcher  — Auction listing scraper with Gotify alerts
+{% endif %}
+# =============================================================================
+
+services:
+  changedetection:
+    image: {{ changedetection_image }}
+    container_name: changedetection
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ changedetection_port }}:5000"
+    volumes:
+      - {{ changedetection_install_dir }}/data:/datastore
+    environment:
+      BASE_URL: "{{ changedetection_base_url }}"
+{% if changedetection_api_key is defined and changedetection_api_key %}
+      CHANGEDETECTION_API_KEY: "{{ changedetection_api_key }}"
+{% endif %}
+{% if changedetection_browser_enabled %}
+      PLAYWRIGHT_DRIVER_URL: "ws://browser:3000"
+    depends_on:
+      browser:
+        condition: service_started
+    networks:
+      - changedetection-net
+
+  browser:
+    image: {{ changedetection_browser_image }}
+    container_name: changedetection-browser
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SCREEN_WIDTH: 1920
+      SCREEN_HEIGHT: 1080
+      SCREEN_DEPTH: 24
+      MAX_CONCURRENT_CHROME_PROCESSES: 5
+    networks:
+      - changedetection-net
+{% endif %}
+
+{% if listing_watcher_enabled | default(false) %}
+  listing-watcher:
+    build: ./watcher
+    container_name: listing-watcher
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - {{ changedetection_install_dir }}/watcher-data:/data
+    environment:
+      GOTIFY_URL: "{{ listing_watcher_gotify_url }}"
+      GOTIFY_TOKEN: "{{ listing_watcher_gotify_token | default('') }}"
+      CHECK_INTERVAL: "{{ listing_watcher_check_interval }}"
+      KEYWORDS: "{{ listing_watcher_keywords | join(',') }}"
+      SEARCHES: '{{ listing_watcher_searches | to_json }}'
+{% endif %}
+
+{% if changedetection_browser_enabled %}
+networks:
+  changedetection-net:
+    driver: bridge
+{% endif %}

@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# Gotify Role - Handlers
+# =============================================================================
+
+- name: Restart gotify
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ gotify_install_dir }}"
+  changed_when: true

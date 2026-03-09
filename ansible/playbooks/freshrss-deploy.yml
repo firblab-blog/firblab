@@ -1,0 +1,179 @@
+---
+# =============================================================================
+# FreshRSS Deployment Playbook
+# =============================================================================
+# Deploys FreshRSS RSS feed aggregator via Docker Compose on an LXC container
+# (lab-03, Services VLAN 20, 10.0.20.21). Native OIDC via Authentik —
+# each user's feeds are private to their account.
+#
+# Prerequisites:
+#   - freshrss LXC provisioned by Terraform Layer 05
+#   - Authentik OIDC provider created by Terraform Layer 07
+#       (writes OIDC credentials to secret/services/freshrss/oidc)
+#   - Vault secrets seeded:
+#       vault kv put secret/services/freshrss \
+#         admin_pass=$(openssl rand -hex 16) \
+#         crypto_key=$(openssl rand -hex 24)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/freshrss-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common    # Only baseline system config
+#   ansible-playbook ... --tags docker    # Only Docker installation
+#   ansible-playbook ... --tags freshrss  # Only FreshRSS app deployment
+#   ansible-playbook ... --tags seed      # Import OPML feed list (Tom Lawrence's by default)
+#   ansible-playbook ... --tags verify    # Only health checks
+# =============================================================================
+
+- name: Deploy FreshRSS RSS feed aggregator
+  hosts: freshrss
+  become: true
+  gather_facts: false
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      tags:
+        - always
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying FreshRSS on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+    # -----------------------------------------------------------------
+    # FreshRSS admin password from Vault
+    # -----------------------------------------------------------------
+    - name: Read FreshRSS credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/freshrss
+      register: vault_freshrss_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [freshrss, seed]
+
+    - name: Set FreshRSS admin password and crypto key
+      ansible.builtin.set_fact:
+        freshrss_admin_pass: "{{ (vault_freshrss_read.stdout | from_json).data.data.admin_pass }}"
+        freshrss_oidc_crypto_key: "{{ (vault_freshrss_read.stdout | from_json).data.data.crypto_key }}"
+      when:
+        - vault_freshrss_read.rc is defined and vault_freshrss_read.rc == 0
+      no_log: true
+      tags: [freshrss, seed]
+
+    - name: Fail if FreshRSS admin credentials unavailable
+      ansible.builtin.fail:
+        msg: >
+          Vault secret not found (secret/services/freshrss, keys: admin_pass, crypto_key).
+          Seed it first:
+            vault kv put secret/services/freshrss
+              admin_pass=$(openssl rand -hex 16)
+              crypto_key=$(openssl rand -hex 24)
+      when: vault_freshrss_read.rc is not defined or vault_freshrss_read.rc != 0
+      tags: [freshrss, seed]
+
+    # -----------------------------------------------------------------
+    # Authentik OIDC credentials from Vault (written by Terraform Layer 07)
+    # -----------------------------------------------------------------
+    - name: Read FreshRSS OIDC credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/freshrss/oidc
+      register: vault_freshrss_oidc_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [freshrss, seed]
+
+    - name: Set FreshRSS OIDC credentials
+      ansible.builtin.set_fact:
+        freshrss_oidc_client_id: "{{ (vault_freshrss_oidc_read.stdout | from_json).data.data.client_id }}"
+        freshrss_oidc_client_secret: "{{ (vault_freshrss_oidc_read.stdout | from_json).data.data.client_secret }}"
+      when:
+        - vault_freshrss_oidc_read.rc is defined and vault_freshrss_oidc_read.rc == 0
+      no_log: true
+      tags: [freshrss, seed]
+
+    - name: Warn if FreshRSS OIDC credentials unavailable
+      ansible.builtin.debug:
+        msg: >
+          WARNING: Authentik OIDC credentials not found at secret/services/freshrss/oidc.
+          Run Terraform Layer 07 first: terraform -chdir=terraform/layers/07-authentik-config apply
+          OIDC will be disabled and only local login will work.
+      when: vault_freshrss_oidc_read.rc is not defined or vault_freshrss_oidc_read.rc != 0
+      tags: [freshrss, seed]
+
+    - name: Disable OIDC if credentials unavailable
+      ansible.builtin.set_fact:
+        freshrss_oidc_enabled: false
+      when: vault_freshrss_oidc_read.rc is not defined or vault_freshrss_oidc_read.rc != 0
+      tags: [freshrss, seed]
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # NOTE: Hardening role is intentionally OMITTED for LXC containers.
+    # LXC shares the host kernel — most CIS controls (sysctl, kernel
+    # modules, AppArmor, auditd) either fail or are meaningless inside
+    # an unprivileged container. Hardening is applied at the Proxmox
+    # host level instead.
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # FreshRSS (Docker Compose: single container, SQLite-backed)
+    # seed tag: imports OPML feed list after container is running
+    - role: freshrss
+      tags:
+        - freshrss
+        - seed
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "FreshRSS Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ freshrss_port | default(80) }}"
+          - "DNS: https://freshrss.home.example-lab.org"
+          - "Port: {{ freshrss_port | default(80) }}"
+          - "Image: {{ freshrss_image }}"
+          - "OIDC: {{ 'Enabled (Authentik)' if freshrss_oidc_enabled | default(true) else 'Disabled (local login only)' }}"
+          - ""
+          - "First login: Use admin / <vault secret> or Authentik SSO"
+          - "After OIDC login, create per-user accounts to match Authentik usernames."
+          - "Feed import: run --tags seed to do a one-time OPML import now"
+          - "Auto-sync: weekly cron installed (Sundays 3 AM) — picks up new feeds automatically"
+          - "Custom OPML: set freshrss_import_opml_url in playbook vars to use your own"
+          - ""
+          - "Management:"
+          - "  docker compose -f /opt/freshrss/docker-compose.yml ps"
+          - "  docker compose -f /opt/freshrss/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

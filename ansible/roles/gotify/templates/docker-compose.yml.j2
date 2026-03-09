@@ -1,0 +1,23 @@
+# =============================================================================
+# Gotify Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 | default('unknown') }}
+# =============================================================================
+
+services:
+  gotify:
+    image: {{ gotify_image }}
+    container_name: gotify
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "{{ gotify_port }}:80"
+    volumes:
+      - {{ gotify_install_dir }}/data:/app/data
+    environment:
+      GOTIFY_DEFAULTUSER_NAME: "{{ gotify_admin_user }}"
+      GOTIFY_DEFAULTUSER_PASS: "{{ gotify_admin_pass }}"
+      TZ: "{{ gotify_timezone }}"
