@@ -28,6 +28,11 @@
 # ---------------------------------------------------------------------------
 # Image
 # ---------------------------------------------------------------------------
+# Chart 2025.x requires explicit edition selection. CE is now called
+# "Community Build" — must set community.enabled=true (not 'edition').
+community:
+  enabled: true
+
 image:
   tag: lts-community  # Floating LTS community tag. Pin after first deploy.
   pullPolicy: IfNotPresent
