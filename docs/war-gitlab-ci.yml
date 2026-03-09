@@ -132,10 +132,10 @@ update-gitops:
     - git config --global user.name "WAR CI"
     - git clone "${GITOPS_REPO}" firblab
     - cd firblab
-    - sed -i "s|war_dashboard_image:.*|war_dashboard_image: \"${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
-    - sed -i "s|war_recall_service_image:.*|war_recall_service_image: \"${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
-    - sed -i "s|war_guardrail_service_image:.*|war_guardrail_service_image: \"${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
-    - sed -i "s|war_service_image:.*|war_service_image: \"${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
+    - 'sed -i "s|war_dashboard_image:.*|war_dashboard_image: \"${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"'
+    - 'sed -i "s|war_recall_service_image:.*|war_recall_service_image: \"${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"'
+    - 'sed -i "s|war_guardrail_service_image:.*|war_guardrail_service_image: \"${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"'
+    - 'sed -i "s|war_service_image:.*|war_service_image: \"${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"'
     - git add "${WAR_DEFAULTS}"
-    - git diff --cached --quiet && echo "No image changes to commit." || git commit -m "chore(war): update images to sha-${CI_COMMIT_SHORT_SHA}"
+    - 'git diff --cached --quiet && echo "No image changes to commit." || git commit -m "chore(war): update images to sha-${CI_COMMIT_SHORT_SHA}"'
     - git push
