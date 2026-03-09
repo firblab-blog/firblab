@@ -983,7 +983,7 @@ resource "gitlab_project_access_token" "war_gitops_push" {
   project      = gitlab_project.projects["firblab"].id
   name         = "war-ci-gitops-push"
   scopes       = ["write_repository"]
-  access_level = "developer"
+  access_level = "maintainer"  # developer cannot push to protected branches
   expires_at   = "2027-03-01"
 
   depends_on = [gitlab_project.projects]

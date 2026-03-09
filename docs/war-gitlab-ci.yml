@@ -4,28 +4,27 @@
 # Builds, publishes, and deploys the WAR platform to the homelab.
 #
 # Flow:
-#   1. lint-test   — validate Dockerfiles, run app tests
-#   2. build       — build 4 images tagged with commit SHA
-#   3. push        — push to GitLab Container Registry
-#   4. update-gitops — update image refs in firblab repo → triggers deploy:war
+#   1. lint-test     — validate Dockerfiles, run app tests
+#   2. build-push    — login, build 4 images, push to GitLab Container Registry
+#   3. update-gitops — update image refs in firblab repo → triggers deploy:war
 #
 # Required CI/CD variables (set automatically by Terraform Layer 03):
 #   GITOPS_PUSH_TOKEN — project access token for firblab repo write
 #
 # Auto-set by GitLab CI (no manual configuration needed):
-#   CI_REGISTRY           — registry hostname
-#   CI_REGISTRY_IMAGE     — full registry path for this project
 #   CI_REGISTRY_USER      — registry auth username
 #   CI_REGISTRY_PASSWORD  — registry auth password (job-scoped token)
 #   CI_COMMIT_SHORT_SHA   — 8-char commit SHA used as image tag
 #
 # Build triggers: main branch only. Images are not built on MRs.
+#
+# NOTE: Build and push are combined in one job — each job gets a fresh Docker
+# context, so images built in one job are not available in the next.
 # =============================================================================
 
 stages:
   - lint-test
-  - build
-  - push
+  - build-push
   - update-gitops
 
 variables:
@@ -76,37 +75,15 @@ lint:dockerfiles:
 #     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # =============================================================================
-# Stage 2: build
+# Stage 2: build-push
 # =============================================================================
-# Build all four WAR service images tagged with the commit SHA.
-# Uses docker:dind (Docker-in-Docker) via the GitLab Docker executor.
-# =============================================================================
-
-build:images:
-  stage: build
-  image: docker:27
-  tags: [docker]
-  services:
-    - name: docker:27-dind
-      command: ["--insecure-registry=registry.gitlab.home.example-lab.org"]
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  script:
-    - echo "Building WAR images at sha-${CI_COMMIT_SHORT_SHA}"
-    - docker build -f apps/dashboard/Dockerfile -t "${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}" .
-    - docker build -f apps/recall-service/Dockerfile -t "${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}" .
-    - docker build -f apps/guardrail-service/Dockerfile -t "${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}" .
-    - docker build -f apps/war-service/Dockerfile -t "${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}" .
-
-# =============================================================================
-# Stage 3: push
-# =============================================================================
-# Authenticate to the GitLab Container Registry and push all four images.
-# CI_REGISTRY_USER / CI_REGISTRY_PASSWORD are job-scoped and auto-set.
+# Login, build all four WAR service images, and push to the registry in one
+# job. Build and push must be in the same job — each job gets a fresh Docker
+# daemon (DinD), so images built in a prior job are not available here.
 # =============================================================================
 
-push:images:
-  stage: push
+build-push:images:
+  stage: build-push
   image: docker:27
   tags: [docker]
   services:
@@ -117,14 +94,18 @@ push:images:
   before_script:
     - echo "${CI_REGISTRY_PASSWORD}" | docker login -u "${CI_REGISTRY_USER}" --password-stdin "${CI_REGISTRY}"
   script:
-    - echo "Pushing WAR images at sha-${CI_COMMIT_SHORT_SHA}"
+    - echo "Building and pushing WAR images at sha-${CI_COMMIT_SHORT_SHA}"
+    - docker build -f apps/dashboard/Dockerfile -t "${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/recall-service/Dockerfile -t "${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/guardrail-service/Dockerfile -t "${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/war-service/Dockerfile -t "${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}" .
     - docker push "${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}"
     - docker push "${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}"
     - docker push "${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}"
     - docker push "${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}"
 
 # =============================================================================
-# Stage 4: update-gitops
+# Stage 3: update-gitops
 # =============================================================================
 # Clone the firblab monorepo, update the war_*_image variables in
 # ansible/roles/war/defaults/main.yml with the new SHA tag, and push.
