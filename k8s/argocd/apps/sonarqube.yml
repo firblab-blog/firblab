@@ -52,3 +52,13 @@ spec:
         pod-security.kubernetes.io/audit: restricted
     syncOptions:
       - CreateNamespace=true
+  # Bitnami PostgreSQL subchart auto-generates 'postgresql-postgres-password'
+  # (the postgres superuser password) at runtime. ArgoCD sees this as perpetual
+  # drift because the value changes on each sync. Ignore it — same pattern as
+  # Longhorn's longhorn-default-setting ConfigMap drift.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: sonarqube-postgresql
+      jsonPointers:
+        - /data/postgresql-postgres-password
