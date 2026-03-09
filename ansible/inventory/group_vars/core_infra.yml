@@ -31,6 +31,14 @@ gitlab_kas_enabled: true
 gitlab_kas_external_url: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
 
 # ---------------------------------------------------------------------------
+# GitLab Container Registry
+# ---------------------------------------------------------------------------
+# Registry nginx listens on port 5050 HTTP; TLS terminated by Traefik.
+# Traefik routes registry.gitlab.home.example-lab.org → 10.0.10.50:5050.
+gitlab_registry_enabled: true
+gitlab_registry_external_url: "https://registry.gitlab.home.example-lab.org"
+
+# ---------------------------------------------------------------------------
 # Firewall Rules (consumed by common role)
 # ---------------------------------------------------------------------------
 # Ports needed by core-infra services. Extra ports on hosts that don't run
@@ -39,6 +47,7 @@ gitlab_kas_external_url: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
 core_infra_firewall_ports:
   - { port: "80", proto: tcp, comment: "GitLab HTTP" }
   - { port: "443", proto: tcp, comment: "GitLab HTTPS" }
+  - { port: "5050", proto: tcp, comment: "GitLab Container Registry" }
   - { port: "9000", proto: tcp, comment: "Authentik identity provider" }
 
 core_infra_firewall_sources:

@@ -87,7 +87,8 @@ build:images:
   image: docker:27
   tags: [docker]
   services:
-    - docker:27-dind
+    - name: docker:27-dind
+      command: ["--insecure-registry=registry.gitlab.home.example-lab.org"]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
@@ -109,7 +110,8 @@ push:images:
   image: docker:27
   tags: [docker]
   services:
-    - docker:27-dind
+    - name: docker:27-dind
+      command: ["--insecure-registry=registry.gitlab.home.example-lab.org"]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   before_script:

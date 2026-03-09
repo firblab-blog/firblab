@@ -54,6 +54,11 @@ traefik_backends:
     forwardauth: false
     insecure_backend: false
     websocket: true         # KAS uses WebSocket for agent connections
+  gitlab-registry:
+    subdomain: registry.gitlab
+    backend_url: "http://10.0.10.50:5050"
+    forwardauth: false
+    insecure_backend: false
   authentik:
     subdomain: auth
     backend_url: "http://10.0.10.16:9000"

@@ -89,6 +89,16 @@ gitlab_kas_enabled: false
 gitlab_kas_external_url: "wss://gitlab.home.example-lab.org/-/kubernetes-agent/"
 
 # ---------------------------------------------------------------------------
+# Container Registry
+# ---------------------------------------------------------------------------
+# Set gitlab_registry_enabled: true to activate the bundled registry.
+# TLS is terminated by Traefik; registry_nginx listens on HTTP port 5050.
+# Traefik backend: registry.gitlab.home.example-lab.org → 10.0.10.50:5050
+# internal_dns_entries already maps registry.gitlab.home.example-lab.org → Traefik.
+gitlab_registry_enabled: false
+gitlab_registry_external_url: "https://registry.gitlab.home.example-lab.org"
+
+# ---------------------------------------------------------------------------
 # OIDC Authentication (Authentik SSO)
 # ---------------------------------------------------------------------------
 # Set gitlab_oidc_enabled: true and provide client credentials to activate.

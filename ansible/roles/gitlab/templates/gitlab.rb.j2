@@ -107,6 +107,19 @@ gitlab_rails['initial_root_password'] = '{{ gitlab_initial_root_password }}'
 gitlab_rails['store_initial_root_password'] = true
 {% endif %}
 
+{% if gitlab_registry_enabled | default(false) | bool %}
+################################################################################
+## Container Registry
+################################################################################
+## TLS terminated by standalone Traefik reverse proxy (10.0.10.17).
+## registry_nginx listens on HTTP 5050; Traefik routes
+## registry.gitlab.home.example-lab.org → 10.0.10.50:5050.
+################################################################################
+registry_external_url '{{ gitlab_registry_external_url }}'
+registry_nginx['listen_port'] = 5050
+registry_nginx['listen_https'] = false
+{% endif %}
+
 {% if gitlab_kas_enabled | default(false) | bool %}
 ################################################################################
 ## Kubernetes Agent Server (KAS)

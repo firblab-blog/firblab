@@ -40,6 +40,7 @@ internal_dns_entries:
       - netbox.home.example-lab.org
       - vaultwarden.home.example-lab.org
       - status.home.example-lab.org
+      - registry.gitlab.home.example-lab.org
 
 # ---------------------------------------------------------------------------
 # Time Configuration
