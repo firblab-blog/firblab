@@ -36,9 +36,10 @@ variables:
   # volume configuration not present on this runner.
   DOCKER_TLS_CERTDIR: ""
   DOCKER_HOST: tcp://docker:2375
-  # Registry namespace — CI_REGISTRY_IMAGE is auto-set to:
-  # registry.gitlab.home.example-lab.org/firblab/applications/war
-  IMAGE_BASE: $CI_REGISTRY_IMAGE
+  # Registry namespace — hardcoded because CI_REGISTRY_IMAGE is not auto-populated
+  # on this self-hosted GitLab instance (Container Registry feature flag).
+  IMAGE_BASE: "registry.gitlab.home.example-lab.org/applications/war"
+  CI_REGISTRY: "registry.gitlab.home.example-lab.org"
   # firblab GitOps repo URL (uses GITOPS_PUSH_TOKEN for auth)
   GITOPS_REPO: "https://oauth2:${GITOPS_PUSH_TOKEN}@gitlab.home.example-lab.org/firblab/infrastructure/firblab.git"
   # Path to image variable file in the firblab repo
