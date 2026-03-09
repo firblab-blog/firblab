@@ -33,10 +33,12 @@ war_postgres_image: "postgres:16-alpine"
 # Install directory
 war_install_dir: /opt/war
 
-# Dashboard (Next.js frontend) — public-facing entry point via Traefik
+# Published host surface
+war_bind_host: "127.0.0.1"
+war_db_port: 5432
 war_dashboard_port: 3000
 
-# Internal service ports (not exposed on host, container-to-container only)
+# Internal service ports (container-to-container and healthcheck expectations)
 war_recall_service_port: 4311
 war_guardrail_service_port: 4417
 war_war_service_port: 4310
@@ -59,3 +61,5 @@ war_db_password: ""  # Injected at deploy time from Vault
 war_nextauth_secret: ""
 war_nextauth_url: "https://war.home.example-lab.org"
 war_service_shared_token: ""
+war_local_admin_email: "admin@local.war"
+war_local_admin_password: ""

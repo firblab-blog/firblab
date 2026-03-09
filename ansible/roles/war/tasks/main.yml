@@ -52,10 +52,10 @@
 # ---------------------------------------------------------------------------
 # Configuration Files
 # ---------------------------------------------------------------------------
-- name: Template WAR environment file
+- name: Template WAR runtime env file
   ansible.builtin.template:
     src: war.env.j2
-    dest: "{{ war_install_dir }}/config/war.env"
+    dest: "{{ war_install_dir }}/.env"
     owner: root
     group: root
     mode: "0600"
