@@ -49,6 +49,7 @@ variables:
 lint:dockerfiles:
   stage: lint-test
   image: hadolint/hadolint:latest-alpine
+  tags: [docker]
   script:
     - hadolint apps/dashboard/Dockerfile
     - hadolint apps/recall-service/Dockerfile
@@ -78,6 +79,7 @@ lint:dockerfiles:
 build:images:
   stage: build
   image: docker:27
+  tags: [docker]
   services:
     - docker:27-dind
   rules:
@@ -99,6 +101,7 @@ build:images:
 push:images:
   stage: push
   image: docker:27
+  tags: [docker]
   services:
     - docker:27-dind
   rules:
@@ -125,6 +128,7 @@ push:images:
 update-gitops:
   stage: update-gitops
   image: alpine/git:latest
+  tags: [docker]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
