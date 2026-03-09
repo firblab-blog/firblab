@@ -37,6 +37,9 @@ spec:
     - repoURL: http://10.0.10.50/infrastructure/firblab.git
       targetRevision: HEAD
       ref: values
+    - repoURL: http://10.0.10.50/infrastructure/firblab.git
+      targetRevision: HEAD
+      path: k8s/platform/sonarqube/manifests
   destination:
     server: https://kubernetes.default.svc
     namespace: sonarqube
