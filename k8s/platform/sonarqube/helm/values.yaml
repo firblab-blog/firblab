@@ -46,11 +46,21 @@ replicaCount: 1
 # Admin Account
 # ---------------------------------------------------------------------------
 # K8s Secret 'sonarqube-admin' created by ExternalSecret from Vault.
-# Keys: 'password' (new admin password), 'currentPassword' (default 'admin').
+# Keys: 'password' (new admin password), 'currentPassword' (default 'admin'),
+#       'monitoring-passcode' (required by chart 2025.x validation).
 account:
   existingSecret: sonarqube-admin
   adminPasswordSecretKey: password
   currentAdminPasswordSecretKey: currentPassword
+
+# ---------------------------------------------------------------------------
+# Monitoring Passcode (chart 2025.x required field)
+# ---------------------------------------------------------------------------
+# Protects /api/monitoring/metrics endpoint. Required by chart validation
+# even when prometheusExporter is disabled. Sourced from sonarqube-admin
+# K8s Secret (same secret as admin credentials, key: monitoring-passcode).
+monitoringPasscodeSecretName: sonarqube-admin
+monitoringPasscodeSecretKey: monitoring-passcode
 
 # ---------------------------------------------------------------------------
 # Security Context

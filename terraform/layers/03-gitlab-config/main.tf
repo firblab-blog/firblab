@@ -905,6 +905,11 @@ resource "random_password" "sonarqube_admin" {
   special = false
 }
 
+resource "random_password" "sonarqube_monitoring" {
+  length  = 24
+  special = false
+}
+
 # Write all SonarQube secrets to Vault in one pass.
 # Terraform Layer 03 owns this path — do not manually write to it.
 resource "vault_kv_secret_v2" "sonarqube" {
@@ -914,6 +919,7 @@ resource "vault_kv_secret_v2" "sonarqube" {
   data_json = jsonencode({
     admin_password         = random_password.sonarqube_admin.result
     admin_password_current = "admin"  # SonarQube default; consumed by chart init job
+    monitoring_passcode        = random_password.sonarqube_monitoring.result
     gitlab_oauth_client_id     = gitlab_application.sonarqube.application_id
     gitlab_oauth_client_secret = gitlab_application.sonarqube.secret
     gitlab_alm_token           = gitlab_group_access_token.sonarqube_alm.token
