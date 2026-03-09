@@ -37,6 +37,7 @@ locals {
     "argocd",      # K8s platform (GitOps UI)
     "gitlab-test", # K8s workload (GitLab CE Helm testing instance)
     "wazuh",       # K8s workload (Wazuh SIEM dashboard)
+    "sonarqube",   # K8s workload (static code analysis, GitLab ALM integration)
   ])
 
   # K3s workloads — K3s Traefik (Ingress in k8s/k3s-platform/)
