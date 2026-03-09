@@ -127,3 +127,12 @@ resource "vault_kv_secret_v2" "backup_ssh" {
     ssh_private_key = module.backup.ssh_private_key
   })
 }
+
+resource "vault_kv_secret_v2" "war_ssh" {
+  mount = "secret"
+  name  = "compute/war"
+
+  data_json = jsonencode({
+    ssh_private_key = module.war.ssh_private_key
+  })
+}

@@ -81,6 +81,7 @@ declare -A KEY_PATHS=(
   ["rke2-agent-3"]="${CI_PROJECT_DIR}/terraform/layers/04-rke2-cluster/.secrets/rke2-agent-3_ssh_key"
 
   # --- Terraform-generated keys (Layer 05 — standalone-services) ---
+  ["war"]="${CI_PROJECT_DIR}/terraform/layers/05-standalone-services/.secrets/war_ssh_key"
   ["ghost"]="${CI_PROJECT_DIR}/terraform/layers/05-standalone-services/.secrets/ghost_ssh_key"
   ["foundryvtt"]="${CI_PROJECT_DIR}/terraform/layers/05-standalone-services/.secrets/foundryvtt_ssh_key"
   ["roundcube"]="${CI_PROJECT_DIR}/terraform/layers/05-standalone-services/.secrets/roundcube_ssh_key"

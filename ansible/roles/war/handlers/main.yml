@@ -1,0 +1,10 @@
+---
+# =============================================================================
+# WAR Platform Role - Handlers
+# =============================================================================
+
+- name: Restart war
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ war_install_dir }}"
+  changed_when: true

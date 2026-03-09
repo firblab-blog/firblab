@@ -997,3 +997,49 @@ variable "freshrss_ip_address" {
   type        = string
   default     = "10.0.20.21/24"
 }
+
+# ---------------------------------------------------------
+# WAR Platform (VM) — lab-01
+# ---------------------------------------------------------
+
+variable "war_vm_id" {
+  description = "Proxmox VM ID for WAR platform"
+  type        = number
+  default     = 5044
+}
+
+variable "war_name" {
+  description = "Hostname for WAR platform VM"
+  type        = string
+  default     = "war"
+}
+
+variable "war_proxmox_node" {
+  description = "Proxmox node for WAR VM placement (lab-01 — primary compute, separate from shared default lab-03)"
+  type        = string
+  default     = "lab-01"
+}
+
+variable "war_cpu_cores" {
+  description = "Number of CPU cores for WAR platform"
+  type        = number
+  default     = 4
+}
+
+variable "war_memory_mb" {
+  description = "Memory in MB for WAR platform (4 app services + Postgres)"
+  type        = number
+  default     = 8192
+}
+
+variable "war_os_disk_size_gb" {
+  description = "OS disk size in GB for WAR platform"
+  type        = number
+  default     = 40
+}
+
+variable "war_ip_address" {
+  description = "Static IP address for WAR platform in CIDR notation"
+  type        = string
+  default     = "10.0.20.22/24"
+}

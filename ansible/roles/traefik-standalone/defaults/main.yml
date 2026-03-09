@@ -321,3 +321,13 @@ traefik_backends:
     forwardauth: false
     insecure_backend: false
     websocket: false
+  # -------------------------------------------------------------------------
+  # WAR Platform (lab-01, Services VLAN 20)
+  # Requires Authentik SSO — ForwardAuth gates the entire platform.
+  # -------------------------------------------------------------------------
+  war:
+    subdomain: war
+    backend_url: "http://10.0.20.22:3000"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true               # WAR may use WebSocket for real-time agent communication

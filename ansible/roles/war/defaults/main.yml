@@ -1,0 +1,61 @@
+---
+# =============================================================================
+# WAR Platform Role - Default Variables
+# =============================================================================
+# WAR is a multi-agent adjudication, critique, and synthesis platform.
+# Deploys four custom services plus PostgreSQL via Docker Compose.
+#
+# WAR images are built and published by the WAR GitLab CI pipeline.
+# The pipeline updates these variables with SHA-pinned image refs on
+# every successful main-branch build. Do NOT update these manually —
+# they are overwritten automatically.
+#
+# Registry: registry.gitlab.home.example-lab.org/firblab/applications/war/
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# WAR service images — managed by WAR CI, not Renovate
+# ci-managed: updated automatically by the WAR repo pipeline on each build
+# ---------------------------------------------------------------------------
+war_dashboard_image: "registry.gitlab.home.example-lab.org/firblab/applications/war/dashboard:latest"
+war_recall_service_image: "registry.gitlab.home.example-lab.org/firblab/applications/war/recall-service:latest"
+war_guardrail_service_image: "registry.gitlab.home.example-lab.org/firblab/applications/war/guardrail-service:latest"
+war_service_image: "registry.gitlab.home.example-lab.org/firblab/applications/war/war-service:latest"
+
+# PostgreSQL — Renovate-managed (public image)
+# https://hub.docker.com/_/postgres/tags
+war_postgres_image: "postgres:16-alpine"
+
+# ---------------------------------------------------------------------------
+# Service configuration
+# ---------------------------------------------------------------------------
+
+# Install directory
+war_install_dir: /opt/war
+
+# Dashboard (Next.js frontend) — public-facing entry point via Traefik
+war_dashboard_port: 3000
+
+# Internal service ports (not exposed on host, container-to-container only)
+war_recall_service_port: 4311
+war_guardrail_service_port: 4417
+war_war_service_port: 4310
+
+# GitLab Container Registry — credentials read from Vault by deploy playbook
+war_registry_host: "registry.gitlab.home.example-lab.org"
+war_registry_user: ""
+war_registry_token: ""
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+war_db_name: war
+war_db_user: war
+war_db_password: ""  # Injected at deploy time from Vault
+
+# ---------------------------------------------------------------------------
+# Application secrets (injected at deploy time from Vault)
+# ---------------------------------------------------------------------------
+war_nextauth_secret: ""
+war_nextauth_url: "https://war.home.example-lab.org"
+war_service_shared_token: ""

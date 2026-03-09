@@ -22,7 +22,8 @@
 #   - Archive (VM)        : Offline archive hub with TrueNAS NFS        — lab-04
 #   - AI GPU (VM)          : GPU-accelerated AI/ML workloads (Ollama)    — lab-01
 #   - Traefik Proxy (LXC): Reverse proxy for standalone services (Mgmt VLAN 10) — lab-04
-#   - FreshRSS (LXC)      : RSS feed aggregator (Docker-in-LXC)       — lab-03
+#   - FreshRSS (LXC)      : RSS feed aggregator (DISABLED — not yet deployed)
+#   - WAR Platform (VM)   : Multi-agent adjudication platform (Docker-in-VM)   — lab-01
 # =============================================================================
 
 # ---------------------------------------------------------
@@ -831,7 +832,7 @@ module "uptime_kuma_internal" {
 }
 
 # ---------------------------------------------------------
-# FreshRSS (LXC) — lab-03, Services VLAN 20
+# FreshRSS (LXC) — lab-03, Services VLAN 20 [DISABLED]
 # ---------------------------------------------------------
 # Self-hosted RSS feed aggregator with multi-user support.
 # Extremely lightweight: PHP + SQLite, single container, no
@@ -840,40 +841,43 @@ module "uptime_kuma_internal" {
 #
 # Deployed as an LXC (Docker-in-LXC) — same pattern as
 # Ghost, Mealie, Vaultwarden.
+#
+# To enable: uncomment the module block below and re-apply.
+# Variables are preserved in variables.tf (freshrss_*).
 # ---------------------------------------------------------
 
-module "freshrss" {
-  source = "../../modules/proxmox-lxc/"
-
-  # Identity
-  name        = var.freshrss_name
-  description = "FreshRSS - Self-hosted RSS feed aggregator"
-  vm_id       = var.freshrss_vm_id
-  tags        = ["freshrss", "rss", "services"]
-
-  # Proxmox placement
-  proxmox_node = var.proxmox_node
-
-  # Compute resources — very lightweight (PHP, SQLite, no external DB)
-  cpu_cores    = var.freshrss_cpu_cores
-  memory_mb    = var.freshrss_memory_mb
-  disk_size_gb = var.freshrss_disk_size_gb
-  storage_pool = var.storage_pool
-
-  # Container configuration
-  docker_enabled = true
-
-  # Network — Services VLAN 20
-  network_bridge = var.network_bridge
-  vlan_tag       = var.vlan_tag
-  ip_address     = var.freshrss_ip_address
-  gateway        = var.gateway
-  domain_name    = var.domain_name
-  dns_servers    = var.dns_servers
-
-  # SSH
-  additional_ssh_key = var.ssh_public_key
-}
+# module "freshrss" {
+#   source = "../../modules/proxmox-lxc/"
+#
+#   # Identity
+#   name        = var.freshrss_name
+#   description = "FreshRSS - Self-hosted RSS feed aggregator"
+#   vm_id       = var.freshrss_vm_id
+#   tags        = ["freshrss", "rss", "services"]
+#
+#   # Proxmox placement
+#   proxmox_node = var.proxmox_node
+#
+#   # Compute resources — very lightweight (PHP, SQLite, no external DB)
+#   cpu_cores    = var.freshrss_cpu_cores
+#   memory_mb    = var.freshrss_memory_mb
+#   disk_size_gb = var.freshrss_disk_size_gb
+#   storage_pool = var.storage_pool
+#
+#   # Container configuration
+#   docker_enabled = true
+#
+#   # Network — Services VLAN 20
+#   network_bridge = var.network_bridge
+#   vlan_tag       = var.vlan_tag
+#   ip_address     = var.freshrss_ip_address
+#   gateway        = var.gateway
+#   domain_name    = var.domain_name
+#   dns_servers    = var.dns_servers
+#
+#   # SSH
+#   additional_ssh_key = var.ssh_public_key
+# }
 
 # ---------------------------------------------------------
 # Gotify Internal (LXC) — lab-03, Management VLAN 10

@@ -1,0 +1,220 @@
+---
+# =============================================================================
+# WAR Platform Deployment Playbook
+# =============================================================================
+# Deploys the WAR multi-agent adjudication platform via Docker Compose on
+# a CIS-hardened VM (Services VLAN 20, lab-01).
+#
+# Stack: PostgreSQL 16 + dashboard (Next.js) + recall-service +
+#        guardrail-service + war-service
+#
+# Images are built by the WAR GitLab CI pipeline and pushed to the GitLab
+# Container Registry. CI updates ansible/roles/war/defaults/main.yml with
+# SHA-pinned image refs before triggering this playbook via deploy:war.
+#
+# Prerequisites:
+#   - WAR VM provisioned by Terraform Layer 05 (cloned from Packer template)
+#   - SSH key available (Terraform-generated in .secrets/)
+#   - Vault secrets seeded (secret/services/war/) — see bootstrap section below
+#   - GitLab registry pull token in Vault (secret/services/war/registry_pull)
+#     — created automatically by Terraform Layer 03 apply
+#
+# Bootstrap (one-time, before first run):
+#   vault kv put -mount=secret services/war \
+#     db_password=$(openssl rand -base64 32) \
+#     nextauth_secret=$(openssl rand -base64 32) \
+#     war_service_token=$(openssl rand -hex 32)
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/war-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags war         # Only WAR app deployment
+#   ansible-playbook ... --tags verify      # Only health checks
+# =============================================================================
+
+- name: Deploy WAR platform
+  hosts: war
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Application Secrets
+    # -----------------------------------------------------------------
+    - name: Read WAR secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/war
+      register: vault_war_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: war_db_password is not defined
+      tags:
+        - always
+
+    - name: Parse WAR Vault response
+      ansible.builtin.set_fact:
+        _war_vault_data: "{{ (vault_war_read.stdout | from_json).data.data }}"
+      when:
+        - war_db_password is not defined
+        - vault_war_read.rc is defined
+        - vault_war_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Set WAR secrets from Vault
+      ansible.builtin.set_fact:
+        war_db_password: "{{ _war_vault_data.db_password }}"
+        war_nextauth_secret: "{{ _war_vault_data.nextauth_secret }}"
+        war_service_shared_token: "{{ _war_vault_data.war_service_token }}"
+      when:
+        - war_db_password is not defined
+        - _war_vault_data is defined
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate WAR secrets are available
+      ansible.builtin.assert:
+        that:
+          - war_db_password is defined
+          - war_db_password | length > 0
+          - war_nextauth_secret is defined
+          - war_nextauth_secret | length > 0
+          - war_service_shared_token is defined
+          - war_service_shared_token | length > 0
+        fail_msg: >
+          WAR secrets not available. Seed them first:
+            vault kv put -mount=secret services/war \
+              db_password=$(openssl rand -base64 32) \
+              nextauth_secret=$(openssl rand -base64 32) \
+              war_service_token=$(openssl rand -hex 32)
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Secret Management: Container Registry Pull Token
+    # -----------------------------------------------------------------
+    # Created automatically by Terraform Layer 03 — no manual seeding.
+    - name: Read WAR registry pull credentials from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/war/registry_pull
+      register: vault_war_registry_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      tags:
+        - always
+
+    - name: Set WAR registry credentials from Vault
+      ansible.builtin.set_fact:
+        war_registry_user: "{{ (vault_war_registry_read.stdout | from_json).data.data.username }}"
+        war_registry_token: "{{ (vault_war_registry_read.stdout | from_json).data.data.token }}"
+      when:
+        - vault_war_registry_read.rc is defined
+        - vault_war_registry_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Validate registry credentials are available
+      ansible.builtin.assert:
+        that:
+          - war_registry_user is defined
+          - war_registry_user | length > 0
+          - war_registry_token is defined
+          - war_registry_token | length > 0
+        fail_msg: >
+          WAR registry pull credentials not found in Vault.
+          Run: terraform -chdir=terraform/layers/03-gitlab-config apply
+          Then verify: vault kv get -mount=secret services/war/registry_pull
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying WAR platform on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM, not LXC — has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # WAR platform (Docker Compose: postgres + dashboard + 3 backend services)
+    - role: war
+      tags:
+        - war
+
+  post_tasks:
+    # -----------------------------------------------------------------
+    # Health check — dashboard must respond before declaring success
+    # -----------------------------------------------------------------
+    - name: Wait for WAR dashboard to be healthy
+      ansible.builtin.uri:
+        url: "http://localhost:{{ war_dashboard_port }}/login"
+        method: GET
+        status_code: [200]
+      register: _war_health
+      until: _war_health.status == 200
+      retries: 15
+      delay: 10
+      tags:
+        - verify
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "WAR Platform Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:{{ war_dashboard_port }}/"
+          - "DNS: https://war.home.example-lab.org/"
+          - ""
+          - "Registry: {{ war_registry_host }}"
+          - "  dashboard:         {{ war_dashboard_image }}"
+          - "  recall-service:    {{ war_recall_service_image }}"
+          - "  guardrail-service: {{ war_guardrail_service_image }}"
+          - "  war-service:       {{ war_service_image }}"
+          - ""
+          - "Secrets: vault kv get -mount=secret services/war"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ war_install_dir }}/docker-compose.yml ps"
+          - "  docker compose -f {{ war_install_dir }}/docker-compose.yml logs -f"
+          - "=========================================="
+      tags:
+        - verify

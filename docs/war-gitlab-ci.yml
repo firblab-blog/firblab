@@ -1,0 +1,143 @@
+# =============================================================================
+# WAR Platform — GitLab CI/CD Pipeline
+# =============================================================================
+# Builds, publishes, and deploys the WAR platform to the homelab.
+#
+# Flow:
+#   1. lint-test   — validate Dockerfiles, run app tests
+#   2. build       — build 4 images tagged with commit SHA
+#   3. push        — push to GitLab Container Registry
+#   4. update-gitops — update image refs in firblab repo → triggers deploy:war
+#
+# Required CI/CD variables (set automatically by Terraform Layer 03):
+#   GITOPS_PUSH_TOKEN — project access token for firblab repo write
+#
+# Auto-set by GitLab CI (no manual configuration needed):
+#   CI_REGISTRY           — registry hostname
+#   CI_REGISTRY_IMAGE     — full registry path for this project
+#   CI_REGISTRY_USER      — registry auth username
+#   CI_REGISTRY_PASSWORD  — registry auth password (job-scoped token)
+#   CI_COMMIT_SHORT_SHA   — 8-char commit SHA used as image tag
+#
+# Build triggers: main branch only. Images are not built on MRs.
+# =============================================================================
+
+stages:
+  - lint-test
+  - build
+  - push
+  - update-gitops
+
+variables:
+  # Docker BuildKit for efficient layer caching
+  DOCKER_BUILDKIT: "1"
+  # Registry namespace — CI_REGISTRY_IMAGE is auto-set to:
+  # registry.gitlab.home.example-lab.org/firblab/applications/war
+  IMAGE_BASE: $CI_REGISTRY_IMAGE
+  # firblab GitOps repo URL (uses GITOPS_PUSH_TOKEN for auth)
+  GITOPS_REPO: "https://oauth2:${GITOPS_PUSH_TOKEN}@gitlab.home.example-lab.org/firblab/infrastructure/firblab.git"
+  # Path to image variable file in the firblab repo
+  WAR_DEFAULTS: "ansible/roles/war/defaults/main.yml"
+
+# =============================================================================
+# Stage 1: lint-test
+# =============================================================================
+# Validate Dockerfiles and run application tests.
+# Add project-specific test commands here.
+# =============================================================================
+
+lint:dockerfiles:
+  stage: lint-test
+  image: hadolint/hadolint:latest-alpine
+  script:
+    - hadolint apps/dashboard/Dockerfile
+    - hadolint apps/recall-service/Dockerfile
+    - hadolint apps/guardrail-service/Dockerfile
+    - hadolint apps/war-service/Dockerfile
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  allow_failure: true  # Remove once Dockerfiles are finalized
+
+# Add your application test jobs here, e.g.:
+# test:unit:
+#   stage: lint-test
+#   image: node:22-alpine
+#   script:
+#     - npm ci
+#     - npm test
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# =============================================================================
+# Stage 2: build
+# =============================================================================
+# Build all four WAR service images tagged with the commit SHA.
+# Uses docker:dind (Docker-in-Docker) via the GitLab Docker executor.
+# =============================================================================
+
+build:images:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - echo "Building WAR images at sha-${CI_COMMIT_SHORT_SHA}"
+    - docker build -f apps/dashboard/Dockerfile -t "${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/recall-service/Dockerfile -t "${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/guardrail-service/Dockerfile -t "${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}" .
+    - docker build -f apps/war-service/Dockerfile -t "${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}" .
+
+# =============================================================================
+# Stage 3: push
+# =============================================================================
+# Authenticate to the GitLab Container Registry and push all four images.
+# CI_REGISTRY_USER / CI_REGISTRY_PASSWORD are job-scoped and auto-set.
+# =============================================================================
+
+push:images:
+  stage: push
+  image: docker:27
+  services:
+    - docker:27-dind
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - echo "${CI_REGISTRY_PASSWORD}" | docker login -u "${CI_REGISTRY_USER}" --password-stdin "${CI_REGISTRY}"
+  script:
+    - echo "Pushing WAR images at sha-${CI_COMMIT_SHORT_SHA}"
+    - docker push "${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}"
+    - docker push "${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}"
+    - docker push "${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}"
+    - docker push "${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}"
+
+# =============================================================================
+# Stage 4: update-gitops
+# =============================================================================
+# Clone the firblab monorepo, update the war_*_image variables in
+# ansible/roles/war/defaults/main.yml with the new SHA tag, and push.
+#
+# The push to firblab main triggers the deploy:war manual job in firblab CI.
+# Jordan clicks ▶ in the firblab pipeline to roll out the new images.
+# =============================================================================
+
+update-gitops:
+  stage: update-gitops
+  image: alpine/git:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - git config --global user.email "war-ci@home.example-lab.org"
+    - git config --global user.name "WAR CI"
+    - git clone "${GITOPS_REPO}" firblab
+    - cd firblab
+    - |
+      sed -i "s|war_dashboard_image:.*|war_dashboard_image: \"${IMAGE_BASE}/dashboard:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
+      sed -i "s|war_recall_service_image:.*|war_recall_service_image: \"${IMAGE_BASE}/recall-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
+      sed -i "s|war_guardrail_service_image:.*|war_guardrail_service_image: \"${IMAGE_BASE}/guardrail-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
+      sed -i "s|war_service_image:.*|war_service_image: \"${IMAGE_BASE}/war-service:sha-${CI_COMMIT_SHORT_SHA}\"|" "${WAR_DEFAULTS}"
+    - git add "${WAR_DEFAULTS}"
+    # Only commit if something changed (idempotent on repeated runs with same SHA)
+    - git diff --cached --quiet && echo "No image changes to commit." || git commit -m "chore(war): update images to sha-${CI_COMMIT_SHORT_SHA}"
+    - git push

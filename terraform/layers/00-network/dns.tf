@@ -88,6 +88,8 @@ locals {
     "portracker",    # Port tracker (native auth)
     "tools",         # IT Tools developer utilities (native auth)
     "search",        # SearXNG metasearch engine (ForwardAuth)
+    # WAR Platform (lab-01, Services VLAN 20)
+    "war",           # WAR multi-agent adjudication platform (ForwardAuth)
     # Proxmox node UIs (Management VLAN 10 — self-signed certs, proxied for valid TLS)
     "pve-01",        # lab-01 (i9-12900K, main compute)
     "pve-02",        # lab-02 (N100, pilot node)

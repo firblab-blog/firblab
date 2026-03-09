@@ -316,6 +316,19 @@
     {
       "matchManagers": ["custom.regex"],
       "automerge": false
+    },
+
+    // =========================================================================
+    // Private Registry Exclusion — WAR Platform
+    // =========================================================================
+    // WAR images live on the private GitLab Container Registry
+    // (registry.gitlab.home.example-lab.org). Renovate cannot access this registry.
+    // Image tags are managed by the WAR CI pipeline directly — not Renovate.
+    {
+      "description": "Disable Renovate for private GitLab Container Registry (CI-managed by WAR pipeline)",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["^registry\\.gitlab\\.home\\.firblab\\.org/"],
+      "enabled": false
     }
   ]
 }

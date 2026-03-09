@@ -964,6 +964,89 @@ resource "gitlab_instance_variable" "sonar_token" {
   depends_on = [data.vault_kv_secret_v2.sonarqube_ci]
 }
 
+###############################################
+# WAR Platform: GitOps Push Token
+###############################################
+# WAR CI pipeline pushes updated image tags to the firblab monorepo
+# after each successful image build. This token grants write access
+# to the firblab repo for that push operation.
+#
+# Flow: WAR CI builds images → pushes to registry → clones firblab →
+#       updates ansible/roles/war/defaults/main.yml → git push (this token)
+#       → firblab CI detects change → deploy:war job fires (manual gate)
+#
+# Vault path: secret/services/war/gitops_push_token
+# CI variable: GITOPS_PUSH_TOKEN on the war project (masked)
+###############################################
+
+resource "gitlab_project_access_token" "war_gitops_push" {
+  project      = gitlab_project.projects["firblab"].id
+  name         = "war-ci-gitops-push"
+  scopes       = ["write_repository"]
+  access_level = "developer"
+  expires_at   = "2027-03-01"
+
+  depends_on = [gitlab_project.projects]
+}
+
+resource "vault_kv_secret_v2" "war_gitops_push_token" {
+  mount = "secret"
+  name  = "services/war/gitops_push_token"
+
+  data_json = jsonencode({
+    token = gitlab_project_access_token.war_gitops_push.token
+  })
+
+  depends_on = [gitlab_project_access_token.war_gitops_push]
+}
+
+# Inject as masked CI variable on the WAR project so the WAR pipeline
+# can use oauth2:<token>@... to clone and push the firblab repo.
+resource "gitlab_project_variable" "war_gitops_push_token" {
+  project           = gitlab_project.projects["war"].id
+  key               = "GITOPS_PUSH_TOKEN"
+  value             = gitlab_project_access_token.war_gitops_push.token
+  protected         = true
+  masked            = true
+  environment_scope = "*"
+
+  depends_on = [gitlab_project_access_token.war_gitops_push]
+}
+
+###############################################
+# WAR Platform: Container Registry Pull Token
+###############################################
+# Deploy token for Ansible to authenticate to the GitLab Container Registry
+# on the WAR VM. Docker login uses this token to pull private WAR images.
+#
+# Ansible reads this from Vault at deploy time and runs:
+#   docker login registry.gitlab.home.example-lab.org
+#
+# Vault path: secret/services/war/registry_pull
+# Keys: username, token
+###############################################
+
+resource "gitlab_deploy_token" "war_registry_pull" {
+  project  = gitlab_project.projects["war"].id
+  name     = "war-registry-pull"
+  username = "war-registry-pull"
+  scopes   = ["read_registry"]
+
+  depends_on = [gitlab_project.projects]
+}
+
+resource "vault_kv_secret_v2" "war_registry_pull" {
+  mount = "secret"
+  name  = "services/war/registry_pull"
+
+  data_json = jsonencode({
+    username = gitlab_deploy_token.war_registry_pull.username
+    token    = gitlab_deploy_token.war_registry_pull.token
+  })
+
+  depends_on = [gitlab_deploy_token.war_registry_pull]
+}
+
 resource "gitlab_application_settings" "this" {
   # --- Sign-in & Registration ---
   signup_enabled                           = false # No open registration — users via OIDC or admin-created

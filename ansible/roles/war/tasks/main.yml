@@ -1,0 +1,102 @@
+---
+# =============================================================================
+# WAR Platform Role - Deployment Tasks
+# =============================================================================
+# Deploys WAR (dashboard + recall-service + guardrail-service + war-service +
+# postgres) via Docker Compose on a CIS-hardened VM.
+#
+# Requires the docker role to run first (Docker CE install + daemon config).
+# Secrets are injected at deploy time from Vault by the playbook pre_tasks.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flush pending handlers from earlier roles (common, hardening, docker)
+# ---------------------------------------------------------------------------
+# Critical: the docker role's daemon.json template triggers a "Restart docker"
+# handler. If this fires AFTER we start containers, it kills them all.
+- name: Flush handlers from earlier roles before starting containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# Registry login (private GitLab Container Registry)
+# ---------------------------------------------------------------------------
+- name: Log in to GitLab Container Registry
+  community.docker.docker_login:
+    registry_url: "{{ war_registry_host }}"
+    username: "{{ war_registry_user }}"
+    password: "{{ war_registry_token }}"
+  no_log: true
+  tags:
+    - configure
+    - registry
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create WAR directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ war_install_dir }}"
+    - path: "{{ war_install_dir }}/config"
+      mode: "0750"
+    - path: "{{ war_install_dir }}/data/postgres"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Configuration Files
+# ---------------------------------------------------------------------------
+- name: Template WAR environment file
+  ansible.builtin.template:
+    src: war.env.j2
+    dest: "{{ war_install_dir }}/config/war.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: env_changed
+  notify: Restart war
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Docker Compose
+# ---------------------------------------------------------------------------
+- name: Template WAR Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ war_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_changed
+  notify: Restart war
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+- name: Pull WAR images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ war_install_dir }}"
+  register: war_pull_result
+  changed_when: "'Pull complete' in war_pull_result.stdout or 'Downloaded' in war_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start WAR containers
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ war_install_dir }}"
+  register: war_up_result
+  changed_when: "'Started' in war_up_result.stdout or 'Recreated' in war_up_result.stdout or 'Created' in war_up_result.stdout"
+  tags:
+    - deploy
