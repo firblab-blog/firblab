@@ -17,10 +17,10 @@
 # WAR service images — managed by WAR CI, not Renovate
 # ci-managed: updated automatically by the WAR repo pipeline on each build
 # ---------------------------------------------------------------------------
-war_dashboard_image: "registry.gitlab.home.example-lab.org/applications/war/dashboard:sha-1ad81372"
-war_recall_service_image: "registry.gitlab.home.example-lab.org/applications/war/recall-service:sha-1ad81372"
-war_guardrail_service_image: "registry.gitlab.home.example-lab.org/applications/war/guardrail-service:sha-1ad81372"
-war_service_image: "registry.gitlab.home.example-lab.org/applications/war/war-service:sha-1ad81372"
+war_dashboard_image: "registry.gitlab.home.example-lab.org/applications/war/dashboard:sha-17d9bef6"
+war_recall_service_image: "registry.gitlab.home.example-lab.org/applications/war/recall-service:sha-17d9bef6"
+war_guardrail_service_image: "registry.gitlab.home.example-lab.org/applications/war/guardrail-service:sha-17d9bef6"
+war_service_image: "registry.gitlab.home.example-lab.org/applications/war/war-service:sha-17d9bef6"
 
 # PostgreSQL — Renovate-managed (public image)
 # https://hub.docker.com/_/postgres/tags
