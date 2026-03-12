@@ -16,16 +16,23 @@ iface {{ proxmox_mgmt_bridge_ports }} inet manual
 {% if proxmox_mgmt_ethtool_speed is defined %}
 	pre-up ethtool -s {{ proxmox_mgmt_bridge_ports }} speed {{ proxmox_mgmt_ethtool_speed }} duplex full autoneg off
 {% endif %}
+{% if proxmox_mgmt_force_promisc_resolved | default(false) %}
+	post-up ip link set dev {{ proxmox_mgmt_bridge_ports }} promisc on
+	post-down ip link set dev {{ proxmox_mgmt_bridge_ports }} promisc off
+{% endif %}
 
 auto {{ proxmox_mgmt_interface }}
 iface {{ proxmox_mgmt_interface }} inet static
-	address {{ ansible_host }}/24
-	gateway 10.0.10.1
+	address {{ ansible_host }}/{{ management_subnet.split('/')[-1] }}
+	gateway {{ management_gateway }}
 	bridge-ports {{ proxmox_mgmt_bridge_ports }}
 	bridge-stp off
 	bridge-fd 0
 	bridge-vlan-aware yes
-	bridge-vids 2-4094
+	bridge-vids {{ proxmox_bridge_vids_resolved | join(' ') }}
+{% if proxmox_mgmt_bridge_pvid is defined %}
+	bridge-pvid {{ proxmox_mgmt_bridge_pvid }}
+{% endif %}
 
 {% if proxmox_storage_bridge_ports is defined %}
 # ---------------------------------------------------------

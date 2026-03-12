@@ -15,6 +15,10 @@
 #   - Region/country blocking       → No provider resource
 #   - Encrypted DNS (DoH/DoT)       → No provider resource
 #   - Per-app blocking rules        → No provider resource
+#   - IPv6 disable on Default LAN   → Provider bug: deserialization error on Default
+#                                     network's IPsec fields prevents import/manage.
+#                                     Managed here instead. TF-managed VLANs use
+#                                     ipv6_interface_type = "none" directly.
 #
 # TODO: Migrate back to Terraform if/when the provider adds support for these.
 # =============================================================================
@@ -58,5 +62,22 @@ unifi_stp_priorities: {}
 # Terraform passes these based on which resources are configured.
 
 unifi_manage_stp: true
+unifi_manage_ipv6: true            # Disable IPv6 on networks that can't be Terraform-managed
 unifi_manage_dns_filters: false    # Future: Phase 2
 unifi_manage_ad_blocking: false    # Future: Phase 2
+
+# ---------------------------------------------------------
+# IPv6 Disable — Networks
+# ---------------------------------------------------------
+# List of network names (as they appear in the UniFi controller) on which
+# to explicitly disable IPv6. Only networks that cannot be managed via
+# Terraform belong here — TF-managed VLANs use ipv6_interface_type = "none"
+# in main.tf directly.
+#
+# "Default" = VLAN 1 (10.0.4.0/24) — the Default LAN is pre-existing and
+# cannot be imported into Terraform due to a provider deserialization bug on
+# its IPsec fields. Without this, Windows clients on VLAN 1 may receive IPv6
+# addresses from the UCG-Fiber and experience ~5-second connection delays
+# (Happy Eyeballs timeout) when connecting to IPv4-only homelab services.
+unifi_ipv6_disable_networks:
+  - "Default"

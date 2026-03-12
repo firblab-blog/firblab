@@ -45,40 +45,36 @@ Full lab power loss. Everything is down. Follow this sequence exactly -- order m
 
 3. **Proxmox hosts boot automatically.** Startup delay is configured in BIOS ("restore on AC power loss"). Give nodes 3-5 minutes to fully POST and start the Proxmox hypervisor.
 
-4. **SSH to the Mac Mini VM (unseal vault host):**
+4. **Run the workstation recovery playbook:**
    ```bash
-   ssh admin@10.0.10.11
+   cd ~/repos/firblab/ansible
+   ansible-playbook -i inventory/hosts.yml playbooks/vault-unseal-recovery.yml
    ```
+   The playbook prompts once for the single Shamir unseal key, unseals the Transit unseal vault on `vault-1`, waits for the production listener on `8200`, and verifies the full cluster.
 
-5. **Unseal the unseal vault:**
+5. **Wait 30-60 seconds** for the production Vault nodes to auto-unseal via Transit. They will reach out to the unseal vault and unseal themselves automatically.
+
+6. **Verify the Vault cluster is healthy.** Check all 3 nodes:
    ```bash
-   VAULT_ADDR=https://127.0.0.1:8210 vault operator unseal <key>
-   ```
-   You need a single unseal key. This is the Transit unseal vault that auto-unseals the production cluster.
-
-6. **Wait 30-60 seconds** for the production Vault nodes to auto-unseal via Transit. They will reach out to the unseal vault and unseal themselves automatically.
-
-7. **Verify the Vault cluster is healthy.** Check all 3 nodes:
-   ```bash
-   for addr in 10.0.10.11 10.0.50.2 10.0.10.13; do
+   for addr in 10.0.10.10 10.0.50.2 10.0.10.13; do
      echo "--- $addr ---"
      VAULT_ADDR=https://$addr:8200 vault status 2>&1 | grep -E 'Sealed|HA Mode|Version'
    done
    ```
    Expected: all nodes report `Sealed: false`. One node should show `HA Mode: active`, the other two `HA Mode: standby`.
 
-8. **VMs and LXCs start automatically** based on Proxmox startup order configuration. Vault VMs have the highest priority (lowest start order number), followed by core infrastructure, then application services. Allow 5-10 minutes for everything to come up.
+7. **VMs and LXCs start automatically** based on Proxmox startup order configuration. Vault VMs have the highest priority (lowest start order number), followed by core infrastructure, then application services. Allow 5-10 minutes for everything to come up.
 
-9. **Verify services are responding:**
+8. **Verify services are responding:**
    ```bash
    # Check key services from a management host
-   curl -sk https://10.0.10.11:8200/v1/sys/health   # Vault primary
+   curl -sk https://10.0.10.10:8200/v1/sys/health   # Vault primary
    curl -s http://<gitlab-ip>/users/sign_in | head -5    # GitLab
    kubectl get nodes                                      # k3s cluster
    kubectl get pods -A | grep -v Running                  # Any unhealthy pods
    ```
 
-10. **Check Wazuh dashboard for alerts during downtime.** Log into the Wazuh web UI and review any alerts that fired during the power event. Filter by the outage time window. Most will be expected (service unavailable, agent disconnected) but look for anything anomalous.
+9. **Check Wazuh dashboard for alerts during downtime.** Log into the Wazuh web UI and review any alerts that fired during the power event. Filter by the outage time window. Most will be expected (service unavailable, agent disconnected) but look for anything anomalous.
 
 **Estimated total recovery time:** 10-15 minutes from power restoration to all services healthy.
 
@@ -196,11 +192,12 @@ done
 
 **Step 3 -- If the unseal vault itself is down:**
 ```bash
-ssh admin@10.0.10.11
-systemctl status vault-unseal
-# If down, start it:
-systemctl start vault-unseal
-# Then unseal it:
+cd ~/repos/firblab/ansible
+ansible-playbook -i inventory/hosts.yml playbooks/vault-unseal-recovery.yml
+```
+Manual fallback if Ansible is unavailable:
+```bash
+ssh admin@10.0.10.10
 VAULT_ADDR=https://127.0.0.1:8210 vault operator unseal <key>
 ```
 Once the unseal vault is back, production nodes should auto-unseal within 30-60 seconds.

@@ -322,7 +322,11 @@ The host management IP is on the Management VLAN (10). The physical NIC connects
 - The Proxmox host itself communicates on VLAN 10 (untagged/native on the trunk).
 - VMs and LXCs are assigned a VLAN tag in their Proxmox network configuration (e.g., `tag=20` for Services).
 - The VLAN-aware bridge handles 802.1Q tagging transparently.
-- The UniFi switch port must be set to the "Proxmox Trunk" port profile (managed by Terraform) to allow tagged traffic for all VLANs.
+- The UniFi switch port must be set to the "Proxmox Trunk" port profile (managed by Terraform) to allow tagged traffic for the lab VLANs.
+- Ansible renders `bridge-vids` from the canonical lab VLAN inventory (`network_vlans` in `ansible/inventory/group_vars/all.yml`) instead of using a `1-4094` or `2-4094` range.
+- This is required for Mellanox `mlx5` NICs such as `lab-01`: their hardware VLAN table tops out at 512 entries, so broad ranges cause the driver to drop VLAN programming during boot.
+- Ansible also enables promiscuous mode on the management bridge port automatically for Mellanox `mlx5` NICs unless a host overrides that behavior. On `lab-01`, this is required for ARP/neigh resolution to survive reboot consistently.
+- `lab-01` still keeps `bridge-pvid 1` on `vmbr0` because its management link relies on the native/untagged side of the trunk, but the allowed VLAN set is now resolved the same way as every other Proxmox node.
 
 ### Storage Bridge (vmbr1) — lab-01 Only
 

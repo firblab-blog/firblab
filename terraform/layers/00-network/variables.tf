@@ -165,6 +165,22 @@ variable "iot_wlan_passphrase" {
 # full provider gap inventory and migration status.
 # ---------------------------------------------------------
 
+variable "ipv6_disable_networks" {
+  description = <<-EOT
+    List of UniFi network names (as displayed in the controller) on which to
+    explicitly disable IPv6. Only pre-existing networks that cannot be managed
+    by Terraform belong here (e.g., "Default" LAN). TF-managed VLANs use
+    ipv6_interface_type = "none" in their unifi_network resources directly.
+
+    The "Default" LAN (VLAN 1, 10.0.4.0/24) is the primary concern:
+    if the UCG-Fiber has IPv6 enabled there, Windows clients get IPv6 addresses
+    and experience ~5-second Happy Eyeballs timeouts connecting to IPv4-only
+    homelab services.
+  EOT
+  type        = list(string)
+  default     = ["Default"]
+}
+
 variable "switch_stp_priorities" {
   description = <<-EOT
     STP bridge priority per switch device (MAC → priority).

@@ -12,6 +12,7 @@
 #
 # What this manages (provider gap inventory):
 #   - STP bridge priority per switch device
+#   - IPv6 disable on Default LAN (provider deserialization bug blocks import)
 #   - (Future) DNS content filters (provider Read bug)
 #   - (Future) Ad blocking per network (provider Read bug)
 #
@@ -47,6 +48,41 @@ resource "terraform_data" "unifi_stp_config" {
         -e '${jsonencode({
           unifi_api_key        = local.unifi_api_key
           unifi_stp_priorities = var.switch_stp_priorities
+          unifi_manage_ipv6    = false
+        })}'
+    EOT
+    working_dir = "${path.module}/../../.."
+  }
+}
+
+# ---------------------------------------------------------
+# IPv6 Disable Configuration
+# ---------------------------------------------------------
+# Disables IPv6 on the Default LAN (VLAN 1), which the Terraform provider
+# cannot manage due to a deserialization bug on the Default network's IPsec
+# fields. Without this, Windows clients on VLAN 1 receive IPv6 addresses
+# from the UCG-Fiber and experience ~5-second Happy Eyeballs timeouts when
+# connecting to IPv4-only homelab services.
+#
+# TF-managed VLANs (10/20/30/40/50/60) use ipv6_interface_type = "none"
+# in main.tf directly — only unmanageable networks belong here.
+# ---------------------------------------------------------
+
+resource "terraform_data" "unifi_network_config" {
+  count = length(var.ipv6_disable_networks) > 0 ? 1 : 0
+
+  # Trigger re-run when the list of networks to target changes
+  input = var.ipv6_disable_networks
+
+  provisioner "local-exec" {
+    command     = <<-EOT
+      ansible-playbook \
+        ansible/playbooks/unifi-config.yml \
+        -e '${jsonencode({
+          unifi_api_key                = local.unifi_api_key
+          unifi_manage_stp             = false
+          unifi_manage_ipv6            = true
+          unifi_ipv6_disable_networks  = var.ipv6_disable_networks
         })}'
     EOT
     working_dir = "${path.module}/../../.."

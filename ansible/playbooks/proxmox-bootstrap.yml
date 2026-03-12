@@ -253,6 +253,69 @@
       tags:
         - network
 
+    - name: Resolve bridge VLAN inventory for {{ inventory_hostname }}
+      ansible.builtin.set_fact:
+        proxmox_defined_vlans_sorted: "{{ network_vlans | dict2items | sort(attribute='value') }}"
+        proxmox_bridge_vlan_names_resolved: "{{ proxmox_bridge_vlan_names | default((network_vlans | dict2items | sort(attribute='value') | map(attribute='key') | list)) }}"
+        proxmox_bridge_vids_resolved: "{{ (network_vlans | dict2items | sort(attribute='value') | selectattr('key', 'in', (proxmox_bridge_vlan_names | default((network_vlans | dict2items | sort(attribute='value') | map(attribute='key') | list)))) | map(attribute='value') | map('string') | list) }}"
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Verify requested bridge VLAN names exist in network_vlans"
+      ansible.builtin.assert:
+        that:
+          - proxmox_bridge_vlan_names_resolved | difference(proxmox_defined_vlans_sorted | map(attribute='key') | list) | length == 0
+          - proxmox_bridge_vids_resolved | length > 0
+        fail_msg: >-
+          Invalid Proxmox bridge VLAN selection for {{ inventory_hostname }}.
+          Requested={{ proxmox_bridge_vlan_names_resolved | join(', ') }}
+          Known={{ proxmox_defined_vlans_sorted | map(attribute='key') | join(', ') }}
+        success_msg: "Resolved vmbr0 VLANs: {{ proxmox_bridge_vids_resolved | join(' ') }}"
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Detect management NIC driver for {{ proxmox_mgmt_bridge_ports }}"
+      ansible.builtin.command: "ethtool -i {{ proxmox_mgmt_bridge_ports }}"
+      register: proxmox_mgmt_driver_info
+      changed_when: false
+      tags:
+        - network
+
+    - name: Resolve management NIC promisc policy for {{ inventory_hostname }}
+      ansible.builtin.set_fact:
+        proxmox_mgmt_force_promisc_resolved: >-
+          {{
+            proxmox_mgmt_force_promisc
+            if proxmox_mgmt_force_promisc is defined
+            else ('driver: mlx5_core' in proxmox_mgmt_driver_info.stdout)
+          }}
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Guard Mellanox mlx5 against oversized VLAN lists"
+      ansible.builtin.assert:
+        that:
+          - proxmox_bridge_vids_resolved | length <= 512
+        fail_msg: >-
+          {{ inventory_hostname }} uses {{ proxmox_mgmt_bridge_ports }} with the
+          mlx5 driver, which can only program 512 VLANs. Resolved bridge VLANs:
+          {{ proxmox_bridge_vids_resolved | join(' ') }}
+        success_msg: >-
+          {{ inventory_hostname }} mlx5 bridge VLAN count is safe:
+          {{ proxmox_bridge_vids_resolved | length }}
+      when: "'driver: mlx5_core' in proxmox_mgmt_driver_info.stdout"
+      tags:
+        - network
+
+    - name: "PREFLIGHT: Report management NIC promisc policy"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} will {{
+          'enable' if proxmox_mgmt_force_promisc_resolved else 'not enable'
+          }} promisc mode on {{ proxmox_mgmt_bridge_ports }}
+      tags:
+        - network
+
     - name: Configure VLAN-aware bridge (vmbr0)
       ansible.builtin.template:
         src: proxmox-interfaces.j2

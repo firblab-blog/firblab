@@ -24,6 +24,11 @@ resource "unifi_network" "management" {
   dhcp_stop    = "10.0.10.200"
   dhcp_lease   = 86400
   dhcp_dns     = var.management_dns_servers
+
+  # Explicitly disable IPv6 — all services are IPv4-only. Leaving this
+  # unset relies on the controller default and causes Windows clients
+  # to attempt IPv6 with 5-second Happy Eyeballs timeouts on fallback.
+  ipv6_interface_type = "none"
 }
 
 resource "unifi_network" "services" {
@@ -37,6 +42,8 @@ resource "unifi_network" "services" {
   dhcp_stop    = "10.0.20.200"
   dhcp_lease   = 86400
   dhcp_dns     = var.services_dns_servers
+
+  ipv6_interface_type = "none"
 }
 
 resource "unifi_network" "dmz" {
@@ -50,6 +57,8 @@ resource "unifi_network" "dmz" {
   dhcp_stop    = "10.0.30.200"
   dhcp_lease   = 86400
   dhcp_dns     = var.dmz_dns_servers
+
+  ipv6_interface_type = "none"
 }
 
 resource "unifi_network" "storage" {
@@ -62,6 +71,8 @@ resource "unifi_network" "storage" {
   dhcp_start   = "10.0.40.100"
   dhcp_stop    = "10.0.40.200"
   dhcp_lease   = 86400
+
+  ipv6_interface_type = "none"
 }
 
 resource "unifi_network" "security" {
@@ -75,6 +86,8 @@ resource "unifi_network" "security" {
   dhcp_stop    = "10.0.50.200"
   dhcp_lease   = 86400
   dhcp_dns     = var.security_dns_servers
+
+  ipv6_interface_type = "none"
 }
 
 resource "unifi_network" "iot" {
@@ -88,6 +101,8 @@ resource "unifi_network" "iot" {
   dhcp_stop    = "10.0.60.200"
   dhcp_lease   = 86400
   dhcp_dns     = var.iot_dns_servers
+
+  ipv6_interface_type = "none"
 }
 
 # ---------------------------------------------------------

@@ -1,0 +1,268 @@
+---
+# =============================================================================
+# Vault Unseal Recovery Playbook
+# =============================================================================
+# Unseals the transit "unseal Vault" on vault-1 from the operator workstation,
+# then verifies the production Vault cluster recovers via transit auto-unseal.
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/vault-unseal-recovery.yml
+#   ansible-playbook -i inventory/hosts.yml playbooks/vault-unseal-recovery.yml \
+#     -e "vault_unseal_key=<shamir-key>"
+# =============================================================================
+
+- name: "Vault Recovery: Unseal transit vault on vault-1"
+  hosts: vault-1
+  become: true
+  gather_facts: true
+
+  vars:
+    vault_unseal_health_url: "https://127.0.0.1:{{ vault_unseal_port | default(8210) }}/v1/sys/health"
+    vault_primary_health_url: "https://127.0.0.1:{{ vault_api_port | default(8200) }}/v1/sys/health"
+    vault_recovery_restart_if_needed: true
+
+  pre_tasks:
+    - name: Verify this is the macOS transit-unseal host
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Darwin"
+          - inventory_hostname == "vault-1"
+        fail_msg: "This playbook must run against vault-1 on macOS."
+
+    - name: Prompt for transit Vault unseal key when not provided
+      ansible.builtin.pause:
+        prompt: "Enter the Shamir unseal key for the transit Vault on vault-1"
+        echo: false
+      register: vault_unseal_key_prompt
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: vault_unseal_key is not defined
+      no_log: true
+
+    - name: Normalize transit Vault unseal key
+      ansible.builtin.set_fact:
+        vault_unseal_key_effective: "{{ vault_unseal_key | default(vault_unseal_key_prompt.user_input) }}"
+      no_log: true
+
+    - name: Validate unseal key is present
+      ansible.builtin.assert:
+        that:
+          - vault_unseal_key_effective | trim | length > 0
+        fail_msg: "A non-empty transit Vault unseal key is required."
+      no_log: true
+
+  tasks:
+    - name: Check transit Vault health before recovery
+      ansible.builtin.uri:
+        url: "{{ vault_unseal_health_url }}"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200
+          - 501
+          - 503
+      register: transit_vault_health_before
+      changed_when: false
+
+    - name: Report transit Vault pre-recovery state
+      ansible.builtin.debug:
+        msg: >
+          Transit Vault health before recovery: HTTP {{ transit_vault_health_before.status }}.
+          {% if transit_vault_health_before.status == 200 %}Already unsealed.
+          {% elif transit_vault_health_before.status == 503 %}Sealed and requires unseal.
+          {% elif transit_vault_health_before.status == 501 %}Not initialized.
+          {% endif %}
+
+    - name: Stop if transit Vault is not initialized
+      ansible.builtin.fail:
+        msg: "Transit Vault on vault-1 is not initialized (HTTP 501). Initialize it before using this recovery playbook."
+      when: transit_vault_health_before.status == 501
+
+    - name: Unseal transit Vault
+      ansible.builtin.command:
+        argv:
+          - "{{ vault_unseal_binary_path | default('/opt/unseal-vault/vault') }}"
+          - operator
+          - unseal
+          - "{{ vault_unseal_key_effective }}"
+      environment:
+        VAULT_ADDR: "https://127.0.0.1:{{ vault_unseal_port | default(8210) }}"
+        VAULT_CACERT: "{{ vault_unseal_tls_dir | default('/opt/unseal-vault/tls') }}/ca.pem"
+      register: transit_vault_unseal
+      when: transit_vault_health_before.status == 503
+      changed_when: true
+      no_log: true
+
+    - name: Wait for transit Vault to become unsealed
+      ansible.builtin.uri:
+        url: "{{ vault_unseal_health_url }}"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200
+      register: transit_vault_health_after
+      retries: 12
+      delay: 5
+      until: transit_vault_health_after.status == 200
+      changed_when: false
+
+    - name: Wait for production Vault listener on vault-1
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ vault_api_port | default(8200) }}"
+        timeout: 30
+        state: started
+      register: vault_primary_listener_wait
+      failed_when: false
+      changed_when: false
+
+    - name: Kickstart production Vault LaunchDaemon if listener did not recover
+      ansible.builtin.command:
+        argv:
+          - launchctl
+          - kickstart
+          - -k
+          - system/com.example-lab.vault
+      when:
+        - vault_recovery_restart_if_needed | bool
+        - vault_primary_listener_wait is failed
+      changed_when: true
+
+    - name: Wait for production Vault health on vault-1
+      ansible.builtin.uri:
+        url: "{{ vault_primary_health_url }}"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200
+          - 429
+          - 472
+          - 473
+      register: vault_primary_health_after
+      retries: 12
+      delay: 5
+      until: vault_primary_health_after.status in [200, 429, 472, 473]
+      changed_when: false
+
+    - name: Report vault-1 recovery status
+      ansible.builtin.debug:
+        msg: >
+          vault-1 production Vault recovered with HTTP {{ vault_primary_health_after.status }}.
+          {% if vault_primary_health_after.status == 200 %}Node is active.
+          {% elif vault_primary_health_after.status == 429 %}Node is standby.
+          {% elif vault_primary_health_after.status == 472 %}Node is in recovery mode.
+          {% elif vault_primary_health_after.status == 473 %}Node is performance standby.
+          {% endif %}
+
+- name: "Vault Recovery: Ensure Linux Vault services are running"
+  hosts: vault-2:vault-3
+  become: true
+  gather_facts: false
+
+  vars:
+    vault_primary_health_url: "https://127.0.0.1:{{ vault_api_port | default(8200) }}/v1/sys/health"
+
+  tasks:
+    - name: Ensure Vault service is started
+      ansible.builtin.service:
+        name: vault
+        state: started
+
+    - name: Wait for production Vault health on Linux nodes
+      ansible.builtin.uri:
+        url: "{{ vault_primary_health_url }}"
+        method: GET
+        validate_certs: false
+        status_code:
+          - 200
+          - 429
+          - 472
+          - 473
+      register: vault_linux_health
+      retries: 12
+      delay: 5
+      until: vault_linux_health.status in [200, 429, 472, 473]
+      changed_when: false
+
+    - name: Report Linux Vault node status
+      ansible.builtin.debug:
+        msg: >
+          {{ inventory_hostname }} Vault health is HTTP {{ vault_linux_health.status }}.
+          {% if vault_linux_health.status == 200 %}Node is active.
+          {% elif vault_linux_health.status == 429 %}Node is standby.
+          {% elif vault_linux_health.status == 472 %}Node is in recovery mode.
+          {% elif vault_linux_health.status == 473 %}Node is performance standby.
+          {% endif %}
+
+- name: "Vault Recovery: Verify production cluster health"
+  hosts: vault_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    vault_primary_health_url: "https://127.0.0.1:{{ vault_api_port | default(8200) }}/v1/sys/health"
+
+  tasks:
+    - name: Wait for production Vault on each cluster node
+      ansible.builtin.uri:
+        url: "{{ vault_primary_health_url }}"
+        method: GET
+        validate_certs: false
+        return_content: true
+        status_code:
+          - 200
+          - 429
+          - 472
+          - 473
+      register: vault_cluster_health
+      retries: 12
+      delay: 5
+      until: vault_cluster_health.status in [200, 429, 472, 473]
+      changed_when: false
+
+    - name: Report per-node Vault status
+      ansible.builtin.debug:
+        msg: >
+          {{ inventory_hostname }} Vault health is HTTP {{ vault_cluster_health.status }}.
+          {% if vault_cluster_health.status == 200 %}Node is active.
+          {% elif vault_cluster_health.status == 429 %}Node is standby.
+          {% elif vault_cluster_health.status == 472 %}Node is in recovery mode.
+          {% elif vault_cluster_health.status == 473 %}Node is performance standby.
+          {% endif %}
+
+    - name: Build cluster health summary
+      ansible.builtin.set_fact:
+        vault_cluster_status_summary: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars, 'vault_cluster_health')
+            | map(attribute='status')
+            | list
+          }}
+      run_once: true
+
+    - name: Assert cluster has an active leader
+      ansible.builtin.assert:
+        that:
+          - "(vault_cluster_status_summary | select('equalto', 200) | list | length) >= 1"
+        fail_msg: >-
+          Vault cluster recovered enough to answer health checks, but no active
+          leader was elected. Per-node HTTP statuses:
+          {% for host in ansible_play_hosts_all %}
+          {{ host }}={{ hostvars[host].vault_cluster_health.status }}
+          {% endfor %}
+      run_once: true
+
+    - name: Assert cluster has quorum shape
+      ansible.builtin.assert:
+        that:
+          - "(vault_cluster_status_summary | select('equalto', 200) | list | length) == 1"
+          - "(vault_cluster_status_summary | select('equalto', 429) | list | length) >= 1"
+        fail_msg: >-
+          Vault cluster elected an unexpected set of roles. Expected one active
+          node and at least one standby. Per-node HTTP statuses:
+          {% for host in ansible_play_hosts_all %}
+          {{ host }}={{ hostvars[host].vault_cluster_health.status }}
+          {% endfor %}
+      run_once: true

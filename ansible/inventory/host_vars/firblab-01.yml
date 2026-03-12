@@ -40,6 +40,11 @@ proxmox_mgmt_bridge_ports: "enp10s0f0np0"
 # Force 10G — INTELLINET 508438 DAC has broken EEPROM (no 10G compliance codes),
 # auto-negotiation falls back to 1GbE without this override
 proxmox_mgmt_ethtool_speed: 10000
+# lab-01 management rides the native/untagged side of the Proxmox trunk.
+# Keep bridge PVID 1 so untagged management-side traffic is classified
+# consistently on reboot; the allowed VLAN set itself is derived in Ansible
+# from the canonical lab VLAN inventory.
+proxmox_mgmt_bridge_pvid: 1
 
 # Storage bridge — Mellanox CX4121C Port 2, direct DAC to TrueNAS
 proxmox_storage_bridge_ports: "enp10s0f1np1"

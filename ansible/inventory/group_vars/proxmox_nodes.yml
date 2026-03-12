@@ -55,3 +55,18 @@ proxmox_cluster_leader: "lab-01"
 # The Proxmox host-level PVE firewall must allow TCP/9100 from the Services
 # VLAN (10.0.20.0/24) for Prometheus to scrape these hosts.
 monitoring_host_group: "proxmox"
+
+# ---------------------------------------------------------------------------
+# Proxmox Trunk VLANs
+# ---------------------------------------------------------------------------
+# Render vmbr0 with the lab VLANs that actually exist instead of a giant
+# 1-4094 range. This keeps bridge state aligned with Terraform Layer 00 and
+# avoids overflowing NIC driver VLAN tables on Mellanox mlx5 hardware.
+proxmox_bridge_vlan_names:
+  - lan
+  - management
+  - services
+  - dmz
+  - storage
+  - security
+  - iot

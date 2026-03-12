@@ -156,6 +156,19 @@ The unseal vault itself uses Shamir's Secret Sharing with a 1/1 threshold (singl
 
 **Recovery procedure after a full power outage:**
 
+Preferred recovery path from the workstation:
+
+```bash
+cd ~/repos/firblab/ansible
+ansible-playbook -i inventory/hosts.yml playbooks/vault-unseal-recovery.yml
+```
+
+The playbook prompts once for the unseal key, unseals the transit Vault on `vault-1`,
+waits for `vault-1` on port `8200` to recover, and verifies the rest of the
+production cluster comes back via transit auto-unseal.
+
+Manual fallback on the Mac Mini:
+
 ```bash
 # Step 1: SSH to the Mac Mini
 ssh admin@10.0.10.10

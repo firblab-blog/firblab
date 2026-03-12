@@ -1,0 +1,90 @@
+# =============================================================================
+# IPv6 Disable — Provider Gap for Default LAN
+# =============================================================================
+# The Default LAN (VLAN 1) cannot be managed by Terraform because the
+# filipowm/unifi provider has a deserialization bug on the Default network's
+# IPsec fields. This task fills that gap by disabling IPv6 directly via the
+# UniFi REST API.
+#
+# Why this matters: if the UCG-Fiber has IPv6 enabled on VLAN 1 (via
+# ISP DHCPv6-PD, SLAAC, or even link-local RA), Windows clients will get
+# IPv6 addresses and prefer them for outbound connections. Since all
+# homelab services are IPv4-only, every connection attempt hits a ~5-second
+# Happy Eyeballs / TCP timeout before falling back to IPv4.
+#
+# The read-modify-write pattern (GET full object → merge changes → PUT) is
+# required because the UniFi API does not support partial PATCH updates —
+# a PUT with only the changed fields resets all other settings to defaults.
+#
+# Idempotent: only PUTs when ipv6_interface_type is not already "none".
+# =============================================================================
+---
+
+- name: Fetch all network configurations
+  ansible.builtin.uri:
+    url: "{{ unifi_api_base }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_api_key }}"
+    validate_certs: "{{ unifi_validate_certs }}"
+    return_content: true
+  register: unifi_networks_response
+  no_log: true
+
+- name: Build network lookup (name → full network object)
+  ansible.builtin.set_fact:
+    unifi_network_map: >-
+      {{
+        unifi_network_map | default({}) | combine({
+          item.name: item
+        })
+      }}
+  loop: "{{ unifi_networks_response.json.data | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default(item._id) }}"
+  no_log: true
+
+- name: Disable IPv6 on configured networks (read-modify-write)
+  ansible.builtin.uri:
+    url: "{{ unifi_api_base }}/rest/networkconf/{{ unifi_network_map[item]._id }}"
+    method: PUT
+    headers:
+      X-API-KEY: "{{ unifi_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    # Merge IPv6-disable settings into the full existing object to avoid
+    # resetting other fields (dhcp, vlan, dns, etc.) to defaults.
+    body: >-
+      {{
+        unifi_network_map[item] | combine({
+          'ipv6_interface_type': 'none',
+          'ipv6_pd_enabled':     false,
+          'ipv6_ra_enable':      false,
+          'dhcpv6_enabled':      false
+        })
+      }}
+    validate_certs: "{{ unifi_validate_certs }}"
+    status_code:
+      - 200
+  loop: "{{ unifi_ipv6_disable_networks }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - item in unifi_network_map
+    - (unifi_network_map[item].ipv6_interface_type | default('none')) != 'none'
+  register: ipv6_results
+  changed_when: ipv6_results.status == 200
+
+- name: Report networks already IPv6-clean (no change needed)
+  ansible.builtin.debug:
+    msg: "{{ item }}: ipv6_interface_type already 'none' — no change"
+  loop: "{{ unifi_ipv6_disable_networks }}"
+  when:
+    - item in unifi_network_map
+    - (unifi_network_map[item].ipv6_interface_type | default('none')) == 'none'
+
+- name: Report networks not found in controller
+  ansible.builtin.debug:
+    msg: "WARNING: Network '{{ item }}' not found in UniFi controller — skipping IPv6 disable"
+  loop: "{{ unifi_ipv6_disable_networks }}"
+  when: item not in unifi_network_map

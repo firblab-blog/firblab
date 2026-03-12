@@ -55,7 +55,17 @@ ntp_servers:
 # ---------------------------------------------------------------------------
 # Network Configuration
 # ---------------------------------------------------------------------------
+network_vlans:
+  lan: 1
+  management: 10
+  services: 20
+  dmz: 30
+  storage: 40
+  security: 50
+  iot: 60
+
 management_vlan_id: 10
+management_gateway: 10.0.10.1
 management_subnet: 10.0.10.0/24
 workload_vlan_id: 50
 workload_subnet: 10.0.50.0/24
@@ -193,4 +203,3 @@ monitoring_scrape_sources:
 # Host group label for Promtail — override in group_vars to set per-group
 # Meaningful values: proxmox, vault, core-infra, standalone-services, bare-metal
 monitoring_host_group: "ungrouped"
-

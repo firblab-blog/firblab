@@ -34,6 +34,10 @@
   ansible.builtin.include_tasks: stp.yml
   when: unifi_manage_stp | bool and (unifi_stp_priorities | length > 0)
 
+- name: Disable IPv6 on unmanaged networks
+  ansible.builtin.include_tasks: ipv6_networks.yml
+  when: unifi_manage_ipv6 | bool and (unifi_ipv6_disable_networks | length > 0)
+
 - name: Configure DNS content filters
   ansible.builtin.include_tasks: dns_filters.yml
   when: unifi_manage_dns_filters | bool

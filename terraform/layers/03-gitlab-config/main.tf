@@ -5,7 +5,7 @@
 # Creates the organizational structure for a clean, consolidated GitLab:
 #   - Instance-level application settings (sign-in, auth, security)
 #   - 4 top-level groups (Infrastructure, Applications, Personal, Documentation)
-#   - 19 projects across those groups
+#   - 19 projects across those groups (cc-recall replaced by recall)
 #   - Standard labels on all projects
 #   - Branch protection on infrastructure projects
 #   - Instance-level CI/CD variables (Vault AppRole for all pipelines)
@@ -136,10 +136,10 @@ locals {
       wiki_enabled                     = true
       remove_source_branch_after_merge = true
     }
-    cc_recall = {
-      name                                         = "cc-recall"
-      path                                         = "cc-recall"
-      description                                  = "MCP server that gives Claude Code searchable long-term memory by indexing conversation histories into SQLite FTS5"
+    recall = {
+      name                                         = "recall"
+      path                                         = "recall"
+      description                                  = "Recall — persistent memory layer for coding agents. Indexes conversation history into searchable SQLite FTS5 and exposes an MCP server interface."
       group_key                                    = "infrastructure"
       visibility_level                             = "private"
       wiki_enabled                                 = true
@@ -272,7 +272,7 @@ locals {
     ci_templates      = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     cybersecurity     = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     security_policies = { push = "maintainer", merge = "maintainer", allow_force_push = false }
-    cc_recall         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    recall            = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     guardrail         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     war               = { push = "maintainer", merge = "maintainer", allow_force_push = false }
   }
