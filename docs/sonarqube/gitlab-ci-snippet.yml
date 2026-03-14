@@ -1,0 +1,35 @@
+# =============================================================================
+# SonarQube Analysis — add this to each project's .gitlab-ci.yml
+# =============================================================================
+# Step 1: Add 'scan' to your stages list if not already present.
+# Step 2: Add the include block below (or append the file reference).
+# Step 3: Add the sonarqube:analyze job.
+#
+# Prerequisites (already handled by Terraform Layer 03):
+#   - SONAR_HOST_URL  set as GitLab instance CI/CD variable
+#   - SONAR_TOKEN     set after SonarQube is deployed (sonarqube_ci_ready=true)
+# =============================================================================
+
+# --- Add to your include: block -------------------------------------------
+#
+# include:
+#   - project: 'infrastructure/ci-templates'
+#     ref: main
+#     file: sonarqube-ci.yml
+#
+# --------------------------------------------------------------------------
+
+# --- Add this job to your pipeline ----------------------------------------
+
+sonarqube:analyze:
+  extends: .sonarqube-analysis
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        SONAR_SCANNER_OPTS: >-
+          -Dsonar.pullrequest.provider=gitlab
+          -Dsonar.pullrequest.gitlab.repositorySlug=${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+          -Dsonar.pullrequest.key=${CI_MERGE_REQUEST_IID}
+          -Dsonar.pullrequest.branch=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
+          -Dsonar.pullrequest.base=${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

@@ -53,10 +53,18 @@ replicaCount: 1
 # K8s Secret 'sonarqube-admin' created by ExternalSecret from Vault.
 # Keys: 'password' (new admin password), 'currentPassword' (default 'admin'),
 #       'monitoring-passcode' (required by chart 2025.x validation).
+#
+# IMPORTANT: Use 'adminPasswordSecretName' (NOT 'existingSecret' — that field
+# does not exist in the chart). The hook job (post-install, post-upgrade) reads
+# 'password' and 'currentPassword' keys from this secret.
+#
+# After initial deploy succeeds (password changed from 'admin' to random):
+#   1. Get the random password: kubectl get secret sonarqube-admin -n sonarqube \
+#        -o jsonpath='{.data.password}' | base64 -d
+#   2. Update Vault: vault kv patch secret/services/sonarqube admin_password_current=<value>
+#   This ensures subsequent helm upgrade hook runs don't fail with 401.
 account:
-  existingSecret: sonarqube-admin
-  adminPasswordSecretKey: password
-  currentAdminPasswordSecretKey: currentPassword
+  adminPasswordSecretName: sonarqube-admin
 
 # ---------------------------------------------------------------------------
 # Monitoring Passcode (chart 2025.x required field)

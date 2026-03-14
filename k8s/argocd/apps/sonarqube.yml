@@ -29,7 +29,7 @@ spec:
   sources:
     - repoURL: https://SonarSource.github.io/helm-chart-sonarqube
       chart: sonarqube
-      targetRevision: "2025.*"
+      targetRevision: "2025.6.1"
       helm:
         releaseName: sonarqube
         valueFiles:
@@ -49,9 +49,10 @@ spec:
       selfHeal: true
     managedNamespaceMetadata:
       labels:
-        # baseline required: initSysctl privileged init container sets vm.max_map_count
-        # (Elasticsearch requirement). Restricted PSA blocks privileged containers.
-        pod-security.kubernetes.io/enforce: baseline
+        # privileged required: initSysctl sets vm.max_map_count via a privileged init
+        # container (Elasticsearch requirement). baseline policy does NOT allow
+        # securityContext.privileged=true — only the privileged policy does.
+        pod-security.kubernetes.io/enforce: privileged
         pod-security.kubernetes.io/warn: restricted
         pod-security.kubernetes.io/audit: restricted
     syncOptions:
