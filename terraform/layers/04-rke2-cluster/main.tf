@@ -15,6 +15,7 @@
 
 module "rke2_cluster" {
   source = "../../modules/proxmox-rke2-cluster/"
+  count  = var.rke2_enabled ? 1 : 0
 
   # Proxmox placement
   proxmox_node = var.proxmox_node

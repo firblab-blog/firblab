@@ -83,20 +83,22 @@ resource "vault_kv_secret_v2" "authentik_ssh" {
 }
 
 resource "vault_kv_secret_v2" "patchmon_ssh" {
+  count = var.patchmon_enabled ? 1 : 0
   mount = "secret"
   name  = "compute/patchmon"
 
   data_json = jsonencode({
-    ssh_private_key = module.patchmon.ssh_private_key
+    ssh_private_key = module.patchmon[0].ssh_private_key
   })
 }
 
 resource "vault_kv_secret_v2" "actualbudget_ssh" {
+  count = var.actualbudget_enabled ? 1 : 0
   mount = "secret"
   name  = "compute/actualbudget"
 
   data_json = jsonencode({
-    ssh_private_key = module.actualbudget.ssh_private_key
+    ssh_private_key = module.actualbudget[0].ssh_private_key
   })
 }
 
@@ -110,11 +112,12 @@ resource "vault_kv_secret_v2" "traefik_proxy_ssh" {
 }
 
 resource "vault_kv_secret_v2" "vaultwarden_ssh" {
+  count = var.vaultwarden_enabled ? 1 : 0
   mount = "secret"
   name  = "compute/vaultwarden"
 
   data_json = jsonencode({
-    ssh_private_key = module.vaultwarden.ssh_private_key
+    ssh_private_key = module.vaultwarden[0].ssh_private_key
   })
 }
 
@@ -129,11 +132,12 @@ resource "vault_kv_secret_v2" "backup_ssh" {
 }
 
 resource "vault_kv_secret_v2" "war_ssh" {
+  count = var.war_enabled ? 1 : 0
   mount = "secret"
   name  = "compute/war"
 
   data_json = jsonencode({
-    ssh_private_key = module.war.ssh_private_key
+    ssh_private_key = module.war[0].ssh_private_key
   })
 }
 

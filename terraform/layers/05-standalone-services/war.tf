@@ -16,6 +16,7 @@
 
 module "war" {
   source = "../../modules/proxmox-vm/"
+  count  = var.war_enabled ? 1 : 0
 
   # Identity
   name        = var.war_name

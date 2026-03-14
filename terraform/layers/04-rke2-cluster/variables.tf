@@ -54,6 +54,12 @@ variable "proxmox_api_token" {
   default     = ""
 }
 
+variable "rke2_enabled" {
+  description = "Whether the RKE2 cluster remains managed in this layer. Set false to reclaim the full cluster footprint."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------
 # SSH
 # ---------------------------------------------------------

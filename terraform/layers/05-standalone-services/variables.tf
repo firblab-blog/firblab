@@ -539,6 +539,12 @@ variable "authentik_gateway" {
   default     = "10.0.10.1"
 }
 
+variable "patchmon_enabled" {
+  description = "Whether PatchMon remains managed in this layer. Set false to reclaim the VM for FirbLab v2."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------
 # PatchMon (VM) — lab-04, Services VLAN 20
 # ---------------------------------------------------------
@@ -589,6 +595,12 @@ variable "patchmon_ip_address" {
   default     = "10.0.20.15/24"
 }
 
+variable "changedetection_enabled" {
+  description = "Whether changedetection.io remains managed in this layer. Set false to reclaim the LXC for FirbLab v2."
+  type        = bool
+  default     = false
+}
+
 # ---------------------------------------------------------
 # changedetection.io (LXC) — lab-03, Services VLAN 20
 # ---------------------------------------------------------
@@ -631,6 +643,12 @@ variable "changedetection_ip_address" {
   description = "Static IP address for changedetection.io in CIDR notation"
   type        = string
   default     = "10.0.20.17/24"
+}
+
+variable "actualbudget_enabled" {
+  description = "Whether Actual Budget remains managed in this layer. Set false to reclaim the LXC for FirbLab v2."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------
@@ -730,6 +748,12 @@ variable "traefik_proxy_gateway" {
   description = "Gateway for Traefik proxy on Management VLAN 10"
   type        = string
   default     = "10.0.10.1"
+}
+
+variable "vaultwarden_enabled" {
+  description = "Whether Vaultwarden remains managed in this layer. Set false to reclaim the LXC for FirbLab v2."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------
@@ -1012,6 +1036,12 @@ variable "war_name" {
   description = "Hostname for WAR platform VM"
   type        = string
   default     = "war"
+}
+
+variable "war_enabled" {
+  description = "Whether the WAR platform remains managed in this layer. Set false to reclaim the VM for FirbLab v2."
+  type        = bool
+  default     = false
 }
 
 variable "war_proxmox_node" {

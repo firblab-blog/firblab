@@ -218,28 +218,28 @@ output "pbs_ssh_private_key_path" {
 
 output "patchmon_vm_id" {
   description = "Proxmox VM ID for PatchMon"
-  value       = module.patchmon.vm_id
+  value       = var.patchmon_enabled ? module.patchmon[0].vm_id : null
 }
 
 output "patchmon_ipv4_addresses" {
   description = "IPv4 addresses assigned to PatchMon"
-  value       = module.patchmon.ipv4_addresses
+  value       = var.patchmon_enabled ? module.patchmon[0].ipv4_addresses : []
 }
 
 output "patchmon_ssh_private_key" {
   description = "SSH private key for PatchMon"
-  value       = module.patchmon.ssh_private_key
+  value       = var.patchmon_enabled ? module.patchmon[0].ssh_private_key : null
   sensitive   = true
 }
 
 output "patchmon_ssh_public_key" {
   description = "SSH public key for PatchMon"
-  value       = module.patchmon.ssh_public_key
+  value       = var.patchmon_enabled ? module.patchmon[0].ssh_public_key : null
 }
 
 output "patchmon_ssh_private_key_path" {
   description = "Path to the SSH private key for PatchMon"
-  value       = module.patchmon.ssh_private_key_path
+  value       = var.patchmon_enabled ? module.patchmon[0].ssh_private_key_path : null
 }
 
 # ---------------------------------------------------------
@@ -248,28 +248,28 @@ output "patchmon_ssh_private_key_path" {
 
 output "changedetection_container_id" {
   description = "Proxmox container ID for changedetection.io"
-  value       = module.changedetection.container_id
+  value       = var.changedetection_enabled ? module.changedetection[0].container_id : null
 }
 
 output "changedetection_ipv4_addresses" {
   description = "IPv4 addresses assigned to changedetection.io"
-  value       = module.changedetection.ipv4_addresses
+  value       = var.changedetection_enabled ? module.changedetection[0].ipv4_addresses : []
 }
 
 output "changedetection_ssh_private_key" {
   description = "SSH private key for changedetection.io"
-  value       = module.changedetection.ssh_private_key
+  value       = var.changedetection_enabled ? module.changedetection[0].ssh_private_key : null
   sensitive   = true
 }
 
 output "changedetection_ssh_public_key" {
   description = "SSH public key for changedetection.io"
-  value       = module.changedetection.ssh_public_key
+  value       = var.changedetection_enabled ? module.changedetection[0].ssh_public_key : null
 }
 
 output "changedetection_ssh_private_key_path" {
   description = "Path to the SSH private key for changedetection.io"
-  value       = module.changedetection.ssh_private_key_path
+  value       = var.changedetection_enabled ? module.changedetection[0].ssh_private_key_path : null
 }
 
 # ---------------------------------------------------------
@@ -278,28 +278,28 @@ output "changedetection_ssh_private_key_path" {
 
 output "actualbudget_container_id" {
   description = "Proxmox container ID for Actual Budget"
-  value       = module.actualbudget.container_id
+  value       = var.actualbudget_enabled ? module.actualbudget[0].container_id : null
 }
 
 output "actualbudget_ipv4_addresses" {
   description = "IPv4 addresses assigned to Actual Budget"
-  value       = module.actualbudget.ipv4_addresses
+  value       = var.actualbudget_enabled ? module.actualbudget[0].ipv4_addresses : []
 }
 
 output "actualbudget_ssh_private_key" {
   description = "SSH private key for Actual Budget"
-  value       = module.actualbudget.ssh_private_key
+  value       = var.actualbudget_enabled ? module.actualbudget[0].ssh_private_key : null
   sensitive   = true
 }
 
 output "actualbudget_ssh_public_key" {
   description = "SSH public key for Actual Budget"
-  value       = module.actualbudget.ssh_public_key
+  value       = var.actualbudget_enabled ? module.actualbudget[0].ssh_public_key : null
 }
 
 output "actualbudget_ssh_private_key_path" {
   description = "Path to the SSH private key for Actual Budget"
-  value       = module.actualbudget.ssh_private_key_path
+  value       = var.actualbudget_enabled ? module.actualbudget[0].ssh_private_key_path : null
 }
 
 # ---------------------------------------------------------

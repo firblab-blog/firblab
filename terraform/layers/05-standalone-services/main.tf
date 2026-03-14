@@ -457,6 +457,7 @@ module "authentik" {
 
 module "patchmon" {
   source = "../../modules/proxmox-vm/"
+  count  = var.patchmon_enabled ? 1 : 0
 
   # Identity
   name        = var.patchmon_name
@@ -505,6 +506,7 @@ module "patchmon" {
 
 module "changedetection" {
   source = "../../modules/proxmox-lxc/"
+  count  = var.changedetection_enabled ? 1 : 0
 
   # Identity
   name        = var.changedetection_name
@@ -550,6 +552,7 @@ module "changedetection" {
 
 module "actualbudget" {
   source = "../../modules/proxmox-lxc/"
+  count  = var.actualbudget_enabled ? 1 : 0
 
   # Identity
   name        = var.actualbudget_name
@@ -648,6 +651,7 @@ module "traefik_proxy" {
 
 module "vaultwarden" {
   source = "../../modules/proxmox-lxc/"
+  count  = var.vaultwarden_enabled ? 1 : 0
 
   # Identity
   name        = var.vaultwarden_name

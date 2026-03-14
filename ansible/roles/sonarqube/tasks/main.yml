@@ -120,6 +120,31 @@
   tags:
     - deploy
 
+# ---------------------------------------------------------------------------
+# Elasticsearch Data Cleanup (safe on version change)
+# ---------------------------------------------------------------------------
+# SonarQube bundles Elasticsearch internally. ES refuses to start if its data
+# directory was written by a newer version (cannot downgrade). This happens
+# during stepped upgrades (e.g., 9.9 → 25.12 → 26.3) if a higher version
+# ran first. The ES index is always rebuildable from PostgreSQL — SonarQube
+# re-indexes on startup. Only delete if the compose file changed (image swap).
+- name: Stop SonarQube before ES data cleanup
+  ansible.builtin.command:
+    cmd: docker compose down
+    chdir: "{{ sonarqube_install_dir }}"
+  when: compose_changed.changed | default(false)
+  changed_when: true
+  tags:
+    - deploy
+
+- name: Remove Elasticsearch data directory on image change
+  ansible.builtin.file:
+    path: "{{ sonarqube_install_dir }}/data/es8"
+    state: absent
+  when: compose_changed.changed | default(false)
+  tags:
+    - deploy
+
 - name: Start SonarQube containers
   ansible.builtin.command:
     cmd: >-
@@ -172,10 +197,13 @@
 # Admin Password Change (idempotent)
 # ---------------------------------------------------------------------------
 # SonarQube ships with admin/admin. Change to the Vault-managed password on
-# every run (idempotent — SonarQube returns 200 or 401 if already changed).
-# We try current password first; if that returns 401 the password was already
-# changed, which is the desired state.
-- name: Change SonarQube admin password
+# every run. Handles three states:
+#   200/204 — password changed successfully
+#   401/403 — already using the Vault password (desired state)
+#   400     — password policy violation or new password == old password
+# If auth with admin_password_current fails (401), we try admin_password
+# as both auth and previousPassword (already changed from a prior run).
+- name: Change SonarQube admin password (try current/factory password)
   ansible.builtin.uri:
     url: "http://localhost:{{ sonarqube_port }}/api/users/change_password"
     method: POST
@@ -187,7 +215,8 @@
       login: admin
       password: "{{ sonarqube_admin_password }}"
       previousPassword: "{{ sonarqube_admin_password_current }}"
-    status_code: [200, 204, 401, 403]
+    status_code: [200, 204, 400, 401, 403]
+    return_content: true
   register: sonarqube_password_change
   no_log: true
   when: sonarqube_admin_password | length > 0
@@ -195,11 +224,43 @@
     - configure
     - admin
 
+# If the factory/current password auth returned 401, the password was already
+# changed to admin_password in a prior run. Verify by authing with it.
+- name: Verify admin password already set (current password returned 401)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ sonarqube_port }}/api/authentication/validate"
+    method: GET
+    user: admin
+    password: "{{ sonarqube_admin_password }}"
+    force_basic_auth: true
+    status_code: [200]
+    return_content: true
+  register: sonarqube_password_verify
+  no_log: true
+  failed_when: >-
+    sonarqube_password_verify.status != 200
+    or not (sonarqube_password_verify.content | from_json).valid
+  when:
+    - sonarqube_admin_password | length > 0
+    - sonarqube_password_change is defined
+    - sonarqube_password_change.status in [401, 403]
+  tags:
+    - configure
+    - admin
+
 - name: Report admin password change result
   ansible.builtin.debug:
     msg: >-
-      Admin password change: {{ 'updated successfully' if sonarqube_password_change.status in [200, 204]
-      else 'already changed (401/403 = already using new password)' }}
+      Admin password change:
+      {% if sonarqube_password_change.status in [200, 204] %}
+      updated successfully
+      {% elif sonarqube_password_change.status in [401, 403] %}
+      already using Vault password (verified={{ sonarqube_password_verify.status | default('skipped') }})
+      {% elif sonarqube_password_change.status == 400 %}
+      FAILED (400) — possible causes: password policy violation (min 12 chars,
+      complexity requirements), or new password same as old. Response:
+      {{ sonarqube_password_change.content | default('no response body') }}
+      {% endif %}
   when:
     - sonarqube_admin_password | length > 0
     - sonarqube_password_change is defined

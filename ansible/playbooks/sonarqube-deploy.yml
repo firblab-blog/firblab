@@ -190,10 +190,61 @@
 
   post_tasks:
     # -----------------------------------------------------------------
+    # Post-deploy: Determine active admin password for API calls
+    # -----------------------------------------------------------------
+    # Password is the Vault password if:
+    #   - password change succeeded (200/204), OR
+    #   - password change returned 401/403 and verify confirmed Vault
+    #     password works (already changed from a prior run)
+    # Otherwise it's still the factory/current password.
+    # -----------------------------------------------------------------
+    - name: Determine if Vault password is active
+      ansible.builtin.set_fact:
+        _sonarqube_vault_pw_active: >-
+          {{ sonarqube_password_change is defined and (
+               sonarqube_password_change.status in [200, 204]
+               or (sonarqube_password_change.status in [401, 403]
+                   and sonarqube_password_verify is defined
+                   and sonarqube_password_verify.status == 200)) }}
+      tags:
+        - always
+
+    - name: Set active admin password for API calls
+      ansible.builtin.set_fact:
+        _sonarqube_api_password: "{{ sonarqube_admin_password if (_sonarqube_vault_pw_active | bool) else sonarqube_admin_password_current }}"
+      no_log: true
+      tags:
+        - always
+
+    - name: Debug active password source
+      ansible.builtin.debug:
+        msg: "Using {{ 'Vault' if (_sonarqube_vault_pw_active | bool) else 'factory/current' }} password for API calls (pw_change_status={{ sonarqube_password_change.status | default('undef') }}, verify_status={{ sonarqube_password_verify.status | default('undef') }})"
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Post-deploy: Wait for SonarQube after any handler restarts
+    # -----------------------------------------------------------------
+    - name: Wait for SonarQube to be ready (post-restart)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/system/status"
+        method: GET
+        status_code: [200]
+        return_content: true
+      register: _sq_post_status
+      until: >-
+        _sq_post_status.status == 200
+        and (_sq_post_status.content | from_json).status == 'UP'
+      retries: 36
+      delay: 10
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
     # Post-deploy: Configure GitLab ALM integration via SonarQube API
     # -----------------------------------------------------------------
     # Idempotent: checks if ALM setting already exists before creating.
-    # Uses the admin password from Vault for API authentication.
+    # Uses the active admin password for API authentication.
     # -----------------------------------------------------------------
 
     - name: Check if GitLab ALM setting exists
@@ -201,7 +252,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/list"
         method: GET
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         status_code: [200]
         return_content: true
@@ -214,7 +265,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/create_gitlab"
         method: POST
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         body_format: form-urlencoded
         body:
@@ -235,7 +286,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/update_gitlab"
         method: POST
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         body_format: form-urlencoded
         body:
@@ -278,7 +329,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/search"
         method: GET
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         status_code: [200]
         return_content: true
@@ -294,7 +345,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/revoke"
         method: POST
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         body_format: form-urlencoded
         body:
@@ -315,7 +366,7 @@
         url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/generate"
         method: POST
         user: admin
-        password: "{{ sonarqube_admin_password }}"
+        password: "{{ _sonarqube_api_password }}"
         force_basic_auth: true
         body_format: form-urlencoded
         body:

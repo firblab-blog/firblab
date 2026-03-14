@@ -5,9 +5,10 @@
 # Override in playbook vars or group_vars as needed.
 # =============================================================================
 
-# SonarQube image — use LTS community edition
-# https://hub.docker.com/_/sonarqube/tags?name=lts-community
-sonarqube_image: "sonarqube:lts-community"
+# SonarQube image — pinned to exact build tag for reproducibility
+# LTA tags are paid-only; Community Edition uses <version>-community tags.
+# https://hub.docker.com/_/sonarqube/tags?name=community
+sonarqube_image: "sonarqube:26.3.0.120487-community"
 
 # PostgreSQL image
 sonarqube_pg_image: "postgres:16-alpine"

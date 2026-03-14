@@ -14,7 +14,7 @@
 # =============================================================================
 
 resource "vault_kv_secret_v2" "rke2_server_ssh" {
-  for_each = module.rke2_cluster.server_ssh_keys
+  for_each = var.rke2_enabled ? module.rke2_cluster[0].server_ssh_keys : {}
 
   mount = "secret"
   name  = "compute/${each.key}"
@@ -25,7 +25,7 @@ resource "vault_kv_secret_v2" "rke2_server_ssh" {
 }
 
 resource "vault_kv_secret_v2" "rke2_agent_ssh" {
-  for_each = module.rke2_cluster.agent_ssh_keys
+  for_each = var.rke2_enabled ? module.rke2_cluster[0].agent_ssh_keys : {}
 
   mount = "secret"
   name  = "compute/${each.key}"
