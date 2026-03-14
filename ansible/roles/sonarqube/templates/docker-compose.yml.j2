@@ -1,0 +1,61 @@
+# =============================================================================
+# SonarQube CE Docker Compose — FirbLab
+# =============================================================================
+# Managed by Ansible — do not edit manually.
+# Stack: SonarQube LTS Community + PostgreSQL 16
+# =============================================================================
+
+name: sonarqube
+
+services:
+  db:
+    image: {{ sonarqube_pg_image }}
+    container_name: sonarqube-db
+    restart: unless-stopped
+    env_file: {{ sonarqube_install_dir }}/config/postgres.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - sonarqube-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ sonarqube_db_user }} -d {{ sonarqube_db_name }}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  sonarqube:
+    image: {{ sonarqube_image }}
+    container_name: sonarqube
+    restart: unless-stopped
+    env_file: {{ sonarqube_install_dir }}/config/sonarqube.env
+    ports:
+      - "{{ sonarqube_port }}:9000"
+    volumes:
+      - {{ sonarqube_install_dir }}/data:/opt/sonarqube/data
+      - {{ sonarqube_install_dir }}/logs:/opt/sonarqube/logs
+      - {{ sonarqube_install_dir }}/extensions:/opt/sonarqube/extensions
+      - {{ sonarqube_install_dir }}/temp:/opt/sonarqube/temp
+    networks:
+      - sonarqube-internal
+    depends_on:
+      db:
+        condition: service_healthy
+    # SonarQube runs as UID 1000 (sonarqube user in the image)
+    # vm.max_map_count is set at host level via sysctl — no privileged container needed
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  postgres_data:
+
+networks:
+  sonarqube-internal:
+    driver: bridge

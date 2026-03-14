@@ -1,0 +1,208 @@
+---
+# =============================================================================
+# SonarQube CE Role - Tasks
+# =============================================================================
+# Deploys SonarQube CE + PostgreSQL via Docker Compose on a standalone VM.
+#
+# Prerequisites:
+#   - docker role applied (Docker CE installed)
+#   - Vault secrets set in play vars:
+#       sonarqube_db_password
+#       sonarqube_admin_password
+#       sonarqube_gitlab_oauth_client_id / _secret
+#       sonarqube_gitlab_alm_token
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flush pending handlers from earlier roles (common, hardening, docker)
+# ---------------------------------------------------------------------------
+# The docker role's daemon.json change triggers "Restart docker". If this
+# fires AFTER we start SonarQube containers, it will kill them.
+- name: Flush handlers from earlier roles before starting containers
+  ansible.builtin.meta: flush_handlers
+
+# ---------------------------------------------------------------------------
+# Kernel: vm.max_map_count (required by Elasticsearch inside SonarQube)
+# ---------------------------------------------------------------------------
+# Elasticsearch requires vm.max_map_count >= 524288. On this standalone VM
+# we set it persistently via sysctl.d and apply it immediately.
+- name: Set vm.max_map_count persistently for Elasticsearch
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "524288"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-sonarqube.conf
+  tags:
+    - configure
+    - sysctl
+
+# ---------------------------------------------------------------------------
+# Directories
+# ---------------------------------------------------------------------------
+- name: Create SonarQube directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop:
+    - path: "{{ sonarqube_install_dir }}"
+    - path: "{{ sonarqube_install_dir }}/config"
+      mode: "0750"
+    - path: "{{ sonarqube_install_dir }}/data"
+      owner: "1000"
+      group: "1000"
+    - path: "{{ sonarqube_install_dir }}/logs"
+      owner: "1000"
+      group: "1000"
+    - path: "{{ sonarqube_install_dir }}/extensions"
+      owner: "1000"
+      group: "1000"
+    - path: "{{ sonarqube_install_dir }}/temp"
+      owner: "1000"
+      group: "1000"
+  tags:
+    - configure
+    - directories
+
+# ---------------------------------------------------------------------------
+# Configuration Files
+# ---------------------------------------------------------------------------
+- name: Template SonarQube environment file
+  ansible.builtin.template:
+    src: sonarqube.env.j2
+    dest: "{{ sonarqube_install_dir }}/config/sonarqube.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: sonarqube_env_changed
+  notify: Restart sonarqube
+  tags:
+    - configure
+
+- name: Template PostgreSQL environment file
+  ansible.builtin.template:
+    src: postgres.env.j2
+    dest: "{{ sonarqube_install_dir }}/config/postgres.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: postgres_env_changed
+  notify: Restart sonarqube
+  tags:
+    - configure
+
+- name: Template SonarQube Docker Compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ sonarqube_install_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: compose_changed
+  notify: Restart sonarqube
+  tags:
+    - configure
+
+# ---------------------------------------------------------------------------
+# Pull and Start
+# ---------------------------------------------------------------------------
+- name: Pull SonarQube images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ sonarqube_install_dir }}"
+  register: sonarqube_pull_result
+  changed_when: "'Pull complete' in sonarqube_pull_result.stdout or 'Downloaded' in sonarqube_pull_result.stderr"
+  tags:
+    - deploy
+
+- name: Start SonarQube containers
+  ansible.builtin.command:
+    cmd: >-
+      docker compose up -d
+      {{ '--force-recreate' if (sonarqube_env_changed.changed | default(false)
+         or postgres_env_changed.changed | default(false)
+         or compose_changed.changed | default(false)) else '' }}
+    chdir: "{{ sonarqube_install_dir }}"
+  register: sonarqube_up_result
+  changed_when: "'Started' in sonarqube_up_result.stderr or 'Creating' in sonarqube_up_result.stderr or 'Recreat' in sonarqube_up_result.stderr"
+  tags:
+    - deploy
+
+# ---------------------------------------------------------------------------
+# Health Check — wait for SonarQube to finish initializing
+# ---------------------------------------------------------------------------
+# SonarQube CE + Elasticsearch initialization takes 60-120 seconds on first
+# boot while it runs DB migrations. Subsequent starts are much faster.
+- name: Wait for SonarQube to be healthy (status=UP)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ sonarqube_port }}/api/system/status"
+    method: GET
+    status_code: [200]
+    return_content: true
+  register: sonarqube_status
+  retries: 36
+  delay: 10
+  until: >-
+    sonarqube_status.status is defined
+    and sonarqube_status.status == 200
+    and (sonarqube_status.content | from_json).status == 'UP'
+  failed_when: false
+  tags:
+    - verify
+
+- name: Fail if SonarQube never reached UP status
+  ansible.builtin.fail:
+    msg: >-
+      SonarQube failed to reach UP status after 360 seconds.
+      Last response: {{ sonarqube_status.content | default('no response') }}
+      Check logs: docker compose -f {{ sonarqube_install_dir }}/docker-compose.yml logs --tail=50
+  when: >-
+    sonarqube_status.status is not defined
+    or sonarqube_status.status != 200
+    or (sonarqube_status.content | from_json).status != 'UP'
+  tags:
+    - verify
+
+# ---------------------------------------------------------------------------
+# Admin Password Change (idempotent)
+# ---------------------------------------------------------------------------
+# SonarQube ships with admin/admin. Change to the Vault-managed password on
+# every run (idempotent — SonarQube returns 200 or 401 if already changed).
+# We try current password first; if that returns 401 the password was already
+# changed, which is the desired state.
+- name: Change SonarQube admin password
+  ansible.builtin.uri:
+    url: "http://localhost:{{ sonarqube_port }}/api/users/change_password"
+    method: POST
+    user: admin
+    password: "{{ sonarqube_admin_password_current }}"
+    force_basic_auth: true
+    body_format: form-urlencoded
+    body:
+      login: admin
+      password: "{{ sonarqube_admin_password }}"
+      previousPassword: "{{ sonarqube_admin_password_current }}"
+    status_code: [200, 204, 401, 403]
+  register: sonarqube_password_change
+  no_log: true
+  when: sonarqube_admin_password | length > 0
+  tags:
+    - configure
+    - admin
+
+- name: Report admin password change result
+  ansible.builtin.debug:
+    msg: >-
+      Admin password change: {{ 'updated successfully' if sonarqube_password_change.status in [200, 204]
+      else 'already changed (401/403 = already using new password)' }}
+  when:
+    - sonarqube_admin_password | length > 0
+    - sonarqube_password_change is defined
+  tags:
+    - configure
+    - admin

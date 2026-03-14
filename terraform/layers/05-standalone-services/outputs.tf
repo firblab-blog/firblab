@@ -391,3 +391,33 @@ output "gotify_ssh_private_key_path" {
   description = "Path to the SSH private key for internal Gotify"
   value       = module.gotify.ssh_private_key_path
 }
+
+# ---------------------------------------------------------
+# SonarQube Outputs
+# ---------------------------------------------------------
+
+output "sonarqube_vm_id" {
+  description = "Proxmox VM ID for SonarQube"
+  value       = module.sonarqube.vm_id
+}
+
+output "sonarqube_ipv4_addresses" {
+  description = "IPv4 addresses assigned to SonarQube"
+  value       = module.sonarqube.ipv4_addresses
+}
+
+output "sonarqube_ssh_private_key" {
+  description = "SSH private key for SonarQube"
+  value       = module.sonarqube.ssh_private_key
+  sensitive   = true
+}
+
+output "sonarqube_ssh_public_key" {
+  description = "SSH public key for SonarQube"
+  value       = module.sonarqube.ssh_public_key
+}
+
+output "sonarqube_ssh_private_key_path" {
+  description = "Path to the SSH private key for SonarQube"
+  value       = module.sonarqube.ssh_private_key_path
+}

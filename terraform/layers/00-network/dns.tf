@@ -37,7 +37,7 @@ locals {
     "argocd",      # K8s platform (GitOps UI)
     "gitlab-test", # K8s workload (GitLab CE Helm testing instance)
     "wazuh",       # K8s workload (Wazuh SIEM dashboard)
-    "sonarqube",   # K8s workload (static code analysis, GitLab ALM integration)
+    # sonarqube moved to standalone VM (Layer 05) — see proxy_services below
   ])
 
   # K3s workloads — K3s Traefik (Ingress in k8s/k3s-platform/)
@@ -90,6 +90,8 @@ locals {
     "search",        # SearXNG metasearch engine (ForwardAuth)
     # WAR Platform (lab-01, Services VLAN 20)
     "war",           # WAR multi-agent adjudication platform (ForwardAuth)
+    # SonarQube CE (lab-01, Services VLAN 20) — moved from K8s to standalone VM
+    "sonarqube",     # Static code analysis, GitLab ALM integration (ForwardAuth)
     # Proxmox node UIs (Management VLAN 10 — self-signed certs, proxied for valid TLS)
     "pve-01",        # lab-01 (i9-12900K, main compute)
     "pve-02",        # lab-02 (N100, pilot node)

@@ -336,3 +336,14 @@ traefik_backends:
     forwardauth: true
     insecure_backend: false
     websocket: true               # WAR may use WebSocket for real-time agent communication
+  # -------------------------------------------------------------------------
+  # SonarQube CE (lab-01, Services VLAN 20, VM ID 5045)
+  # ForwardAuth gates access via Authentik. GitLab OAuth handles SonarQube
+  # account creation/linking after the Authentik session is established.
+  # -------------------------------------------------------------------------
+  sonarqube:
+    subdomain: sonarqube
+    backend_url: "http://10.0.20.18:9000"
+    forwardauth: true
+    insecure_backend: false
+    websocket: false

@@ -427,6 +427,15 @@ locals {
       meta_icon     = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/uptime-kuma.svg"
     }
 
+    # SonarQube CE — static code analysis, GitLab ALM integration
+    # No native OIDC (CE 26.x dropped it). ForwardAuth gates access.
+    sonarqube = {
+      name          = "SonarQube"
+      external_host = "https://sonarqube.home.example-lab.org"
+      app_group     = "Infrastructure"
+      meta_icon     = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/sonarqube.svg"
+    }
+
   }
 
   # ---------------------------------------------------------------------------

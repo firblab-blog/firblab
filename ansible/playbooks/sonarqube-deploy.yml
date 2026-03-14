@@ -1,0 +1,219 @@
+---
+# =============================================================================
+# SonarQube CE Deployment Playbook
+# =============================================================================
+# Deploys SonarQube Community Edition with PostgreSQL via Docker Compose on a
+# CIS-hardened standalone VM (Services VLAN 20, 10.0.20.18).
+#
+# SonarQube is moved from K8s (Layer 04) to standalone VM (Layer 05) due to:
+#   - K8s PSA/initSysctl privileged container conflicts
+#   - Longhorn CSI RWO multi-attach issues on rke2-agent-2
+#   - Heavy JVM + Elasticsearch workload better suited to dedicated VM
+#
+# After deployment, changes the admin password from the Vault-managed secret.
+# GitLab OAuth + ALM integration is configured via sonarqube.env (from Vault).
+#
+# Vault path: secret/services/sonarqube
+# Keys used:
+#   admin_password, admin_password_current, postgres_password,
+#   gitlab_oauth_client_id, gitlab_oauth_client_secret, gitlab_alm_token
+#
+# Prerequisites:
+#   - SonarQube VM provisioned by Terraform Layer 05:
+#       terraform -chdir=terraform/layers/05-standalone-services \
+#         apply -target=module.sonarqube -target=vault_kv_secret_v2.sonarqube_ssh
+#   - SSH key available at .secrets/sonarqube_ssh_key (output of Terraform)
+#   - Vault secrets seeded at secret/services/sonarqube (Layer 02-vault-config)
+#   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
+#
+# Usage:
+#   export VAULT_ADDR=https://10.0.10.10:8200
+#   export VAULT_TOKEN=hvs.xxxxx
+#   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
+#   ansible-playbook -i inventory/hosts.yml playbooks/sonarqube-deploy.yml
+#
+# Tags:
+#   ansible-playbook ... --tags common      # Only baseline system config
+#   ansible-playbook ... --tags hardening   # Only CIS L1 hardening
+#   ansible-playbook ... --tags docker      # Only Docker installation
+#   ansible-playbook ... --tags sonarqube   # Only SonarQube app deployment
+#   ansible-playbook ... --tags verify      # Only health check
+# =============================================================================
+
+- name: Deploy SonarQube CE
+  hosts: sonarqube
+  become: true
+  gather_facts: true
+  serial: 1
+
+  pre_tasks:
+    - name: Wait for host to be reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Gather system facts
+      ansible.builtin.setup:
+
+    # -----------------------------------------------------------------
+    # Secret Management: Read from Vault (seeded by Terraform Layer 02)
+    # -----------------------------------------------------------------
+    - name: Read SonarQube secrets from Vault
+      ansible.builtin.command:
+        cmd: vault kv get -mount=secret -format=json services/sonarqube
+      register: vault_sonarqube_read
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: sonarqube_db_password is not defined
+      tags:
+        - always
+
+    - name: Parse SonarQube Vault response
+      ansible.builtin.set_fact:
+        _sonarqube_vault_data: "{{ (vault_sonarqube_read.stdout | from_json).data.data }}"
+      when:
+        - sonarqube_db_password is not defined
+        - vault_sonarqube_read.rc is defined
+        - vault_sonarqube_read.rc == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Set secrets from Vault
+      ansible.builtin.set_fact:
+        # postgres_password may not exist if Vault was only seeded by Layer 03
+        # (OAuth + ALM only). We handle the missing key with a default('') and
+        # generate + patch a new password below if it's absent.
+        sonarqube_db_password: "{{ _sonarqube_vault_data.postgres_password | default('') }}"
+        sonarqube_admin_password: "{{ _sonarqube_vault_data.admin_password | default('') }}"
+        sonarqube_admin_password_current: "{{ _sonarqube_vault_data.admin_password_current | default('admin') }}"
+        sonarqube_gitlab_oauth_client_id: "{{ _sonarqube_vault_data.gitlab_oauth_client_id | default('') }}"
+        sonarqube_gitlab_oauth_client_secret: "{{ _sonarqube_vault_data.gitlab_oauth_client_secret | default('') }}"
+        sonarqube_gitlab_alm_token: "{{ _sonarqube_vault_data.gitlab_alm_token | default('') }}"
+      when:
+        - sonarqube_db_password is not defined
+        - _sonarqube_vault_data is defined
+      no_log: true
+      tags:
+        - always
+
+    # -----------------------------------------------------------------
+    # Bootstrap: generate postgres_password if not yet in Vault
+    # -----------------------------------------------------------------
+    # The Vault secret at services/sonarqube is seeded by Terraform Layer 03
+    # with OAuth + ALM keys only. postgres_password is a standalone-VM concern
+    # and is generated here on first run, then patched back to Vault so
+    # subsequent runs (idempotent) read it back without regenerating.
+    # -----------------------------------------------------------------
+    - name: Generate postgres password (first run — not yet in Vault)
+      ansible.builtin.set_fact:
+        sonarqube_db_password: "{{ lookup('password', '/dev/null chars=ascii_letters,digits length=32') }}"
+      when:
+        - sonarqube_db_password is not defined or sonarqube_db_password | length == 0
+      no_log: true
+      tags:
+        - always
+
+    - name: Patch postgres_password into Vault (first run only)
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - patch
+          - -mount=secret
+          - services/sonarqube
+          - "postgres_password={{ sonarqube_db_password }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: true
+      when:
+        - _sonarqube_vault_data is defined
+        - _sonarqube_vault_data.postgres_password | default('') | length == 0
+      tags:
+        - always
+
+    - name: Validate required SonarQube secrets are available
+      ansible.builtin.assert:
+        that:
+          - sonarqube_db_password is defined
+          - sonarqube_db_password | length > 0
+          - sonarqube_admin_password is defined
+          - sonarqube_admin_password | length > 0
+          - sonarqube_gitlab_oauth_client_id is defined
+          - sonarqube_gitlab_oauth_client_id | length > 0
+          - sonarqube_gitlab_oauth_client_secret is defined
+          - sonarqube_gitlab_oauth_client_secret | length > 0
+          - sonarqube_gitlab_alm_token is defined
+          - sonarqube_gitlab_alm_token | length > 0
+        fail_msg: >-
+          SonarQube secrets missing from Vault. Verify Layer 03 has been applied
+          (creates admin_password, gitlab_oauth_client_id/secret, gitlab_alm_token):
+            terraform -chdir=terraform/layers/03-gitlab-config apply
+          Then verify:
+            vault kv get -mount=secret services/sonarqube
+          Expected keys: admin_password, admin_password_current,
+            gitlab_oauth_client_id, gitlab_oauth_client_secret, gitlab_alm_token.
+          postgres_password is auto-generated and patched by this playbook on first run.
+      tags:
+        - always
+
+    - name: Display deployment info
+      ansible.builtin.debug:
+        msg: >
+          Deploying SonarQube CE on {{ inventory_hostname }}
+          (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
+          ip={{ ansible_host }})
+
+  roles:
+    # Baseline system config + firewall (packages, NTP, fail2ban, SSH, UFW)
+    - role: common
+      tags:
+        - common
+        - firewall
+
+    # CIS L1 hardening (VM, not LXC — has its own kernel)
+    - role: hardening
+      tags:
+        - hardening
+
+    # Docker CE
+    - role: docker
+      tags:
+        - docker
+
+    # SonarQube CE (Docker Compose: SonarQube LTS + PostgreSQL)
+    - role: sonarqube
+      tags:
+        - sonarqube
+
+  post_tasks:
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "SonarQube CE Deployment Complete"
+          - "=========================================="
+          - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "URL: http://{{ ansible_host }}:9000/"
+          - "DNS: https://sonarqube.home.example-lab.org/"
+          - ""
+          - "GitLab OAuth: enabled ({{ sonarqube_gitlab_url | default('https://gitlab.home.example-lab.org') }})"
+          - "GitLab ALM: configured (token in Vault)"
+          - ""
+          - "Secrets: vault kv get -mount=secret services/sonarqube"
+          - ""
+          - "Management:"
+          - "  docker compose -f {{ sonarqube_install_dir | default('/opt/sonarqube') }}/docker-compose.yml ps"
+          - "  docker compose -f {{ sonarqube_install_dir | default('/opt/sonarqube') }}/docker-compose.yml logs -f"
+          - ""
+          - "Next steps after deployment:"
+          - "  1. Log in at https://sonarqube.home.example-lab.org as admin"
+          - "  2. Administration → Security → Users → admin → Tokens → create 'ci-analysis' token"
+          - "  3. vault kv patch -mount=secret services/sonarqube analysis_token=<token>"
+          - "  4. In Layer 03: set sonarqube_ci_ready=true → terraform apply"
+          - "     (adds SONAR_HOST_URL + SONAR_TOKEN to GitLab CI variables)"
+          - "=========================================="
+      tags:
+        - verify

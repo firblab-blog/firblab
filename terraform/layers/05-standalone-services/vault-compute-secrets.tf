@@ -136,3 +136,12 @@ resource "vault_kv_secret_v2" "war_ssh" {
     ssh_private_key = module.war.ssh_private_key
   })
 }
+
+resource "vault_kv_secret_v2" "sonarqube_ssh" {
+  mount = "secret"
+  name  = "compute/sonarqube"
+
+  data_json = jsonencode({
+    ssh_private_key = module.sonarqube.ssh_private_key
+  })
+}

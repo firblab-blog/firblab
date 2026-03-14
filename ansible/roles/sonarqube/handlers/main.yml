@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# SonarQube Role Handlers
+# =============================================================================
+
+- name: Restart sonarqube
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ sonarqube_install_dir }}"

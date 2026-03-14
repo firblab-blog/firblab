@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# SonarQube CE Role - Default Variables
+# =============================================================================
+# Override in playbook vars or group_vars as needed.
+# =============================================================================
+
+# SonarQube image — use LTS community edition
+# https://hub.docker.com/_/sonarqube/tags?name=lts-community
+sonarqube_image: "sonarqube:lts-community"
+
+# PostgreSQL image
+sonarqube_pg_image: "postgres:16-alpine"
+
+# Install directory
+sonarqube_install_dir: /opt/sonarqube
+
+# Port exposed on the host
+sonarqube_port: 9000
+
+# Database — non-secret structural config only
+# sonarqube_db_password is NOT defined here — it comes from Vault via the deploy
+# playbook. Defining it (even as "") would cause the `is not defined` guard to
+# skip the Vault read. Only non-secret vars belong in defaults.
+sonarqube_db_name: sonarqube
+sonarqube_db_user: sonarqube
+
+# Admin credentials — injected from Vault by deploy playbook
+# sonarqube_admin_password: intentionally omitted (no default)
+# sonarqube_admin_password_current: intentionally omitted (read from Vault key)
+
+# GitLab OAuth + ALM — injected from Vault by deploy playbook
+# sonarqube_gitlab_oauth_client_id: intentionally omitted
+# sonarqube_gitlab_oauth_client_secret: intentionally omitted
+# sonarqube_gitlab_alm_token: intentionally omitted
+
+# JVM tuning — web process + CE process
+sonarqube_jvm_xms: "1g"
+sonarqube_jvm_xmx: "2g"
+sonarqube_ce_jvm_xms: "512m"
+sonarqube_ce_jvm_xmx: "1g"
+
+# Instance URLs
+sonarqube_base_url: "https://sonarqube.home.example-lab.org"
+sonarqube_gitlab_url: "https://gitlab.home.example-lab.org"
+
+# Timezone
+sonarqube_timezone: "America/Chicago"
