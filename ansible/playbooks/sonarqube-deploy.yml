@@ -198,14 +198,35 @@
     #     password works (already changed from a prior run)
     # Otherwise it's still the factory/current password.
     # -----------------------------------------------------------------
+    # When the password change task ran, use its result to determine which
+    # password is active. When it didn't run (e.g., --tags bootstrap), probe
+    # SonarQube directly to find out.
+    - name: Probe SonarQube with Vault password (when password change was skipped)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/authentication/validate"
+        method: GET
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        status_code: [200]
+        return_content: true
+      register: _sonarqube_vault_pw_probe
+      no_log: true
+      when: sonarqube_password_change is not defined
+      tags:
+        - always
+
     - name: Determine if Vault password is active
       ansible.builtin.set_fact:
         _sonarqube_vault_pw_active: >-
-          {{ sonarqube_password_change is defined and (
+          {{ (sonarqube_password_change is defined and (
                sonarqube_password_change.status in [200, 204]
                or (sonarqube_password_change.status in [401, 403]
                    and sonarqube_password_verify is defined
-                   and sonarqube_password_verify.status == 200)) }}
+                   and sonarqube_password_verify.status == 200)))
+             or (_sonarqube_vault_pw_probe is defined
+                 and _sonarqube_vault_pw_probe is not skipped
+                 and (_sonarqube_vault_pw_probe.content | default('{}') | from_json).valid | default(false)) }}
       tags:
         - always
 
@@ -218,7 +239,7 @@
 
     - name: Debug active password source
       ansible.builtin.debug:
-        msg: "Using {{ 'Vault' if (_sonarqube_vault_pw_active | bool) else 'factory/current' }} password for API calls (pw_change_status={{ sonarqube_password_change.status | default('undef') }}, verify_status={{ sonarqube_password_verify.status | default('undef') }})"
+        msg: "Using {{ 'Vault' if (_sonarqube_vault_pw_active | bool) else 'factory/current' }} password for API calls (pw_change_status={{ sonarqube_password_change.status | default('skipped') }}, verify_status={{ sonarqube_password_verify.status | default('skipped') }}, probe={{ (_sonarqube_vault_pw_probe.content | default('{}') | from_json).valid | default('skipped') }})"
       tags:
         - always
 
