@@ -937,7 +937,10 @@ resource "vault_kv_secret_v2" "sonarqube" {
 
 resource "gitlab_instance_variable" "sonar_host_url" {
   key       = "SONAR_HOST_URL"
-  value     = "https://sonarqube.home.example-lab.org"
+  # Use direct IP — GitLab Runner Docker executor containers cannot resolve
+  # internal DNS (sonarqube.home.example-lab.org). SonarQube listens on HTTP/9000
+  # and the Runner is on the same VLAN 20 (Services).
+  value     = "http://10.0.20.18:9000"
   protected = false
   masked    = false
 }
