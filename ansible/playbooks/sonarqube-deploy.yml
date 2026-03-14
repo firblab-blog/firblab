@@ -189,6 +189,180 @@
         - sonarqube
 
   post_tasks:
+    # -----------------------------------------------------------------
+    # Post-deploy: Configure GitLab ALM integration via SonarQube API
+    # -----------------------------------------------------------------
+    # Idempotent: checks if ALM setting already exists before creating.
+    # Uses the admin password from Vault for API authentication.
+    # -----------------------------------------------------------------
+
+    - name: Check if GitLab ALM setting exists
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/list"
+        method: GET
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        status_code: [200]
+        return_content: true
+      register: alm_settings_list
+      tags:
+        - bootstrap
+
+    - name: Create GitLab ALM integration
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/create_gitlab"
+        method: POST
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          key: gitlab
+          personalAccessToken: "{{ sonarqube_gitlab_alm_token }}"
+          url: "{{ sonarqube_gitlab_url }}"
+        status_code: [200, 204]
+      when: >-
+        (alm_settings_list.content | from_json).almSettings
+        | selectattr('key', 'equalto', 'gitlab')
+        | list | length == 0
+      no_log: true
+      tags:
+        - bootstrap
+
+    - name: Update GitLab ALM integration (if already exists)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/alm_settings/update_gitlab"
+        method: POST
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          key: gitlab
+          personalAccessToken: "{{ sonarqube_gitlab_alm_token }}"
+          url: "{{ sonarqube_gitlab_url }}"
+        status_code: [200, 204]
+      when: >-
+        (alm_settings_list.content | from_json).almSettings
+        | selectattr('key', 'equalto', 'gitlab')
+        | list | length > 0
+      no_log: true
+      tags:
+        - bootstrap
+
+    - name: Report GitLab ALM status
+      ansible.builtin.debug:
+        msg: >-
+          GitLab ALM integration: {{ 'created' if (alm_settings_list.content | from_json).almSettings
+          | selectattr('key', 'equalto', 'gitlab') | list | length == 0 else 'updated' }}
+          ({{ sonarqube_gitlab_url }})
+      tags:
+        - bootstrap
+
+    # -----------------------------------------------------------------
+    # Post-deploy: Create CI analysis token via SonarQube API
+    # -----------------------------------------------------------------
+    # Idempotent: checks if token already exists. If not, creates it
+    # and patches the value back to Vault for Layer 03 consumption.
+    # -----------------------------------------------------------------
+
+    - name: Check if ci-analysis token already in Vault
+      ansible.builtin.set_fact:
+        _sonarqube_analysis_token: "{{ _sonarqube_vault_data.analysis_token | default('') }}"
+      tags:
+        - bootstrap
+
+    - name: Check existing user tokens
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/search"
+        method: GET
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        status_code: [200]
+        return_content: true
+      register: user_tokens
+      tags:
+        - bootstrap
+
+    # Revoke stale ci-analysis token if it exists in SonarQube but NOT in
+    # Vault. This happens when a previous run created the token but failed
+    # to patch it back to Vault (the token value is only returned once).
+    - name: Revoke orphaned ci-analysis token (exists in SonarQube, missing from Vault)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/revoke"
+        method: POST
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          login: admin
+          name: ci-analysis
+        status_code: [200, 204]
+      when:
+        - _sonarqube_analysis_token | length == 0
+        - >-
+          (user_tokens.content | from_json).userTokens
+          | selectattr('name', 'equalto', 'ci-analysis')
+          | list | length > 0
+      tags:
+        - bootstrap
+
+    - name: Create ci-analysis token
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarqube_port }}/api/user_tokens/generate"
+        method: POST
+        user: admin
+        password: "{{ sonarqube_admin_password }}"
+        force_basic_auth: true
+        body_format: form-urlencoded
+        body:
+          name: ci-analysis
+          login: admin
+        status_code: [200]
+        return_content: true
+      register: ci_token_result
+      # Create when: no token in Vault (first run or after revoke above)
+      when: _sonarqube_analysis_token | length == 0
+      no_log: true
+      changed_when: ci_token_result.status == 200
+      tags:
+        - bootstrap
+
+    - name: Patch ci-analysis token to Vault
+      ansible.builtin.command:
+        argv:
+          - vault
+          - kv
+          - patch
+          - -mount=secret
+          - services/sonarqube
+          - "analysis_token={{ (ci_token_result.content | from_json).token }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      changed_when: true
+      when:
+        - ci_token_result is not skipped
+        - ci_token_result.content is defined
+      tags:
+        - bootstrap
+
+    - name: Report CI token status
+      ansible.builtin.debug:
+        msg: >-
+          CI analysis token: {{ 'created and stored in Vault at secret/services/sonarqube.analysis_token'
+          if (ci_token_result is not skipped and ci_token_result.content is defined)
+          else 'already in Vault (skipped)' }}.
+          Next: set sonarqube_ci_ready=true in Layer 03 and terraform apply.
+      tags:
+        - bootstrap
+
+    # -----------------------------------------------------------------
+    # Summary
+    # -----------------------------------------------------------------
     - name: Display deployment summary
       ansible.builtin.debug:
         msg:
@@ -196,24 +370,17 @@
           - "SonarQube CE Deployment Complete"
           - "=========================================="
           - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
-          - "URL: http://{{ ansible_host }}:9000/"
-          - "DNS: https://sonarqube.home.example-lab.org/"
+          - "URL: https://sonarqube.home.example-lab.org/"
           - ""
-          - "GitLab OAuth: enabled ({{ sonarqube_gitlab_url | default('https://gitlab.home.example-lab.org') }})"
-          - "GitLab ALM: configured (token in Vault)"
+          - "GitLab ALM: configured ({{ sonarqube_gitlab_url }})"
+          - "CI token: {{ 'created — stored in Vault' if ci_token_result is changed else 'already exists' }}"
           - ""
           - "Secrets: vault kv get -mount=secret services/sonarqube"
           - ""
-          - "Management:"
-          - "  docker compose -f {{ sonarqube_install_dir | default('/opt/sonarqube') }}/docker-compose.yml ps"
-          - "  docker compose -f {{ sonarqube_install_dir | default('/opt/sonarqube') }}/docker-compose.yml logs -f"
-          - ""
-          - "Next steps after deployment:"
-          - "  1. Log in at https://sonarqube.home.example-lab.org as admin"
-          - "  2. Administration → Security → Users → admin → Tokens → create 'ci-analysis' token"
-          - "  3. vault kv patch -mount=secret services/sonarqube analysis_token=<token>"
-          - "  4. In Layer 03: set sonarqube_ci_ready=true → terraform apply"
+          - "Remaining:"
+          - "  1. In Layer 03: set sonarqube_ci_ready=true → terraform apply"
           - "     (adds SONAR_HOST_URL + SONAR_TOKEN to GitLab CI variables)"
+          - "  2. Add sonar-scanner to a project's .gitlab-ci.yml and test"
           - "=========================================="
       tags:
         - verify
