@@ -97,11 +97,12 @@ securityContext:
 # ---------------------------------------------------------------------------
 # Init: vm.max_map_count (Elasticsearch requirement)
 # ---------------------------------------------------------------------------
-# Sets vm.max_map_count=262144 via privileged init container.
-# Requires baseline PSA on the namespace (set in ArgoCD Application manifest).
+# Disabled — vm.max_map_count=524288 is set at the node level via Ansible
+# (rke2_sysctl in group_vars/rke2_cluster.yml, applied by rke2-deploy.yml
+# --tags prerequisites). Node-level sysctl is the correct place for this;
+# a privileged init container is unnecessary and fights admission policies.
 initSysctl:
-  enabled: true
-  vmMaxMapCount: 524288
+  enabled: false
 
 # ---------------------------------------------------------------------------
 # Resources

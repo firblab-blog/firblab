@@ -49,10 +49,9 @@ spec:
       selfHeal: true
     managedNamespaceMetadata:
       labels:
-        # privileged required: initSysctl sets vm.max_map_count via a privileged init
-        # container (Elasticsearch requirement). baseline policy does NOT allow
-        # securityContext.privileged=true — only the privileged policy does.
-        pod-security.kubernetes.io/enforce: privileged
+        # baseline: initSysctl is disabled (vm.max_map_count set at node level
+        # via Ansible rke2_sysctl). No privileged containers — baseline is sufficient.
+        pod-security.kubernetes.io/enforce: baseline
         pod-security.kubernetes.io/warn: restricted
         pod-security.kubernetes.io/audit: restricted
     syncOptions:

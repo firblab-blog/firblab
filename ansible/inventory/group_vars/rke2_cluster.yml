@@ -146,6 +146,10 @@ rke2_sysctl:
   net.ipv6.conf.all.forwarding: 1
   net.bridge.bridge-nf-call-iptables: 1
   net.bridge.bridge-nf-call-ip6tables: 1
+  # Elasticsearch / SonarQube requirement. Set at the node level so
+  # SonarQube does not need a privileged init container to do it at runtime.
+  # Applied to all cluster nodes (harmless on server nodes).
+  vm.max_map_count: 524288
 
 # ---------------------------------------------------------------------------
 # Required Kernel Modules
