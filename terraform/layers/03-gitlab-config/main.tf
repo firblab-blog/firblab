@@ -918,7 +918,6 @@ resource "vault_kv_secret_v2" "sonarqube" {
 
   data_json = jsonencode({
     admin_password         = random_password.sonarqube_admin.result
-    admin_password_current = "admin"  # SonarQube default; consumed by chart init job
     monitoring_passcode        = random_password.sonarqube_monitoring.result
     gitlab_oauth_client_id     = gitlab_application.sonarqube.application_id
     gitlab_oauth_client_secret = gitlab_application.sonarqube.secret

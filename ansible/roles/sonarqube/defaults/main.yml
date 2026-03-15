@@ -26,9 +26,9 @@ sonarqube_port: 9000
 sonarqube_db_name: sonarqube
 sonarqube_db_user: sonarqube
 
-# Admin credentials — injected from Vault by deploy playbook
+# Admin password — injected from Vault by deploy playbook
 # sonarqube_admin_password: intentionally omitted (no default)
-# sonarqube_admin_password_current: intentionally omitted (read from Vault key)
+# Factory default "admin" is hardcoded in the role's password change task.
 
 # GitLab OAuth + ALM — injected from Vault by deploy playbook
 # sonarqube_gitlab_oauth_client_id: intentionally omitted
