@@ -125,6 +125,7 @@
           - "  https://netbox.home.example-lab.org    -> NetBox (native OIDC)"
           - "  https://patchmon.home.example-lab.org  -> PatchMon (native OIDC)"
           - "  https://actualbudget.home.example-lab.org -> Actual Budget (ForwardAuth)"
+          - "  https://nomad.home.example-lab.org     -> Nomad UI (ForwardAuth)"
           - ""
           - "Management:"
           - "  docker compose -f {{ traefik_install_dir | default('/opt/traefik') }}/docker-compose.yml ps"

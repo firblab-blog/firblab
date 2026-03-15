@@ -129,6 +129,12 @@ traefik_backends:
     forwardauth: true             # Require Authentik SSO
     insecure_backend: false
     websocket: true               # Live update feed uses WebSocket
+  nomad:
+    subdomain: nomad
+    backend_url: "http://10.0.10.111:4646"
+    forwardauth: true             # Require Authentik SSO
+    insecure_backend: false
+    websocket: true               # UI and event streams use WebSocket
   # Archive appliance (ZimaBlade 7700 bare-metal, Services VLAN 20)
   archive:
     subdomain: archive
@@ -347,3 +353,16 @@ traefik_backends:
     forwardauth: true
     insecure_backend: false
     websocket: false
+  # -------------------------------------------------------------------------
+  # Cogit (dev machine, VLAN 1 — stub until service is deployed)
+  # Local-first agent context system: MCP, HTTP, CLI, workbench.
+  # No Authentik auth — cogit handles its own auth/authz primitives.
+  # TODO: update backend_url to actual dev machine IP:port when workbench
+  #       port is defined (default assumption: 4000).
+  # -------------------------------------------------------------------------
+  cogit:
+    subdomain: cogit
+    backend_url: "http://10.0.4.100:4000"
+    forwardauth: false
+    insecure_backend: false
+    websocket: true               # workbench may use WebSocket for live updates

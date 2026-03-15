@@ -5,7 +5,7 @@
 # Creates the organizational structure for a clean, consolidated GitLab:
 #   - Instance-level application settings (sign-in, auth, security)
 #   - 4 top-level groups (Infrastructure, Applications, Personal, Documentation)
-#   - 19 projects across those groups (cc-recall replaced by recall)
+#   - 21 projects across those groups
 #   - Standard labels on all projects
 #   - Branch protection on infrastructure projects
 #   - Instance-level CI/CD variables (Vault AppRole for all pipelines)
@@ -162,6 +162,32 @@ locals {
       remove_source_branch_after_merge             = true
       initialize_with_readme                       = false
     }
+    cogit = {
+      name                                         = "cogit"
+      path                                         = "cogit"
+      description                                  = "Cogit — local-first agent context system. Unifies durable engineering memory, trusted guidance, policy workflows, and consistent context delivery through MCP, HTTP, CLI, and workbench."
+      group_key                                    = "infrastructure"
+      visibility_level                             = "private"
+      wiki_enabled                                 = true
+      container_registry_enabled                   = true
+      only_allow_merge_if_pipeline_succeeds        = true
+      only_allow_merge_if_all_discussions_resolved = true
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
+    }
+    firblab_v2 = {
+      name                                         = "firblab-v2"
+      path                                         = "firblab-v2"
+      description                                  = "FirbLab v2 — clean-slate parallel rebuild with Nomad as first-class runtime, layered Terraform architecture, and safe-path migration from legacy firblab"
+      group_key                                    = "infrastructure"
+      visibility_level                             = "private"
+      wiki_enabled                                 = true
+      container_registry_enabled                   = true
+      only_allow_merge_if_pipeline_succeeds        = true
+      only_allow_merge_if_all_discussions_resolved = true
+      remove_source_branch_after_merge             = true
+      initialize_with_readme                       = false
+    }
 
     # --- Applications ---
     tavkit = {
@@ -274,7 +300,9 @@ locals {
     security_policies = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     recall            = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     guardrail         = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    cogit             = { push = "maintainer", merge = "maintainer", allow_force_push = false }
     war               = { push = "maintainer", merge = "maintainer", allow_force_push = false }
+    firblab_v2        = { push = "maintainer", merge = "maintainer", allow_force_push = false }
   }
 
   # ---------------------------------------------------------------------------
@@ -1063,4 +1091,413 @@ resource "gitlab_application_settings" "this" {
 
   # --- Security Hardening ---
   after_sign_out_path = "https://auth.home.example-lab.org/application/o/gitlab/end-session/"
+}
+
+###############################################
+# Cogit — Project Wiki Push Token
+###############################################
+# Project-scoped access token for cogit's CI to push docs to the
+# GitLab project wiki. Injected as masked CI/CD variable WIKI_PUSH_TOKEN.
+#
+# Vault path: secret/services/gitlab/cogit-wiki-push
+###############################################
+
+resource "gitlab_project_access_token" "cogit_wiki_push" {
+  project      = gitlab_project.projects["cogit"].id
+  name         = "ci-wiki-push"
+  scopes       = ["read_repository", "write_repository"]
+  access_level = "developer"
+  expires_at   = "2027-03-15"
+
+  depends_on = [gitlab_project.projects]
+}
+
+resource "vault_kv_secret_v2" "gitlab_cogit_wiki_push" {
+  mount = "secret"
+  name  = "services/gitlab/cogit-wiki-push"
+
+  data_json = jsonencode({
+    username = "ci-wiki-push"
+    token    = gitlab_project_access_token.cogit_wiki_push.token
+  })
+
+  depends_on = [gitlab_project_access_token.cogit_wiki_push]
+}
+
+resource "gitlab_project_variable" "cogit_wiki_push_token" {
+  project   = gitlab_project.projects["cogit"].id
+  key       = "WIKI_PUSH_TOKEN"
+  value     = gitlab_project_access_token.cogit_wiki_push.token
+  protected = true
+  masked    = true
+
+  depends_on = [gitlab_project_access_token.cogit_wiki_push]
+}
+
+###############################################
+# Cogit — Milestones
+###############################################
+# 8 milestones (M0–M7) from docs/ROADMAP.md.
+# M0 closed (all planning docs complete).
+# M1 active (platform foundation in progress).
+# M2–M7 active (not yet started).
+###############################################
+
+locals {
+  cogit_milestones = {
+    m0 = {
+      title       = "M0: Planning Lock"
+      description = "Establish the canonical product and engineering contract before implementation drifts.\n\nExit criteria: future work can point to canonical docs instead of reinventing the product."
+      state       = "closed"
+    }
+    m1 = {
+      title       = "M1: Shared Platform Foundation"
+      description = "Create the secure, testable substrate all future capabilities depend on.\n\nExit criteria: the repo can support safe incremental implementation with real quality gates."
+      state       = "active"
+    }
+    m2 = {
+      title       = "M2: Durable Memory Foundation"
+      description = "Make Cogit excellent at preserving and retrieving work history.\n\nExit criteria: if Cogit observes a supported session once, it preserves and serves it reliably later."
+      state       = "active"
+    }
+    m3 = {
+      title       = "M3: Memory Intelligence"
+      description = "Make preserved history genuinely useful for project context.\n\nExit criteria: project context is helpful without bluffing and without drifting from preserved evidence."
+      state       = "active"
+    }
+    m4 = {
+      title       = "M4: Guidance Foundation"
+      description = "Make Cogit source-grounded for supported stacks.\n\nExit criteria: Cogit can explain what a project uses, what sources apply, and how current that guidance is."
+      state       = "active"
+    }
+    m5 = {
+      title       = "M5: Policy And Review"
+      description = "Make imported guidance trustworthy before it affects behavior.\n\nExit criteria: imported guidance does not silently become trusted policy."
+      state       = "active"
+    }
+    m6 = {
+      title       = "M6: Delivery Unification"
+      description = "Make every surface feel like one product.\n\nExit criteria: MCP, HTTP, CLI, workbench, and passive files tell the same story about the same system."
+      state       = "active"
+    }
+    m7 = {
+      title       = "M7: Hardening And Product Readiness"
+      description = "Make Cogit viable for serious daily use and security review.\n\nExit criteria: Cogit is not just promising, it is operable and trustworthy."
+      state       = "active"
+    }
+  }
+}
+
+resource "gitlab_project_milestone" "cogit" {
+  for_each    = local.cogit_milestones
+  project     = gitlab_project.projects["cogit"].id
+  title       = each.value.title
+  description = each.value.description
+  state       = each.value.state
+
+  depends_on = [gitlab_project.projects]
+}
+
+###############################################
+# Cogit — Milestone Tracking Issues
+###############################################
+# One tracking issue per milestone with deliverable checklists from
+# docs/ROADMAP.md. M1 items are pre-checked per docs/MILESTONE-1-HANDOFF.md.
+#
+# Creates-once pattern: lifecycle ignore_changes on state + description
+# so Terraform does not fight developer edits (checking off items,
+# closing a milestone's issue when complete).
+###############################################
+
+resource "gitlab_project_issue" "cogit_m0_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M0: Planning Lock — deliverables"
+  state        = "closed"
+  milestone_id = gitlab_project_milestone.cogit["m0"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 0: Planning Lock.
+
+    ## Deliverables
+
+    - [x] Foundation document (`docs/FOUNDATION.md`)
+    - [x] Architecture document (`docs/ARCHITECTURE.md`)
+    - [x] Data model document (`docs/DATA-MODEL.md`)
+    - [x] Security architecture document (`docs/SECURITY-ARCHITECTURE.md`)
+    - [x] Migration plan document (`docs/MIGRATION.md`)
+    - [x] API and delivery contracts document (`docs/API-CONTRACTS.md`)
+    - [x] Repo structure plan document (`docs/REPO-STRUCTURE.md`)
+    - [x] Roadmap document (`docs/ROADMAP.md`)
+
+    ## Exit Criteria
+
+    ✅ Future work can point to canonical docs instead of reinventing the product.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m1_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M1: Shared Platform Foundation — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m1"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 1: Shared Platform Foundation.
+
+    See `docs/MILESTONE-1-HANDOFF.md` for the current implementation state.
+
+    ## Deliverables
+
+    - [x] Monorepo scaffolding and workspace layout
+    - [x] TypeScript strict configuration (`tsconfig.base.json`, `config/tsconfig.package.json`)
+    - [x] Shared schema validation approach (`@cogit/shared-schemas`)
+    - [x] Logging and redaction framework (`@cogit/platform-logging`)
+    - [x] Config framework (`@cogit/platform-config`)
+    - [x] Auth and authz primitives (`@cogit/platform-auth`)
+    - [x] Database abstraction contract primitives (`@cogit/platform-db` — contract complete)
+    - [ ] Database connection lifecycle (live SQLite + PostgreSQL drivers in `@cogit/platform-db`)
+    - [ ] Migration runner (apply pending SQL, record in `cogit_migrations`)
+    - [ ] CI/CD baseline (GitLab CI pipeline — `.gitlab-ci.yml`)
+    - [ ] SonarQube and static-analysis integration
+
+    ## Quality Gates
+
+    - Build passes
+    - Tests run
+    - CI baseline green
+    - SonarQube integrated
+    - Branch protections and quality gates defined
+
+    ## Exit Criteria
+
+    The repo can support safe incremental implementation with real quality gates.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m2_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M2: Durable Memory Foundation — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m2"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 2: Durable Memory Foundation.
+
+    ## Deliverables
+
+    - [ ] Project identity and aliasing
+    - [ ] Source observation model
+    - [ ] Raw artifact preservation
+    - [ ] Canonical conversations and messages
+    - [ ] Integrity and completeness state
+    - [ ] Conversation retrieval
+    - [ ] Search and context substrate
+
+    ## Quality Gates
+
+    - Preserved conversation round-trip tests
+    - Integrity state tests
+    - SQLite/PostgreSQL parity for core memory paths
+
+    ## Exit Criteria
+
+    If Cogit observes a supported session once, it preserves and serves it reliably later.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m3_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M3: Memory Intelligence — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m3"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 3: Memory Intelligence.
+
+    ## Deliverables
+
+    - [ ] Learnings and decisions
+    - [ ] File history events
+    - [ ] Project briefing generation
+    - [ ] File and project context
+    - [ ] Search quality improvements
+    - [ ] Conservative derived-memory surfaces
+
+    ## Quality Gates
+
+    - Derived-memory provenance tests
+    - No-bluff behavior tests
+    - Search and briefing relevance checks
+
+    ## Exit Criteria
+
+    Project context is helpful without bluffing and without drifting from preserved evidence.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m4_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M4: Guidance Foundation — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m4"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 4: Guidance Foundation.
+
+    ## Deliverables
+
+    - [ ] Technology detection
+    - [ ] Source registry
+    - [ ] Source targets
+    - [ ] Source revisions
+    - [ ] Sync runs
+    - [ ] Compiled rules
+    - [ ] Pack model
+    - [ ] Freshness state
+
+    ## Quality Gates
+
+    - Technology detection tests
+    - Source sync tests
+    - Freshness and revision lineage tests
+    - SSRF-safe fetch validation tests
+
+    ## Exit Criteria
+
+    Cogit can explain what a project uses, what sources apply, and how current that guidance is.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m5_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M5: Policy And Review — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m5"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 5: Policy And Review.
+
+    ## Deliverables
+
+    - [ ] Reviews
+    - [ ] Review items and decisions
+    - [ ] Overrides and suppressions
+    - [ ] Effective policy composition
+    - [ ] Blockers, warnings, stale, and no-coverage states
+    - [ ] Preflight outputs
+
+    ## Quality Gates
+
+    - Review-path tests
+    - Authz tests for policy mutation
+    - Effective-policy consistency tests
+    - No silent trust-promotion regressions
+
+    ## Exit Criteria
+
+    Imported guidance does not silently become trusted policy.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m6_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M6: Delivery Unification — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m6"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 6: Delivery Unification.
+
+    ## Deliverables
+
+    - [ ] Cogit-native MCP tools and resources
+    - [ ] Cogit-native HTTP/API
+    - [ ] CLI operational flows
+    - [ ] Workbench integration on stable contracts (preserving existing approved UI shell exactly)
+    - [ ] Passive projection engine
+    - [ ] Cross-surface consistency tests
+
+    ## Quality Gates
+
+    - MCP contract tests
+    - HTTP contract tests
+    - Passive projection golden tests
+    - Cross-surface consistency tests
+
+    ## Exit Criteria
+
+    MCP, HTTP, CLI, workbench, and passive files tell the same story about the same system.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m7_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M7: Hardening And Product Readiness — deliverables"
+  state        = "opened"
+  milestone_id = gitlab_project_milestone.cogit["m7"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 7: Hardening And Product Readiness.
+
+    ## Deliverables
+
+    - [ ] Full security regression suite
+    - [ ] SQLite/PostgreSQL parity coverage
+    - [ ] Deployment hardening docs
+    - [ ] Backup and restore strategy
+    - [ ] Packaging and install flows
+    - [ ] Migration and cutover docs
+    - [ ] Operator playbooks
+
+    ## Quality Gates
+
+    - Security regression suite green
+    - Packaging/install verification
+    - Migration verification
+    - Release gate pass
+
+    ## Exit Criteria
+
+    Cogit is not just promising, it is operable and trustworthy.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
 }

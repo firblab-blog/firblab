@@ -92,6 +92,8 @@ locals {
     "war",           # WAR multi-agent adjudication platform (ForwardAuth)
     # SonarQube CE (lab-01, Services VLAN 20) — moved from K8s to standalone VM
     "sonarqube",     # Static code analysis, GitLab ALM integration (ForwardAuth)
+    # Cogit (dev machine, VLAN 1) — local-first agent context system (no auth, stub)
+    "cogit",         # Cogit workbench — MCP, HTTP, CLI, passive files
     # Proxmox node UIs (Management VLAN 10 — self-signed certs, proxied for valid TLS)
     "pve-01",        # lab-01 (i9-12900K, main compute)
     "pve-02",        # lab-02 (N100, pilot node)
