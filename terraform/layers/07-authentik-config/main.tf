@@ -625,7 +625,7 @@ resource "authentik_application" "proxy" {
   protocol_provider = authentik_provider_proxy.proxy[each.key].id
   group             = each.value.app_group
   meta_launch_url   = each.value.external_host
-  meta_icon         = each.value.meta_icon
+  meta_icon         = try(each.value.meta_icon, null)
 
   depends_on = [authentik_provider_proxy.proxy]
 }
