@@ -435,6 +435,11 @@ locals {
       app_group     = "Infrastructure"
       meta_icon     = "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/sonarqube.svg"
     }
+    cogit = {
+      name          = "Cogit"
+      external_host = "https://cogit.home.example-lab.org"
+      app_group     = "Infrastructure"
+    }
 
   }
 

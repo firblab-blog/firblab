@@ -35,6 +35,7 @@ internal_dns_entries:
       - gitlab.home.example-lab.org
       - patchmon.home.example-lab.org
       - backrest.home.example-lab.org
+      - cogit.home.example-lab.org
       - openwebui.home.example-lab.org
       - argocd.home.example-lab.org
       - netbox.home.example-lab.org

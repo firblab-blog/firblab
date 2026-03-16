@@ -354,15 +354,13 @@ traefik_backends:
     insecure_backend: false
     websocket: false
   # -------------------------------------------------------------------------
-  # Cogit (dev machine, VLAN 1 — stub until service is deployed)
-  # Local-first agent context system: MCP, HTTP, CLI, workbench.
-  # No Authentik auth — cogit handles its own auth/authz primitives.
-  # TODO: update backend_url to actual dev machine IP:port when workbench
-  #       port is defined (default assumption: 4000).
+  # Cogit workbench (runtime-service VM on Management VLAN 10)
+  # Access is gated by Authentik ForwardAuth through the shared Traefik path.
   # -------------------------------------------------------------------------
   cogit:
     subdomain: cogit
-    backend_url: "http://10.0.4.100:4000"
-    forwardauth: false
+    backend_url: "http://10.0.10.131:4312"
+    forwardauth: true
     insecure_backend: false
+    websocket: false
     websocket: true               # workbench may use WebSocket for live updates
