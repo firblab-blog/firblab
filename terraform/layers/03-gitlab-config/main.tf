@@ -923,7 +923,7 @@ resource "gitlab_group_access_token" "sonarqube_alm" {
   name         = "sonarqube-alm"
   access_level = "developer"
   scopes       = ["api"]
-  expires_at   = "2027-03-01"  # GitLab enforces 1-year max from creation date
+  expires_at   = "2027-03-01" # GitLab enforces 1-year max from creation date
 
   depends_on = [gitlab_group.groups]
 }
@@ -945,7 +945,7 @@ resource "vault_kv_secret_v2" "sonarqube" {
   name  = "services/sonarqube"
 
   data_json = jsonencode({
-    admin_password         = random_password.sonarqube_admin.result
+    admin_password             = random_password.sonarqube_admin.result
     monitoring_passcode        = random_password.sonarqube_monitoring.result
     gitlab_oauth_client_id     = gitlab_application.sonarqube.application_id
     gitlab_oauth_client_secret = gitlab_application.sonarqube.secret
@@ -963,7 +963,7 @@ resource "vault_kv_secret_v2" "sonarqube" {
 ###############################################
 
 resource "gitlab_instance_variable" "sonar_host_url" {
-  key       = "SONAR_HOST_URL"
+  key = "SONAR_HOST_URL"
   # Use direct IP — GitLab Runner Docker executor containers cannot resolve
   # internal DNS (sonarqube.home.example-lab.org). SonarQube listens on HTTP/9000
   # and the Runner is on the same VLAN 20 (Services).
@@ -1013,7 +1013,7 @@ resource "gitlab_project_access_token" "war_gitops_push" {
   project      = gitlab_project.projects["firblab"].id
   name         = "war-ci-gitops-push"
   scopes       = ["write_repository"]
-  access_level = "maintainer"  # developer cannot push to protected branches
+  access_level = "maintainer" # developer cannot push to protected branches
   expires_at   = "2027-03-01"
 
   depends_on = [gitlab_project.projects]
@@ -1135,12 +1135,48 @@ resource "gitlab_project_variable" "cogit_wiki_push_token" {
 }
 
 ###############################################
+# Cogit / FirbLab v2 — Deployment Contract Variables
+###############################################
+# Repo-managed variables that keep the Cogit -> FirbLab v2 deployment path
+# automated and aligned with the runtime-service contract.
+###############################################
+
+resource "gitlab_project_variable" "cogit_firblab_v2_project_path" {
+  project   = gitlab_project.projects["cogit"].id
+  key       = "FIRBLAB_V2_PROJECT_PATH"
+  value     = "${gitlab_group.groups["infrastructure"].full_path}/${gitlab_project.projects["firblab_v2"].path}"
+  protected = true
+  masked    = false
+
+  depends_on = [gitlab_group.groups, gitlab_project.projects]
+}
+
+resource "gitlab_project_variable" "cogit_firblab_v2_deploy_ref" {
+  project   = gitlab_project.projects["cogit"].id
+  key       = "FIRBLAB_V2_DEPLOY_REF"
+  value     = "main"
+  protected = true
+  masked    = false
+
+  depends_on = [gitlab_project.projects]
+}
+
+resource "gitlab_project_variable" "firblab_v2_cogit_runtime_smoke_secret_path" {
+  project   = gitlab_project.projects["firblab_v2"].id
+  key       = "COGIT_RUNTIME_SMOKE_SECRET_PATH"
+  value     = "secret/runtime/cogit-postgres-dev/smoke"
+  protected = true
+  masked    = false
+
+  depends_on = [gitlab_project.projects]
+}
+
+###############################################
 # Cogit — Milestones
 ###############################################
-# 8 milestones (M0–M7) from docs/ROADMAP.md.
-# M0 closed (all planning docs complete).
-# M1 active (platform foundation in progress).
-# M2–M7 active (not yet started).
+# 9 milestones (M0–M7, including M6.5) from docs/ROADMAP.md.
+# M0–M6.5 closed (all complete as of 2026-03-16).
+# M7 active (hardening and product readiness — next up).
 ###############################################
 
 locals {
@@ -1153,32 +1189,37 @@ locals {
     m1 = {
       title       = "M1: Shared Platform Foundation"
       description = "Create the secure, testable substrate all future capabilities depend on.\n\nExit criteria: the repo can support safe incremental implementation with real quality gates."
-      state       = "active"
+      state       = "closed"
     }
     m2 = {
       title       = "M2: Durable Memory Foundation"
       description = "Make Cogit excellent at preserving and retrieving work history.\n\nExit criteria: if Cogit observes a supported session once, it preserves and serves it reliably later."
-      state       = "active"
+      state       = "closed"
     }
     m3 = {
       title       = "M3: Memory Intelligence"
       description = "Make preserved history genuinely useful for project context.\n\nExit criteria: project context is helpful without bluffing and without drifting from preserved evidence."
-      state       = "active"
+      state       = "closed"
     }
     m4 = {
       title       = "M4: Guidance Foundation"
       description = "Make Cogit source-grounded for supported stacks.\n\nExit criteria: Cogit can explain what a project uses, what sources apply, and how current that guidance is."
-      state       = "active"
+      state       = "closed"
     }
     m5 = {
       title       = "M5: Policy And Review"
       description = "Make imported guidance trustworthy before it affects behavior.\n\nExit criteria: imported guidance does not silently become trusted policy."
-      state       = "active"
+      state       = "closed"
     }
     m6 = {
       title       = "M6: Delivery Unification"
       description = "Make every surface feel like one product.\n\nExit criteria: MCP, HTTP, CLI, workbench, and passive files tell the same story about the same system."
-      state       = "active"
+      state       = "closed"
+    }
+    m6_5 = {
+      title       = "M6.5: Project Identity And Reconciliation"
+      description = "Replace the earlier project-only memory baseline with the final production-ready project identity model before broader delivery and hardening work continue.\n\nExit criteria: Cogit can resolve canonical repository identity deterministically across forge, local workspace, and chat-tool observations without fuzzy matching or silent duplication."
+      state       = "closed"
     }
     m7 = {
       title       = "M7: Hardening And Product Readiness"
@@ -1243,12 +1284,12 @@ resource "gitlab_project_issue" "cogit_m0_tracking" {
 resource "gitlab_project_issue" "cogit_m1_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M1: Shared Platform Foundation — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m1"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 1: Shared Platform Foundation.
 
-    See `docs/MILESTONE-1-HANDOFF.md` for the current implementation state.
+    See `docs/MILESTONE-1-HANDOFF.md` for the implementation state.
 
     ## Deliverables
 
@@ -1258,23 +1299,22 @@ resource "gitlab_project_issue" "cogit_m1_tracking" {
     - [x] Logging and redaction framework (`@cogit/platform-logging`)
     - [x] Config framework (`@cogit/platform-config`)
     - [x] Auth and authz primitives (`@cogit/platform-auth`)
-    - [x] Database abstraction contract primitives (`@cogit/platform-db` — contract complete)
-    - [ ] Database connection lifecycle (live SQLite + PostgreSQL drivers in `@cogit/platform-db`)
-    - [ ] Migration runner (apply pending SQL, record in `cogit_migrations`)
-    - [ ] CI/CD baseline (GitLab CI pipeline — `.gitlab-ci.yml`)
-    - [ ] SonarQube and static-analysis integration
+    - [x] Database abstraction and connection lifecycle (`@cogit/platform-db`)
+    - [x] Migration runner (apply pending SQL, record in `cogit_migrations`)
+    - [x] CI/CD baseline (GitLab CI pipeline — `.gitlab-ci.yml`)
+    - [x] SonarQube and static-analysis integration
 
     ## Quality Gates
 
-    - Build passes
-    - Tests run
-    - CI baseline green
-    - SonarQube integrated
-    - Branch protections and quality gates defined
+    - Build passes ✅
+    - Tests run ✅
+    - CI baseline green ✅
+    - SonarQube integrated ✅
+    - Branch protections and quality gates defined ✅
 
     ## Exit Criteria
 
-    The repo can support safe incremental implementation with real quality gates.
+    ✅ The repo can support safe incremental implementation with real quality gates.
   EOT
 
   lifecycle {
@@ -1287,30 +1327,33 @@ resource "gitlab_project_issue" "cogit_m1_tracking" {
 resource "gitlab_project_issue" "cogit_m2_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M2: Durable Memory Foundation — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m2"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 2: Durable Memory Foundation.
 
+    Note: final production-ready project/workspace/remote reconciliation was closed out in M6.5.
+
     ## Deliverables
 
-    - [ ] Project identity and aliasing
-    - [ ] Source observation model
-    - [ ] Raw artifact preservation
-    - [ ] Canonical conversations and messages
-    - [ ] Integrity and completeness state
-    - [ ] Conversation retrieval
-    - [ ] Search and context substrate
+    - [x] Project identity and aliasing
+    - [x] Source observation model
+    - [x] Usable prototype workbench
+    - [x] Raw artifact preservation
+    - [x] Canonical conversations and messages
+    - [x] Integrity and completeness state
+    - [x] Conversation retrieval
+    - [x] Search and context substrate
 
     ## Quality Gates
 
-    - Preserved conversation round-trip tests
-    - Integrity state tests
-    - SQLite/PostgreSQL parity for core memory paths
+    - Preserved conversation round-trip tests ✅
+    - Integrity state tests ✅
+    - SQLite/PostgreSQL parity for core memory paths ✅
 
     ## Exit Criteria
 
-    If Cogit observes a supported session once, it preserves and serves it reliably later.
+    ✅ If Cogit observes a supported session once, it preserves and serves it reliably later.
   EOT
 
   lifecycle {
@@ -1323,29 +1366,29 @@ resource "gitlab_project_issue" "cogit_m2_tracking" {
 resource "gitlab_project_issue" "cogit_m3_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M3: Memory Intelligence — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m3"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 3: Memory Intelligence.
 
     ## Deliverables
 
-    - [ ] Learnings and decisions
-    - [ ] File history events
-    - [ ] Project briefing generation
-    - [ ] File and project context
-    - [ ] Search quality improvements
-    - [ ] Conservative derived-memory surfaces
+    - [x] Learnings and decisions
+    - [x] File history events
+    - [x] Project briefing generation
+    - [x] File and project context
+    - [x] Search quality improvements
+    - [x] Conservative derived-memory surfaces
 
     ## Quality Gates
 
-    - Derived-memory provenance tests
-    - No-bluff behavior tests
-    - Search and briefing relevance checks
+    - Derived-memory provenance tests ✅
+    - No-bluff behavior tests ✅
+    - Search and briefing relevance checks ✅
 
     ## Exit Criteria
 
-    Project context is helpful without bluffing and without drifting from preserved evidence.
+    ✅ Project context is helpful without bluffing and without drifting from preserved evidence.
   EOT
 
   lifecycle {
@@ -1358,32 +1401,32 @@ resource "gitlab_project_issue" "cogit_m3_tracking" {
 resource "gitlab_project_issue" "cogit_m4_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M4: Guidance Foundation — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m4"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 4: Guidance Foundation.
 
     ## Deliverables
 
-    - [ ] Technology detection
-    - [ ] Source registry
-    - [ ] Source targets
-    - [ ] Source revisions
-    - [ ] Sync runs
-    - [ ] Compiled rules
-    - [ ] Pack model
-    - [ ] Freshness state
+    - [x] Technology detection
+    - [x] Source registry
+    - [x] Source targets
+    - [x] Source revisions
+    - [x] Sync runs
+    - [x] Compiled rules
+    - [x] Pack model
+    - [x] Freshness state
 
     ## Quality Gates
 
-    - Technology detection tests
-    - Source sync tests
-    - Freshness and revision lineage tests
-    - SSRF-safe fetch validation tests
+    - Technology detection tests ✅
+    - Source sync tests ✅
+    - Freshness and revision lineage tests ✅
+    - SSRF-safe fetch validation tests ✅
 
     ## Exit Criteria
 
-    Cogit can explain what a project uses, what sources apply, and how current that guidance is.
+    ✅ Cogit can explain what a project uses, what sources apply, and how current that guidance is.
   EOT
 
   lifecycle {
@@ -1396,30 +1439,30 @@ resource "gitlab_project_issue" "cogit_m4_tracking" {
 resource "gitlab_project_issue" "cogit_m5_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M5: Policy And Review — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m5"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 5: Policy And Review.
 
     ## Deliverables
 
-    - [ ] Reviews
-    - [ ] Review items and decisions
-    - [ ] Overrides and suppressions
-    - [ ] Effective policy composition
-    - [ ] Blockers, warnings, stale, and no-coverage states
-    - [ ] Preflight outputs
+    - [x] Reviews
+    - [x] Review items and decisions
+    - [x] Overrides and suppressions
+    - [x] Effective policy composition
+    - [x] Blockers, warnings, stale, and no-coverage states
+    - [x] Preflight outputs
 
     ## Quality Gates
 
-    - Review-path tests
-    - Authz tests for policy mutation
-    - Effective-policy consistency tests
-    - No silent trust-promotion regressions
+    - Review-path tests ✅
+    - Authz tests for policy mutation ✅
+    - Effective-policy consistency tests ✅
+    - No silent trust-promotion regressions ✅
 
     ## Exit Criteria
 
-    Imported guidance does not silently become trusted policy.
+    ✅ Imported guidance does not silently become trusted policy.
   EOT
 
   lifecycle {
@@ -1432,30 +1475,78 @@ resource "gitlab_project_issue" "cogit_m5_tracking" {
 resource "gitlab_project_issue" "cogit_m6_tracking" {
   project      = gitlab_project.projects["cogit"].id
   title        = "M6: Delivery Unification — deliverables"
-  state        = "opened"
+  state        = "closed"
   milestone_id = gitlab_project_milestone.cogit["m6"].milestone_id
   description  = <<-EOT
     Tracking issue for Milestone 6: Delivery Unification.
 
     ## Deliverables
 
-    - [ ] Cogit-native MCP tools and resources
-    - [ ] Cogit-native HTTP/API
-    - [ ] CLI operational flows
-    - [ ] Workbench integration on stable contracts (preserving existing approved UI shell exactly)
-    - [ ] Passive projection engine
-    - [ ] Cross-surface consistency tests
+    - [x] Cogit-native MCP tools and resources
+    - [x] Cogit-native HTTP/API
+    - [x] CLI operational flows (`apps/cli`)
+    - [x] Workbench contract hardening and polish (existing approved UI shell preserved)
+    - [x] Passive projection engine
+    - [x] Cross-surface consistency tests
+    - [x] Remote-agent delivery architecture for managed deployments
+    - [x] Local MCP-to-HTTP adapter pattern for workstation coding agents
+    - [x] Authenticated session-ingest and observation-forwarding flows
 
     ## Quality Gates
 
-    - MCP contract tests
-    - HTTP contract tests
-    - Passive projection golden tests
-    - Cross-surface consistency tests
+    - MCP contract tests ✅
+    - HTTP contract tests ✅
+    - Passive projection golden tests ✅
+    - Cross-surface consistency tests ✅
 
     ## Exit Criteria
 
-    MCP, HTTP, CLI, workbench, and passive files tell the same story about the same system.
+    ✅ MCP, HTTP, CLI, workbench, and passive files tell the same story about the same system.
+  EOT
+
+  lifecycle {
+    ignore_changes = [state, description]
+  }
+
+  depends_on = [gitlab_project.projects, gitlab_project_milestone.cogit]
+}
+
+resource "gitlab_project_issue" "cogit_m6_5_tracking" {
+  project      = gitlab_project.projects["cogit"].id
+  title        = "M6.5: Project Identity And Reconciliation — deliverables"
+  state        = "closed"
+  milestone_id = gitlab_project_milestone.cogit["m6_5"].milestone_id
+  description  = <<-EOT
+    Tracking issue for Milestone 6.5: Project Identity And Reconciliation.
+
+    Catch-up slice for any missing revised-project-definition work from M1–M6.
+    See `docs/MILESTONE-6.5-HANDOFF.md` and `docs/PROJECT-IDENTITY-AND-RECONCILIATION.md`.
+
+    ## Deliverables
+
+    - [x] Workspace and project_remote persistence (migrations 0016–0017)
+    - [x] Identity evidence and reconciliation state persistence
+    - [x] Deterministic forge normalization contracts
+    - [x] Deterministic local workspace normalization contracts
+    - [x] Shared reconciliation engine (no fuzzy matching, no silent merges)
+    - [x] Workspace linkage on source observations, conversations, and file-history events
+    - [x] Workspace-aware file context and delivery reads
+    - [x] Project/guidance/policy/delivery read-model migration to new identity model
+    - [x] Operator-visible identity state in service, workbench, and CLI surfaces
+    - [x] Explicit unresolved and conflicted identity state handling
+    - [x] Scenario-driven identity and parity coverage through the test suite
+    - [x] SQLite and PostgreSQL behavior aligned throughout
+
+    ## Quality Gates
+
+    - Workspace and remote identity round-trip tests
+    - Reconciliation scenario tests (forge-first, local-first, conflict, ambiguous)
+    - SQLite/PostgreSQL parity for identity paths
+
+    ## Exit Criteria
+
+    Cogit can resolve canonical repository identity deterministically across forge,
+    local workspace, and chat-tool observations without fuzzy matching or silent duplication.
   EOT
 
   lifecycle {
@@ -1482,6 +1573,10 @@ resource "gitlab_project_issue" "cogit_m7_tracking" {
     - [ ] Packaging and install flows
     - [ ] Migration and cutover docs
     - [ ] Operator playbooks
+    - [ ] Service identity and credential lifecycle guidance for workstation collectors and managed integrations
+    - [ ] Remote-ingest security controls, retention rules, and audit expectations
+    - [ ] Managed deployment network-exposure and reverse-proxy hardening guidance
+    - [ ] FedRAMP-aligned evidence for authn/authz, audit, boundary protection, and secure transport expectations
 
     ## Quality Gates
 
