@@ -25,7 +25,7 @@ gitlab_ssl_enabled: false
 # Data Disk
 # ---------------------------------------------------------------------------
 # Mount point for the data disk (scsi1 → /dev/sdb).
-# GitLab git-data directory lives on this disk for storage tiering.
+# GitLab persistent data is migrated here to keep the OS disk lean.
 gitlab_data_mount_point: "/mnt/gitlab-data"
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,12 @@ gitlab_data_mount_point: "/mnt/gitlab-data"
 # ---------------------------------------------------------------------------
 # Override to place on data disk: /mnt/gitlab-data/git-data
 gitlab_git_data_dir: "/var/opt/gitlab/git-data"
+
+# Heavy GitLab data is bind-mounted from the data disk back onto Omnibus paths
+# so GitLab keeps its defaults while large writes land off the root volume.
+gitlab_shared_data_dir: "{{ gitlab_data_mount_point }}/gitlab-rails-shared"
+gitlab_backup_storage_dir: "{{ gitlab_data_mount_point }}/backups"
+gitlab_prometheus_data_dir: "{{ gitlab_data_mount_point }}/prometheus-data"
 
 # ---------------------------------------------------------------------------
 # Backup

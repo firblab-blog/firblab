@@ -9,9 +9,9 @@
 # ---------------------------------------------------------------------------
 # Data Disk Setup (scsi1 → /dev/sdb)
 # ---------------------------------------------------------------------------
-# Formats and mounts the data disk if present. GitLab stores git
-# repositories on this disk for storage tiering (OS on NVMe, data on HDD).
-# Uses LABEL-based fstab entries for stability across disk reorders.
+# Formats and mounts the data disk if present. GitLab stores persistent data
+# on this disk to keep the root volume from filling with registry layers,
+# backups, artifacts, and Prometheus TSDB files.
 # ---------------------------------------------------------------------------
 - name: Check if data disk exists
   ansible.builtin.stat:
@@ -78,10 +78,26 @@
       - tzdata
       - perl
       - postfix
+      - e2fsprogs
+      - rsync
     state: present
     update_cache: true
   tags:
     - install
+
+- name: Grow ext4 filesystem on data disk after Terraform resize
+  ansible.builtin.command:
+    cmd: resize2fs /dev/sdb
+  register: gitlab_resize2fs
+  changed_when: >-
+    'Nothing to do' not in gitlab_resize2fs.stdout
+    and 'nothing to do' not in gitlab_resize2fs.stderr
+  when:
+    - data_disk.stat.exists
+    - data_disk_fs.stdout == 'ext4' or data_disk_fs.stdout == ''
+  tags:
+    - install
+    - data_disk
 
 - name: Enable and start postfix for GitLab notifications
   ansible.builtin.systemd:
@@ -152,18 +168,202 @@
     - install
 
 # ---------------------------------------------------------------------------
-# Data Disk — Git Data Directory (after install, git user exists)
+# Data Disk Directories and Migration
 # ---------------------------------------------------------------------------
-- name: Create GitLab git-data directory on data disk
+- name: Create GitLab storage directories on data disk
   ansible.builtin.file:
-    path: "{{ gitlab_git_data_dir }}"
+    path: "{{ item.path }}"
     state: directory
-    owner: git
-    group: git
-    mode: "0700"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ gitlab_data_mount_point }}", owner: "root", group: "root", mode: "0755" }
+    - { path: "{{ gitlab_git_data_dir }}", owner: "git", group: "git", mode: "0700" }
+    - { path: "{{ gitlab_shared_data_dir }}", owner: "root", group: "root", mode: "0755" }
+    - { path: "{{ gitlab_backup_storage_dir }}", owner: "root", group: "root", mode: "0755" }
+    - { path: "{{ gitlab_prometheus_data_dir }}", owner: "root", group: "root", mode: "0755" }
   when: data_disk.stat.exists
   tags:
     - install
+    - data_disk
+    - configure
+
+- name: Check whether GitLab heavy storage paths are already bind-mounted
+  ansible.builtin.command:
+    cmd: mountpoint -q {{ item }}
+  register: gitlab_bind_mount_status
+  changed_when: false
+  failed_when: false
+  loop:
+    - /var/opt/gitlab/gitlab-rails/shared
+    - /var/opt/gitlab/backups
+    - /var/opt/gitlab/prometheus/data
+  when: data_disk.stat.exists
+  tags:
+    - data_disk
+    - configure
+
+- name: Determine whether GitLab storage migration is required
+  ansible.builtin.set_fact:
+    gitlab_storage_migration_required: >-
+      {{
+        (gitlab_bind_mount_status.results | default([])
+        | selectattr('rc', 'ne', 0)
+        | list
+        | length) > 0
+      }}
+  when: data_disk.stat.exists
+  tags:
+    - data_disk
+    - configure
+
+- name: Stop GitLab services that write to migrated storage paths
+  ansible.builtin.command:
+    cmd: gitlab-ctl stop {{ item }}
+  loop:
+    - nginx
+    - gitlab-workhorse
+    - puma
+    - sidekiq
+    - registry
+    - prometheus
+    - alertmanager
+  register: gitlab_storage_stop_results
+  failed_when: false
+  changed_when: >-
+    (gitlab_storage_stop_results.stdout | default('')) is search('ok: down:')
+    or (gitlab_storage_stop_results.stdout | default('')) is search('ok: run:')
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+  tags:
+    - data_disk
+    - configure
+
+- name: Copy GitLab shared data to the data disk before bind-mounting
+  ansible.builtin.command:
+    cmd: rsync -aHAX --numeric-ids /var/opt/gitlab/gitlab-rails/shared/ {{ gitlab_shared_data_dir }}/
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - (gitlab_bind_mount_status.results | default([]))[0].rc != 0
+  tags:
+    - data_disk
+    - configure
+
+- name: Copy GitLab backups to the data disk before bind-mounting
+  ansible.builtin.command:
+    cmd: rsync -aHAX --numeric-ids /var/opt/gitlab/backups/ {{ gitlab_backup_storage_dir }}/
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - (gitlab_bind_mount_status.results | default([]))[1].rc != 0
+  tags:
+    - data_disk
+    - configure
+
+- name: Copy GitLab Prometheus data to the data disk before bind-mounting
+  ansible.builtin.command:
+    cmd: rsync -aHAX --numeric-ids /var/opt/gitlab/prometheus/data/ {{ gitlab_prometheus_data_dir }}/
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - (gitlab_bind_mount_status.results | default([]))[2].rc != 0
+  tags:
+    - data_disk
+    - configure
+
+- name: Bind-mount GitLab shared storage from the data disk
+  ansible.posix.mount:
+    path: /var/opt/gitlab/gitlab-rails/shared
+    src: "{{ gitlab_shared_data_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+  when: data_disk.stat.exists
+  register: gitlab_shared_bind_mount
+  tags:
+    - data_disk
+    - configure
+
+- name: Bind-mount GitLab backups from the data disk
+  ansible.posix.mount:
+    path: /var/opt/gitlab/backups
+    src: "{{ gitlab_backup_storage_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+  when: data_disk.stat.exists
+  register: gitlab_backup_bind_mount
+  tags:
+    - data_disk
+    - configure
+
+- name: Bind-mount GitLab Prometheus data from the data disk
+  ansible.posix.mount:
+    path: /var/opt/gitlab/prometheus/data
+    src: "{{ gitlab_prometheus_data_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+  when: data_disk.stat.exists
+  register: gitlab_prometheus_bind_mount
+  tags:
+    - data_disk
+    - configure
+
+- name: Clean up pre-migration GitLab shared data left behind on root disk
+  ansible.builtin.command:
+    cmd: find /var/opt/gitlab/gitlab-rails/shared -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - gitlab_shared_bind_mount.changed
+  tags:
+    - data_disk
+    - configure
+
+- name: Clean up pre-migration GitLab backups left behind on root disk
+  ansible.builtin.command:
+    cmd: find /var/opt/gitlab/backups -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - gitlab_backup_bind_mount.changed
+  tags:
+    - data_disk
+    - configure
+
+- name: Clean up pre-migration GitLab Prometheus data left behind on root disk
+  ansible.builtin.command:
+    cmd: find /var/opt/gitlab/prometheus/data -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool
+    - gitlab_prometheus_bind_mount.changed
+  tags:
+    - data_disk
+    - configure
+
+- name: Reconfigure GitLab after storage migration or bind-mount changes
+  ansible.builtin.command:
+    cmd: gitlab-ctl reconfigure
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool or gitlab_shared_bind_mount.changed or gitlab_backup_bind_mount.changed or gitlab_prometheus_bind_mount.changed
+  register: gitlab_storage_reconfigure
+  tags:
+    - data_disk
+    - configure
+
+- name: Start GitLab after storage migration or bind-mount changes
+  ansible.builtin.command:
+    cmd: gitlab-ctl start
+  when:
+    - data_disk.stat.exists
+    - gitlab_storage_migration_required | default(false) | bool or gitlab_shared_bind_mount.changed or gitlab_backup_bind_mount.changed or gitlab_prometheus_bind_mount.changed
+  tags:
     - data_disk
     - configure
 
@@ -216,7 +416,7 @@
   delay: 10
   register: gitlab_health
   until: gitlab_health.status is defined and gitlab_health.status == 200
-  when: gitlab_install_result.changed
+  when: gitlab_install_result.changed or gitlab_storage_migration_required | default(false) | bool
   tags:
     - verify
 
