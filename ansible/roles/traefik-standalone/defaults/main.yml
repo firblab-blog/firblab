@@ -186,10 +186,10 @@ traefik_backends:
     websocket: false
   openwebui:
     subdomain: openwebui
-    backend_url: "http://10.0.20.18:3000"
-    forwardauth: false            # Native OIDC via Authentik
+    backend_url: "http://10.0.10.132:3000"
+    forwardauth: false            # Native OIDC via Authentik on the AI platform VM
     insecure_backend: false
-    websocket: true               # Streaming LLM responses use WebSocket
+    websocket: true               # Streaming LLM responses and interactive UI
   n8n:
     subdomain: n8n
     backend_url: "http://10.0.20.18:5678"
