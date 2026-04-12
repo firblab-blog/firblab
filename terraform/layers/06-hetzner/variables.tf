@@ -52,6 +52,12 @@ variable "server_name" {
   default     = "lab-gateway"
 }
 
+variable "gateway_enabled" {
+  description = "Create and manage the Hetzner gateway server resources"
+  type        = bool
+  default     = true
+}
+
 variable "server_type" {
   description = "Hetzner server type for gateway (e.g., cpx22, cpx32)"
   type        = string
@@ -66,6 +72,12 @@ variable "honeypot_server_name" {
   description = "Name for the Hetzner honeypot server"
   type        = string
   default     = "lab-honeypot"
+}
+
+variable "honeypot_enabled" {
+  description = "Create and manage the Hetzner honeypot server resources"
+  type        = bool
+  default     = false
 }
 
 variable "honeypot_server_type" {

@@ -19,6 +19,12 @@ variable "ssh_key_id" {
   default     = null
 }
 
+variable "create_ssh_key" {
+  description = "Create a new Hetzner SSH key resource for this server instead of reusing an existing ssh_key_id"
+  type        = bool
+  default     = true
+}
+
 # ---------------------------------------------------------
 # Server Configuration
 # ---------------------------------------------------------

@@ -8,17 +8,17 @@
 
 output "server_ip" {
   description = "Public IPv4 address of the Hetzner gateway server"
-  value       = module.server.server_ip
+  value       = try(module.server[0].server_ip, null)
 }
 
 output "server_id" {
   description = "Hetzner Cloud server ID (gateway)"
-  value       = module.server.server_id
+  value       = try(module.server[0].server_id, null)
 }
 
 output "server_name" {
   description = "Hetzner Cloud server name (gateway)"
-  value       = module.server.server_name
+  value       = try(module.server[0].server_name, null)
 }
 
 # ---------------------------------------------------------
@@ -27,17 +27,17 @@ output "server_name" {
 
 output "honeypot_server_ip" {
   description = "Public IPv4 address of the Hetzner honeypot server"
-  value       = module.honeypot_server.server_ip
+  value       = try(module.honeypot_server[0].server_ip, null)
 }
 
 output "honeypot_server_id" {
   description = "Hetzner Cloud server ID (honeypot)"
-  value       = module.honeypot_server.server_id
+  value       = try(module.honeypot_server[0].server_id, null)
 }
 
 output "honeypot_server_name" {
   description = "Hetzner Cloud server name (honeypot)"
-  value       = module.honeypot_server.server_name
+  value       = try(module.honeypot_server[0].server_name, null)
 }
 
 # ---------------------------------------------------------
@@ -88,11 +88,12 @@ output "adguard_password" {
 output "gateway_summary" {
   description = "Gateway server configuration summary"
   value = {
-    server_name    = module.server.server_name
+    enabled        = var.gateway_enabled
+    server_name    = try(module.server[0].server_name, null)
     server_type    = var.server_type
     location       = var.location
     image          = var.image
-    ipv4_address   = module.server.server_ip
+    ipv4_address   = try(module.server[0].server_ip, null)
     domain         = local.domain_name
     wireguard_port = var.wireguard_port
   }
@@ -100,22 +101,23 @@ output "gateway_summary" {
 
 output "ssh_command" {
   description = "SSH command to connect to the gateway (port 2222 — non-standard port to reduce bot noise)"
-  value       = "ssh -p 2222 root@${module.server.server_ip}"
+  value       = try(module.server[0].server_ip, null) != null ? "ssh -p 2222 root@${module.server[0].server_ip}" : null
 }
 
 output "honeypot_summary" {
   description = "Honeypot server configuration summary"
   value = {
-    server_name  = module.honeypot_server.server_name
+    enabled      = var.honeypot_enabled
+    server_name  = try(module.honeypot_server[0].server_name, null)
     server_type  = var.honeypot_server_type
     location     = var.location
     image        = var.image
-    ipv4_address = module.honeypot_server.server_ip
-    dns_record   = "honeypot.${local.domain_name}"
+    ipv4_address = try(module.honeypot_server[0].server_ip, null)
+    dns_record   = var.honeypot_enabled ? "honeypot.${local.domain_name}" : null
   }
 }
 
 output "honeypot_ssh_command" {
   description = "SSH command to connect to the honeypot (port 2222 — port 22 is Cowrie)"
-  value       = "ssh -p 2222 root@${module.honeypot_server.server_ip}"
+  value       = try(module.honeypot_server[0].server_ip, null) != null ? "ssh -p 2222 root@${module.honeypot_server[0].server_ip}" : null
 }

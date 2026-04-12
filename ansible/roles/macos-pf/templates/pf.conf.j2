@@ -38,7 +38,9 @@ pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
 pass in inet proto tcp from $sec_net to any port {{ port }} keep state
 {% endfor %}
 
-# Allow unseal Vault from management network only
+# Allow unseal Vault from management and security VLANs
+# (vault-2 on Security VLAN 50 requires transit auto-unseal via port 8210)
 {% for port in pf_unseal_tcp_ports %}
 pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
+pass in inet proto tcp from $sec_net to any port {{ port }} keep state
 {% endfor %}

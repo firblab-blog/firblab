@@ -8,13 +8,15 @@
 #   - LXC container deployed via Terraform Layer 03
 #   - LXC bootstrap completed (lxc-bootstrap.yml creates admin user)
 #   - SSH key available (~/.ssh/id_ed25519_gitlab-runner)
-#   - Runner created in GitLab UI (Admin > CI/CD > Runners > New instance runner)
-#   - Runner glrt- token stored in Vault at secret/services/gitlab/runner
+#   - Dedicated Linux runner object exists in GitLab: firblab-linux-docker
+#   - Runner glrt- token stored in Vault at
+#     secret/services/gitlab/runner-linux-docker
 #   - Docker role available (ansible/roles/docker/)
 #   - vault CLI available on controller with VAULT_ADDR/VAULT_TOKEN/VAULT_CACERT set
 #
 # Token source priority:
-#   1. Vault CLI lookup (vault kv get secret/services/gitlab/runner → token)
+#   1. Vault CLI lookup
+#      (vault kv get secret/services/gitlab/runner-linux-docker → token)
 #   2. Extra-vars override: -e 'gitlab_runner_token=glrt-xxxxx'
 #
 # Usage (run from repo root):
@@ -23,6 +25,8 @@
 #   export VAULT_TOKEN=hvs.xxxxx
 #   export VAULT_CACERT=~/.lab/tls/ca/ca.pem
 #   ansible-playbook ansible/playbooks/gitlab-runner-deploy.yml --limit gitlab-runner
+#   ansible-playbook ansible/playbooks/gitlab-runner-deploy.yml --limit gitlab-runner \
+#     --tags configure,verify -e 'gitlab_runner_force_reregister=true'
 #
 # Tags:
 #   ansible-playbook ... --tags install     # Only install packages
@@ -48,7 +52,7 @@
       ansible.builtin.set_fact:
         gitlab_runner_token: >-
           {{ lookup('ansible.builtin.pipe',
-             'vault kv get -mount=secret -field=token services/gitlab/runner') }}
+             'vault kv get -mount=secret -field=token ' ~ gitlab_runner_token_vault_path) }}
       when: gitlab_runner_token is not defined
       no_log: true
       delegate_to: localhost
@@ -64,7 +68,8 @@
           - gitlab_runner_token is match('^glrt-')
         fail_msg: >
           gitlab_runner_token not found. Either:
-          1. Store in Vault: vault kv put secret/services/gitlab/runner token=glrt-xxxxx
+          1. Store in Vault:
+             vault kv put secret/{{ gitlab_runner_token_vault_path }} token=glrt-xxxxx
           2. Pass via extra-vars: -e 'gitlab_runner_token=glrt-xxxxx'
       tags:
         - always
@@ -74,7 +79,9 @@
         msg: >
           Deploying GitLab Runner on {{ inventory_hostname }}
           (os={{ ansible_os_family }}, arch={{ ansible_architecture }},
-          ip={{ ansible_host }}, gitlab_url={{ gitlab_runner_url }})
+          ip={{ ansible_host }}, gitlab_url={{ gitlab_runner_url }},
+          runner={{ gitlab_runner_name }},
+          token_path=secret/{{ gitlab_runner_token_vault_path }})
 
     # -----------------------------------------------------------------
     # Restic backup secrets from Vault (for restic-backup role)
@@ -100,6 +107,13 @@
       tags: [backup, restic-backup]
 
   vars:
+    gitlab_runner_name: "firblab-linux-docker"
+    gitlab_runner_expected_tags:
+      - docker
+      - linux
+      - firblab
+    gitlab_runner_token_vault_path: "services/gitlab/runner-linux-docker"
+
     # Restic backup configuration (local backup to hdd-mirror-0 via REST server)
     # Runner config.toml has the registered runner token + executor config.
     # Docker volumes/cache are ephemeral — not worth backing up.
@@ -177,6 +191,8 @@
           - "=========================================="
           - "Host: {{ inventory_hostname }} ({{ ansible_host }})"
           - "GitLab URL: {{ gitlab_runner_url }}"
+          - "Runner object: {{ gitlab_runner_name }}"
+          - "Expected tags (server-side): {{ gitlab_runner_expected_tags | join(', ') }}"
           - "Executor: {{ gitlab_runner_executor }}"
           - "Docker image: {{ gitlab_runner_docker_image }}"
           - "Concurrent jobs: {{ gitlab_runner_concurrent }}"

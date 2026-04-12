@@ -91,7 +91,7 @@ locals {
     gitlab-runner = {
       vcpus        = 2
       memory_mb    = 4096
-      disk_size_mb = 40000 # 40 GB
+      disk_size_mb = 100000 # 100 GB
       ip_address   = "10.0.10.51/24"
       node         = "lab-02"
     }

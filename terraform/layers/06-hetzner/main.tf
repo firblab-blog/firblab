@@ -152,11 +152,91 @@ resource "aws_s3_bucket" "tfstate_backups" {
   bucket = "example-lab-tfstate-backups"
 }
 
+check "honeypot_requires_gateway" {
+  assert {
+    condition     = !var.honeypot_enabled || var.gateway_enabled
+    error_message = "The Hetzner honeypot depends on the gateway for WireGuard peer distribution and log shipping. Set gateway_enabled=true when honeypot_enabled=true."
+  }
+}
+
+locals {
+  gateway_records = var.gateway_enabled ? [
+    {
+      name    = "@"
+      type    = "A"
+      content = module.server[0].server_ip
+      comment = "FirbLab gateway server"
+    },
+    {
+      name    = "blog"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "Ghost blog (via WireGuard tunnel)"
+    },
+    {
+      name    = "food"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "Mealie recipe manager (via WireGuard tunnel)"
+    },
+    {
+      name    = "foundryvtt"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "FoundryVTT virtual tabletop (via WireGuard tunnel)"
+    },
+    {
+      name    = "traefik"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "Traefik reverse proxy dashboard"
+    },
+    {
+      name    = "adguard"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "AdGuard Home DNS admin"
+    },
+    {
+      name    = "status"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "Uptime Kuma monitoring"
+    },
+    {
+      name    = "gotify"
+      type    = "CNAME"
+      content = local.domain_name
+      comment = "Gotify push notifications"
+    },
+  ] : []
+
+  honeypot_records = var.honeypot_enabled ? [
+    {
+      name    = "honeypot"
+      type    = "A"
+      content = module.honeypot_server[0].server_ip
+      comment = "FirbLab honeypot server (Cowrie, OpenCanary, Dionaea)"
+    },
+  ] : []
+}
+
+moved {
+  from = module.server
+  to   = module.server[0]
+}
+
+moved {
+  from = module.honeypot_server
+  to   = module.honeypot_server[0]
+}
+
 # ---------------------------------------------------------
 # Hetzner Cloud Server
 # ---------------------------------------------------------
 
 module "server" {
+  count  = var.gateway_enabled ? 1 : 0
   source = "../../modules/hetzner-server/"
 
   # Server identity
@@ -166,6 +246,7 @@ module "server" {
   image       = var.image
 
   # SSH
+  create_ssh_key = true
   ssh_public_key = local.ssh_public_key
 
   # Labels
@@ -289,6 +370,7 @@ module "server" {
 # ---------------------------------------------------------
 
 module "honeypot_server" {
+  count  = var.honeypot_enabled ? 1 : 0
   source = "../../modules/hetzner-server/"
 
   # Server identity
@@ -298,7 +380,9 @@ module "honeypot_server" {
   image       = var.image
 
   # SSH — reuse gateway's key (Hetzner enforces uniqueness on key material)
-  ssh_key_id = module.server.ssh_key_id
+  create_ssh_key = !var.gateway_enabled
+  ssh_key_id     = var.gateway_enabled ? module.server[0].ssh_key_id : null
+  ssh_public_key = var.gateway_enabled ? "" : local.ssh_public_key
 
   # Labels
   labels = {
@@ -427,200 +511,147 @@ module "dns" {
 
   domain_name = local.domain_name
 
-  records = [
-    # Root domain -> gateway server
-    {
-      name    = "@"
-      type    = "A"
-      content = module.server.server_ip
-      comment = "FirbLab gateway server"
-    },
-    # NOTE: No wildcard CNAME — explicit records ONLY.
-    # A wildcard *.example-lab.org catches *.home.example-lab.org queries on public DNS,
-    # which overrides the UCG-Fiber's internal DNS records when clients race
-    # between local and upstream resolvers. This caused Firefox to connect to
-    # the Hetzner Traefik (which has no routes for internal services) instead
-    # of the standalone Traefik proxy (10.0.10.17).
-    #
-    # Explicit service records for Hetzner-proxied services
-    {
-      name    = "blog"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "Ghost blog (via WireGuard tunnel)"
-    },
-    {
-      name    = "food"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "Mealie recipe manager (via WireGuard tunnel)"
-    },
-    {
-      name    = "foundryvtt"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "FoundryVTT virtual tabletop (via WireGuard tunnel)"
-    },
-    {
-      name    = "traefik"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "Traefik reverse proxy dashboard"
-    },
-    {
-      name    = "adguard"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "AdGuard Home DNS admin"
-    },
-    {
-      name    = "status"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "Uptime Kuma monitoring"
-    },
-    {
-      name    = "gotify"
-      type    = "CNAME"
-      content = local.domain_name
-      comment = "Gotify push notifications"
-    },
+  records = concat(
+    [
+      # NOTE: No wildcard CNAME — explicit records ONLY.
+      # A wildcard *.example-lab.org catches *.home.example-lab.org queries on public DNS,
+      # which overrides the UCG-Fiber's internal DNS records when clients race
+      # between local and upstream resolvers. This caused Firefox to connect to
+      # the Hetzner Traefik (which has no routes for internal services) instead
+      # of the standalone Traefik proxy (10.0.10.17).
+      #
+      # Explicit service records for Hetzner-proxied services
+    ],
+    local.gateway_records,
+    [
+      # ---------------------------------------------------------
+      # Migadu Email DNS Records
+      # ---------------------------------------------------------
+      # MX, SPF, DKIM, DMARC for example-lab.org email via Migadu.
+      # All email records MUST have proxied = false (Cloudflare
+      # proxy breaks email — MX/TXT/CNAME need direct DNS).
+      #
+      # DKIM CNAME targets: Copy exact values from Migadu admin
+      # panel → DNS settings before terraform apply.
+      # ---------------------------------------------------------
 
-    # ---------------------------------------------------------
-    # Migadu Email DNS Records
-    # ---------------------------------------------------------
-    # MX, SPF, DKIM, DMARC for example-lab.org email via Migadu.
-    # All email records MUST have proxied = false (Cloudflare
-    # proxy breaks email — MX/TXT/CNAME need direct DNS).
-    #
-    # DKIM CNAME targets: Copy exact values from Migadu admin
-    # panel → DNS settings before terraform apply.
-    # ---------------------------------------------------------
+      # MX records — route inbound email to Migadu
+      {
+        name     = "@"
+        type     = "MX"
+        content  = "aspmx1.migadu.com"
+        priority = 10
+        proxied  = false
+        comment  = "Migadu MX primary"
+      },
+      {
+        name     = "@"
+        type     = "MX"
+        content  = "aspmx2.migadu.com"
+        priority = 20
+        proxied  = false
+        comment  = "Migadu MX secondary"
+      },
 
-    # MX records — route inbound email to Migadu
-    {
-      name     = "@"
-      type     = "MX"
-      content  = "aspmx1.migadu.com"
-      priority = 10
-      proxied  = false
-      comment  = "Migadu MX primary"
-    },
-    {
-      name     = "@"
-      type     = "MX"
-      content  = "aspmx2.migadu.com"
-      priority = 20
-      proxied  = false
-      comment  = "Migadu MX secondary"
-    },
+      # Wildcard MX — catch-all for subdomains (Migadu recommendation)
+      {
+        name     = "*"
+        type     = "MX"
+        content  = "aspmx1.migadu.com"
+        priority = 10
+        proxied  = false
+        comment  = "Migadu wildcard MX primary"
+      },
+      {
+        name     = "*"
+        type     = "MX"
+        content  = "aspmx2.migadu.com"
+        priority = 20
+        proxied  = false
+        comment  = "Migadu wildcard MX secondary"
+      },
 
-    # Wildcard MX — catch-all for subdomains (Migadu recommendation)
-    {
-      name     = "*"
-      type     = "MX"
-      content  = "aspmx1.migadu.com"
-      priority = 10
-      proxied  = false
-      comment  = "Migadu wildcard MX primary"
-    },
-    {
-      name     = "*"
-      type     = "MX"
-      content  = "aspmx2.migadu.com"
-      priority = 20
-      proxied  = false
-      comment  = "Migadu wildcard MX secondary"
-    },
+      # SPF — authorize Migadu to send on behalf of example-lab.org
+      {
+        name    = "@"
+        type    = "TXT"
+        content = "v=spf1 include:spf.migadu.com -all"
+        proxied = false
+        comment = "Migadu SPF"
+      },
 
-    # SPF — authorize Migadu to send on behalf of example-lab.org
-    {
-      name    = "@"
-      type    = "TXT"
-      content = "v=spf1 include:spf.migadu.com -all"
-      proxied = false
-      comment = "Migadu SPF"
-    },
+      # DKIM — Migadu signing keys (verify exact targets in Migadu admin panel)
+      {
+        name    = "key1._domainkey"
+        type    = "CNAME"
+        content = "key1.example-lab.org._domainkey.migadu.com"
+        proxied = false
+        comment = "Migadu DKIM key1"
+      },
+      {
+        name    = "key2._domainkey"
+        type    = "CNAME"
+        content = "key2.example-lab.org._domainkey.migadu.com"
+        proxied = false
+        comment = "Migadu DKIM key2"
+      },
+      {
+        name    = "key3._domainkey"
+        type    = "CNAME"
+        content = "key3.example-lab.org._domainkey.migadu.com"
+        proxied = false
+        comment = "Migadu DKIM key3"
+      },
 
-    # DKIM — Migadu signing keys (verify exact targets in Migadu admin panel)
-    {
-      name    = "key1._domainkey"
-      type    = "CNAME"
-      content = "key1.example-lab.org._domainkey.migadu.com"
-      proxied = false
-      comment = "Migadu DKIM key1"
-    },
-    {
-      name    = "key2._domainkey"
-      type    = "CNAME"
-      content = "key2.example-lab.org._domainkey.migadu.com"
-      proxied = false
-      comment = "Migadu DKIM key2"
-    },
-    {
-      name    = "key3._domainkey"
-      type    = "CNAME"
-      content = "key3.example-lab.org._domainkey.migadu.com"
-      proxied = false
-      comment = "Migadu DKIM key3"
-    },
+      # DMARC — policy for handling SPF/DKIM failures
+      {
+        name    = "_dmarc"
+        type    = "TXT"
+        content = "v=DMARC1; p=quarantine; rua=mailto:postmaster@example-lab.org"
+        proxied = false
+        comment = "DMARC policy"
+      },
 
-    # DMARC — policy for handling SPF/DKIM failures
-    {
-      name    = "_dmarc"
-      type    = "TXT"
-      content = "v=DMARC1; p=quarantine; rua=mailto:postmaster@example-lab.org"
-      proxied = false
-      comment = "DMARC policy"
-    },
+      # Migadu domain ownership verification TXT record
+      # Value from Migadu admin panel → DNS Setup → "Verification TXT Record"
+      {
+        name    = "@"
+        type    = "TXT"
+        content = local.migadu_verification
+        proxied = false
+        comment = "Migadu domain ownership verification"
+      },
 
-    # Migadu domain ownership verification TXT record
-    # Value from Migadu admin panel → DNS Setup → "Verification TXT Record"
-    {
-      name    = "@"
-      type    = "TXT"
-      content = local.migadu_verification
-      proxied = false
-      comment = "Migadu domain ownership verification"
-    },
+      # Thunderbird/Outlook auto-discovery CNAMEs
+      {
+        name    = "autoconfig"
+        type    = "CNAME"
+        content = "autoconfig.migadu.com"
+        proxied = false
+        comment = "Thunderbird autoconfig via Migadu"
+      },
+      {
+        name    = "autodiscover"
+        type    = "CNAME"
+        content = "autodiscover.migadu.com"
+        proxied = false
+        comment = "Outlook autodiscover via Migadu"
+      },
 
-    # Thunderbird/Outlook auto-discovery CNAMEs
-    {
-      name    = "autoconfig"
-      type    = "CNAME"
-      content = "autoconfig.migadu.com"
-      proxied = false
-      comment = "Thunderbird autoconfig via Migadu"
-    },
-    {
-      name    = "autodiscover"
-      type    = "CNAME"
-      content = "autodiscover.migadu.com"
-      proxied = false
-      comment = "Outlook autodiscover via Migadu"
-    },
-
-    # Honeypot server — separate IP, visible to scanners (intentional)
-    # Appended at end of list to preserve existing record indices
-    {
-      name    = "honeypot"
-      type    = "A"
-      content = module.honeypot_server.server_ip
-      comment = "FirbLab honeypot server (Cowrie, OpenCanary, Dionaea)"
-    },
-
-    # ---------------------------------------------------------
-    # SRV records — MANUALLY MANAGED in Cloudflare
-    # ---------------------------------------------------------
-    # Cloudflare provider v5 cannot create SRV records — the API
-    # requires structured data fields (weight, port, target) but
-    # cloudflare_dns_record only supports the content string field.
-    # Create these 4 records manually in the Cloudflare dashboard:
-    #
-    #   _autodiscover._tcp  SRV  0 1 443  autodiscover.migadu.com
-    #   _imaps._tcp         SRV  0 1 993  imap.migadu.com
-    #   _pop3s._tcp         SRV  0 1 995  pop.migadu.com
-    #   _submissions._tcp   SRV  0 1 465  smtp.migadu.com
-    # ---------------------------------------------------------
-  ]
+      # ---------------------------------------------------------
+      # SRV records — MANUALLY MANAGED in Cloudflare
+      # ---------------------------------------------------------
+      # Cloudflare provider v5 cannot create SRV records — the API
+      # requires structured data fields (weight, port, target) but
+      # cloudflare_dns_record only supports the content string field.
+      # Create these 4 records manually in the Cloudflare dashboard:
+      #
+      #   _autodiscover._tcp  SRV  0 1 443  autodiscover.migadu.com
+      #   _imaps._tcp         SRV  0 1 993  imap.migadu.com
+      #   _pop3s._tcp         SRV  0 1 995  pop.migadu.com
+      #   _submissions._tcp   SRV  0 1 465  smtp.migadu.com
+      # ---------------------------------------------------------
+    ],
+    local.honeypot_records,
+  )
 }

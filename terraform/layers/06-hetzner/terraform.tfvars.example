@@ -15,10 +15,18 @@ hcloud_token = "your-hetzner-cloud-api-token"
 # ---------------------------------------------------------
 # Server Configuration
 # ---------------------------------------------------------
+gateway_enabled = true
 server_name = "lab-gateway"
 server_type = "cpx21"
 location    = "fsn1"
 image       = "ubuntu-24.04"
+
+# ---------------------------------------------------------
+# Honeypot Configuration
+# ---------------------------------------------------------
+honeypot_enabled     = true
+honeypot_server_name = "lab-honeypot"
+honeypot_server_type = "cpx21"
 
 # ---------------------------------------------------------
 # SSH

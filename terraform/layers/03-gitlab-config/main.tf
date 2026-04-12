@@ -327,6 +327,24 @@ locals {
     "status::wip"        = "#808080"
     "status::review"     = "#0066CC"
     "status::done"       = "#00AA00"
+    "severity::critical" = "#8B0000"
+    "severity::high"     = "#D35400"
+    "severity::medium"   = "#B7950B"
+    "severity::low"      = "#1E8449"
+    "type::security-audit" = "#C0392B"
+    "scope::auth"        = "#6C3483"
+    "scope::infra"       = "#2E86C1"
+    "scope::api"         = "#17A589"
+    "scope::frontend"    = "#D4AC0D"
+    "scope::cicd"        = "#CA6F1E"
+    "scope::database"    = "#2874A6"
+    "nist::ac"           = "#7D3C98"
+    "nist::sc"           = "#2E4053"
+    "nist::si"           = "#1A5276"
+    "nist::au"           = "#6E2C00"
+    "nist::sa"           = "#4A235A"
+    "nist::ia"           = "#0E6251"
+    "nist::cm"           = "#7E5109"
   }
 
   # Build cross-product: each project × each label
@@ -1224,6 +1242,11 @@ locals {
     m7 = {
       title       = "M7: Hardening And Product Readiness"
       description = "Make Cogit viable for serious daily use and security review.\n\nExit criteria: Cogit is not just promising, it is operable and trustworthy."
+      state       = "active"
+    }
+    m11 = {
+      title       = "M11: Security Audit Remediation"
+      description = "Address all findings from the March 2026 comprehensive security audit evaluating Cogit against FedRAMP and NIST 800-53 requirements.\n\n22 findings identified: 1 CRITICAL, 8 HIGH, 9 MEDIUM, 4 LOW.\n\nExit criteria: all CRITICAL and HIGH findings resolved, all MEDIUM findings resolved or documented with approved risk acceptance, re-audit confirms FedRAMP readiness."
       state       = "active"
     }
   }

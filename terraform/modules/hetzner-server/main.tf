@@ -15,14 +15,14 @@ terraform {
 # sharing the same public key must reuse the same hcloud_ssh_key.
 
 resource "hcloud_ssh_key" "default" {
-  count      = var.ssh_key_id == null ? 1 : 0
+  count      = var.create_ssh_key ? 1 : 0
   name       = "${var.name}-ssh-key"
   public_key = var.ssh_public_key
   labels     = var.labels
 }
 
 locals {
-  ssh_key_id = var.ssh_key_id != null ? var.ssh_key_id : hcloud_ssh_key.default[0].id
+  ssh_key_id = var.create_ssh_key ? hcloud_ssh_key.default[0].id : var.ssh_key_id
 }
 
 # ---------------------------------------------------------

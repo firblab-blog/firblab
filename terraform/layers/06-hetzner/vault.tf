@@ -21,8 +21,10 @@ resource "vault_kv_secret_v2" "hetzner_server_ips" {
   name  = "infra/hetzner/server_ips"
 
   data_json = jsonencode({
-    gateway_ip  = module.server.server_ip
-    honeypot_ip = module.honeypot_server.server_ip
+    gateway_enabled  = var.gateway_enabled
+    gateway_ip       = try(module.server[0].server_ip, null)
+    honeypot_enabled = var.honeypot_enabled
+    honeypot_ip      = try(module.honeypot_server[0].server_ip, null)
   })
 }
 

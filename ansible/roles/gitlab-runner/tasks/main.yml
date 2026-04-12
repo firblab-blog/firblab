@@ -27,6 +27,63 @@
   tags:
     - install
 
+- name: Install filesystem resize tools
+  ansible.builtin.apt:
+    name: "{{ gitlab_runner_rootfs_resize_packages }}"
+    state: present
+  when: gitlab_runner_rootfs_auto_grow | bool
+  tags:
+    - install
+    - storage
+
+# ---------------------------------------------------------------------------
+# Root Filesystem Growth
+# ---------------------------------------------------------------------------
+- name: Discover root filesystem source
+  ansible.builtin.command:
+    cmd: findmnt -n -o SOURCE /
+  register: gitlab_runner_rootfs_source
+  changed_when: false
+  when: gitlab_runner_rootfs_auto_grow | bool
+  tags:
+    - configure
+    - storage
+
+- name: Discover root filesystem type
+  ansible.builtin.command:
+    cmd: findmnt -n -o FSTYPE /
+  register: gitlab_runner_rootfs_type
+  changed_when: false
+  when: gitlab_runner_rootfs_auto_grow | bool
+  tags:
+    - configure
+    - storage
+
+- name: Grow ext filesystem on runner root volume
+  ansible.builtin.command:
+    cmd: "resize2fs {{ gitlab_runner_rootfs_source.stdout }}"
+  register: gitlab_runner_resize2fs
+  changed_when: "'Nothing to do' not in (gitlab_runner_resize2fs.stdout | default(''))"
+  when:
+    - gitlab_runner_rootfs_auto_grow | bool
+    - gitlab_runner_rootfs_type.stdout in ["ext2", "ext3", "ext4"]
+  tags:
+    - configure
+    - storage
+
+- name: Grow XFS filesystem on runner root volume
+  ansible.builtin.command:
+    cmd: xfs_growfs /
+  register: gitlab_runner_xfs_growfs
+  changed_when: >-
+    'data blocks changed from' in (gitlab_runner_xfs_growfs.stdout | default(''))
+  when:
+    - gitlab_runner_rootfs_auto_grow | bool
+    - gitlab_runner_rootfs_type.stdout == "xfs"
+  tags:
+    - configure
+    - storage
+
 # ---------------------------------------------------------------------------
 # GitLab Runner Repository
 # ---------------------------------------------------------------------------
@@ -116,6 +173,66 @@
   tags:
     - configure
 
+- name: Read existing runner config
+  ansible.builtin.slurp:
+    path: "{{ gitlab_runner_config_path }}"
+  register: runner_config_content
+  when: runner_config_stat.stat.exists
+  tags:
+    - configure
+    - register
+
+- name: Extract current runner token from config
+  ansible.builtin.set_fact:
+    gitlab_runner_current_token: >-
+      {{
+        ((runner_config_content.content | b64decode)
+        | regex_findall('(?m)^\\s*token\\s*=\\s*"([^"]+)"'))
+        | first
+        | default('')
+      }}
+  when: runner_config_stat.stat.exists
+  no_log: true
+  tags:
+    - configure
+    - register
+
+- name: Determine whether local runner registration must be recreated
+  ansible.builtin.set_fact:
+    gitlab_runner_registration_present: >-
+      {{ (gitlab_runner_current_token | default('')) | length > 0 }}
+    gitlab_runner_needs_reregistration: >-
+      {{
+        (gitlab_runner_force_reregister | bool) or
+        (
+          ((gitlab_runner_current_token | default('')) | length > 0) and
+          (gitlab_runner_current_token != gitlab_runner_token)
+        )
+      }}
+  no_log: true
+  tags:
+    - configure
+    - register
+
+- name: Stop gitlab-runner before replacing local registration
+  ansible.builtin.systemd:
+    name: gitlab-runner
+    state: stopped
+  when: gitlab_runner_needs_reregistration
+  failed_when: false
+  tags:
+    - configure
+    - register
+
+- name: Remove local runner config before re-registration
+  ansible.builtin.file:
+    path: "{{ gitlab_runner_config_path }}"
+    state: absent
+  when: gitlab_runner_needs_reregistration
+  tags:
+    - configure
+    - register
+
 - name: Template GitLab Runner global configuration
   ansible.builtin.template:
     src: config.toml.j2
@@ -124,7 +241,8 @@
     group: root
     mode: "0600"
     backup: true
-  when: not runner_config_stat.stat.exists
+  when:
+    - (not runner_config_stat.stat.exists) or gitlab_runner_needs_reregistration
   notify: Restart gitlab-runner
   tags:
     - configure
@@ -144,27 +262,19 @@
 # ---------------------------------------------------------------------------
 # GitLab 16+ uses glrt- authentication tokens (new creation workflow).
 # Tags, description, locked, run-untagged, etc. are configured SERVER-SIDE
-# in the GitLab UI when creating the runner — NOT via CLI flags.
+# on the dedicated runner object — NOT via CLI flags.
 # The register command only accepts: --url, --token, --executor, and
 # executor-specific options (--docker-image, --docker-volumes, etc.).
 # See: https://docs.gitlab.com/ci/runners/new_creation_workflow/
-
-- name: Check if a runner is already registered
-  ansible.builtin.command:
-    cmd: gitlab-runner list
-  register: runner_list_check
-  changed_when: false
-  failed_when: false
-  tags:
-    - configure
-    - register
 
 - name: Update runner URL in existing config
   ansible.builtin.lineinfile:
     path: "{{ gitlab_runner_config_path }}"
     regexp: '^\s*url\s*=\s*"'
     line: '  url = "{{ gitlab_runner_url }}"'
-  when: runner_list_check.stderr is search('Executor')
+  when:
+    - gitlab_runner_registration_present
+    - not gitlab_runner_needs_reregistration
   notify: Restart gitlab-runner
   tags:
     - configure
@@ -183,7 +293,7 @@
   when:
     - gitlab_runner_token is defined
     - gitlab_runner_token | length > 0
-    - runner_list_check.stderr is not search('Executor')
+    - (not gitlab_runner_registration_present) or gitlab_runner_needs_reregistration
   notify: Restart gitlab-runner
   tags:
     - configure

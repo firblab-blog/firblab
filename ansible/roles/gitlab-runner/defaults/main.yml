@@ -5,7 +5,7 @@
 # Override in group_vars/core_infra.yml or via extra-vars.
 #
 # Runner registration requires a glrt- token (GitLab 16+). The token is
-# pulled from Vault at secret/services/gitlab/runner by the playbook.
+# pulled from Vault at secret/services/gitlab/runner-linux-docker by the playbook.
 # Manual override is still supported via extra-vars:
 #   -e 'gitlab_runner_token=glrt-xxxxx'
 # =============================================================================
@@ -18,15 +18,24 @@ gitlab_runner_url: "https://gitlab.home.example-lab.org"
 
 # Runner authentication token (glrt- prefix, from GitLab UI/API).
 # REQUIRED at runtime — pulled from Vault by gitlab-runner-deploy.yml.
-# Vault path: secret/services/gitlab/runner (key: token)
+# Vault path: secret/services/gitlab/runner-linux-docker (key: token)
 # Do NOT hardcode tokens in group_vars or defaults.
 # gitlab_runner_token: ""
+gitlab_runner_token_vault_path: "services/gitlab/runner-linux-docker"
 
 # ---------------------------------------------------------------------------
 # Runner Identity
 # ---------------------------------------------------------------------------
-gitlab_runner_description: "firblab-runner-docker"
-gitlab_runner_tags: "docker,linux,firblab"
+gitlab_runner_name: "firblab-linux-docker"
+gitlab_runner_expected_tags:
+  - docker
+  - linux
+  - firblab
+
+# Remove only the local runner config and re-register this Linux host.
+# This is useful when rotating from an old shared runner token/object to
+# the dedicated Linux runner object.
+gitlab_runner_force_reregister: false
 
 # ---------------------------------------------------------------------------
 # Executor Configuration
@@ -42,6 +51,15 @@ gitlab_runner_docker_volumes:
 # ---------------------------------------------------------------------------
 # Maximum number of concurrent jobs across all runners on this host.
 gitlab_runner_concurrent: 2
+
+# ---------------------------------------------------------------------------
+# Root Filesystem Growth
+# ---------------------------------------------------------------------------
+# Grow the root filesystem after Terraform increases the underlying LXC disk.
+gitlab_runner_rootfs_auto_grow: true
+gitlab_runner_rootfs_resize_packages:
+  - e2fsprogs
+  - xfsprogs
 
 # ---------------------------------------------------------------------------
 # Docker Extra Hosts (DNS overrides for executor containers)
