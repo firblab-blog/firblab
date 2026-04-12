@@ -362,5 +362,14 @@ traefik_backends:
     backend_url: "http://10.0.10.131:4312"
     forwardauth: true
     insecure_backend: false
-    websocket: false
     websocket: true               # workbench may use WebSocket for live updates
+  # -------------------------------------------------------------------------
+  # FirbLab AI Platform (runtime-service VM on Management VLAN 10)
+  # Access is gated by Authentik ForwardAuth through the shared Traefik path.
+  # -------------------------------------------------------------------------
+  ai_platform:
+    subdomain: ai-platform
+    backend_url: "http://10.0.10.132:3000"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true

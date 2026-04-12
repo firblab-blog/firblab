@@ -440,6 +440,11 @@ locals {
       external_host = "https://cogit.home.example-lab.org"
       app_group     = "Infrastructure"
     }
+    ai_platform = {
+      name          = "AI Platform"
+      external_host = "https://ai-platform.home.example-lab.org"
+      app_group     = "Infrastructure"
+    }
 
   }
 

@@ -36,6 +36,7 @@ internal_dns_entries:
       - patchmon.home.example-lab.org
       - backrest.home.example-lab.org
       - cogit.home.example-lab.org
+      - ai-platform.home.example-lab.org
       - openwebui.home.example-lab.org
       - argocd.home.example-lab.org
       - netbox.home.example-lab.org

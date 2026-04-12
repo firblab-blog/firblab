@@ -42,27 +42,27 @@ locals {
 
   # K3s workloads — K3s Traefik (Ingress in k8s/k3s-platform/)
   k3s_traefik_services = toset([
-    "grafana",     # Monitoring dashboards (migrated from RKE2)
+    "grafana", # Monitoring dashboards (migrated from RKE2)
   ])
 
   # ALL standalone + management services → standalone Traefik proxy
   # TLS termination via Let's Encrypt DNS-01. Traefik routes by Host header.
   proxy_services = toset([
-    "ghost",         # Standalone LXC — blog (ForwardAuth)
-    "mail",          # Roundcube LXC — webmail (ForwardAuth)
-    "foundryvtt",    # Standalone VM — virtual tabletop (ForwardAuth)
-    "mealie",        # Standalone LXC — recipe manager (native OIDC)
-    "netbox",        # Standalone VM — DCIM/IPAM (native OIDC)
-    "patchmon",      # Standalone VM — patch monitoring (native OIDC)
-    "actualbudget",  # Standalone LXC — personal finance (ForwardAuth)
-    "git",           # Alias for GitLab (short subdomain)
-    "gitlab",        # Management VM — source control (native OIDC)
-    "auth",          # Management VM — Authentik SSO/IDP
-    "pbs",           # Management VM — Proxmox Backup Server (ForwardAuth)
-    "vaultwarden",       # Standalone LXC — password vault (native OIDC)
-    "changedetection",   # Standalone LXC — web page change monitor (ForwardAuth)
-    "openwebui",     # Standalone VM — AI chat UI (ForwardAuth)
-    "n8n",           # Standalone VM — workflow automation (ForwardAuth)
+    "ghost",           # Standalone LXC — blog (ForwardAuth)
+    "mail",            # Roundcube LXC — webmail (ForwardAuth)
+    "foundryvtt",      # Standalone VM — virtual tabletop (ForwardAuth)
+    "mealie",          # Standalone LXC — recipe manager (native OIDC)
+    "netbox",          # Standalone VM — DCIM/IPAM (native OIDC)
+    "patchmon",        # Standalone VM — patch monitoring (native OIDC)
+    "actualbudget",    # Standalone LXC — personal finance (ForwardAuth)
+    "git",             # Alias for GitLab (short subdomain)
+    "gitlab",          # Management VM — source control (native OIDC)
+    "auth",            # Management VM — Authentik SSO/IDP
+    "pbs",             # Management VM — Proxmox Backup Server (ForwardAuth)
+    "vaultwarden",     # Standalone LXC — password vault (native OIDC)
+    "changedetection", # Standalone LXC — web page change monitor (ForwardAuth)
+    "openwebui",       # Standalone VM — AI chat UI (ForwardAuth)
+    "n8n",             # Standalone VM — workflow automation (ForwardAuth)
     # Archive appliance (ZimaBlade 7700 bare-metal, Services VLAN 20)
     "archive",       # FileBrowser file manager (ForwardAuth)
     "kiwix",         # Kiwix Serve — offline Wikipedia/StackExchange/iFixit (ForwardAuth)
@@ -75,30 +75,30 @@ locals {
     "homeassistant", # IoT RPi5 — Home Assistant (native OIDC)
     "freshrss",      # Standalone LXC — RSS feed aggregator (native OIDC)
     # Internal notification server (LXC on Management VLAN 10, 10.0.10.20)
-    "gotify",        # Management LXC — internal push notification server (native app-token auth)
+    "gotify", # Management LXC — internal push notification server (native app-token auth)
     # Hetzner gateway services — proxied via standalone Traefik to *.example-lab.org
-    "adguard",       # Hetzner — DNS-level ad blocking (native auth)
+    "adguard", # Hetzner — DNS-level ad blocking (native auth)
     # TrueNAS apps (Storage VLAN 40, 10.0.40.2)
-    "archiver",      # Mail Archiver (native OIDC)
-    "truenas",       # TrueNAS web UI (native auth)
-    "immich",        # Photo management (native auth)
-    "linkwarden",    # Bookmark manager (native auth)
-    "paperless",     # Paperless-ngx document management (native auth)
-    "plex",          # Plex Media Server (Plex account auth)
-    "portracker",    # Port tracker (native auth)
-    "tools",         # IT Tools developer utilities (native auth)
-    "search",        # SearXNG metasearch engine (ForwardAuth)
+    "archiver",   # Mail Archiver (native OIDC)
+    "truenas",    # TrueNAS web UI (native auth)
+    "immich",     # Photo management (native auth)
+    "linkwarden", # Bookmark manager (native auth)
+    "paperless",  # Paperless-ngx document management (native auth)
+    "plex",       # Plex Media Server (Plex account auth)
+    "portracker", # Port tracker (native auth)
+    "tools",      # IT Tools developer utilities (native auth)
+    "search",     # SearXNG metasearch engine (ForwardAuth)
     # WAR Platform (lab-01, Services VLAN 20)
-    "war",           # WAR multi-agent adjudication platform (ForwardAuth)
+    "war", # WAR multi-agent adjudication platform (ForwardAuth)
     # SonarQube CE (lab-01, Services VLAN 20) — moved from K8s to standalone VM
-    "sonarqube",     # Static code analysis, GitLab ALM integration (ForwardAuth)
-    # Cogit workbench — static runtime-service VM behind shared Traefik + Authentik
-    "cogit",         # Cogit workbench — MCP, HTTP, CLI, passive files
+    "sonarqube", # Static code analysis, GitLab ALM integration (ForwardAuth)
+    # Runtime-service DNS hostnames moved to firblab-v2 00-network.
+    # Keep the live proxy/auth stack here, but avoid duplicate UniFi DNS ownership.
     # Proxmox node UIs (Management VLAN 10 — self-signed certs, proxied for valid TLS)
-    "pve-01",        # lab-01 (i9-12900K, main compute)
-    "pve-02",        # lab-02 (N100, pilot node)
-    "pve-03",        # lab-03 (N100, lightweight services)
-    "pve-04",        # lab-04 (J5005, lightweight compute)
+    "pve-01", # lab-01 (i9-12900K, main compute)
+    "pve-02", # lab-02 (N100, pilot node)
+    "pve-03", # lab-03 (N100, lightweight services)
+    "pve-04", # lab-04 (J5005, lightweight compute)
   ])
 
   # Direct IPs — own TLS, no proxy needed

@@ -119,3 +119,7 @@ uptime_kuma_monitors:
   - name: "Open WebUI"
     type: http
     url: "https://openwebui.home.example-lab.org"
+
+  - name: "AI Platform"
+    type: http
+    url: "https://ai-platform.home.example-lab.org"
