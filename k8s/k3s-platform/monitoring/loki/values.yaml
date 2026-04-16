@@ -97,3 +97,6 @@ promtail:
 # Grafana is managed by kube-prometheus-stack, not here
 grafana:
   enabled: false
+  sidecar:
+    datasources:
+      enabled: false

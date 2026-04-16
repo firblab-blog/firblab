@@ -99,6 +99,7 @@ vault_firewall_ports:
   - { port: "{{ vault_cluster_port }}", proto: tcp, comment: "Vault cluster" }
 vault_firewall_sources:
   - "{{ management_network }}"
+  - "{{ services_network }}"       # VLAN 20 — K3s/RKE2 nodes, ESO, in-cluster clients
   - "{{ workload_subnet }}"
   - "{{ lan_network }}"
   - "{{ iot_network }}"            # VLAN 60 — Home Assistant Vault REST sensors

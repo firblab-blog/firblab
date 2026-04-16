@@ -7,6 +7,7 @@
 
 # Macros
 mgmt_net = "{{ pf_management_network }}"
+svc_net = "{{ pf_services_network }}"
 sec_net = "{{ pf_security_network }}"
 lan_net = "{{ pf_lan_network }}"
 
@@ -35,6 +36,7 @@ pass in inet proto tcp from $lan_net to any port {{ port }} keep state
 # (Vault runs natively on this host as a LaunchDaemon)
 {% for port in pf_vault_tcp_ports %}
 pass in inet proto tcp from $mgmt_net to any port {{ port }} keep state
+pass in inet proto tcp from $svc_net to any port {{ port }} keep state
 pass in inet proto tcp from $sec_net to any port {{ port }} keep state
 {% endfor %}
 

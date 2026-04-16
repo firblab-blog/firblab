@@ -29,6 +29,7 @@ sshd_allow_users:
 # ---------------------------------------------------------------------------
 # Networks allowed to access this host
 pf_management_network: "10.0.10.0/24"
+pf_services_network: "10.0.20.0/24"
 pf_security_network: "10.0.50.0/24"
 pf_lan_network: "10.0.4.0/24"
 
