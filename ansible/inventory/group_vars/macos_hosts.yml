@@ -43,6 +43,10 @@ pf_vault_tcp_ports:
   - 8200   # Vault API
   - 8201   # Vault Raft cluster
 
+# Ports open from LAN for workstation-driven operator access.
+pf_vault_lan_tcp_ports:
+  - 8200   # Vault API
+
 # Ports open only from management VLAN (unseal vault)
 pf_unseal_tcp_ports:
   - 8210   # Unseal Vault API

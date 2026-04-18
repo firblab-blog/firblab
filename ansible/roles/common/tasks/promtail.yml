@@ -4,7 +4,7 @@
 # =============================================================================
 # Downloads and installs Promtail as a systemd service on Linux hosts.
 # Collects system logs (syslog, auth, kernel, application) and ships them
-# to the Loki instance running on the RKE2 cluster via NodePort 31100.
+# to the Loki instance running on the K3s monitoring cluster.
 #
 # Log sources collected:
 #   - /var/log/syslog or /var/log/messages (OS family dependent)
@@ -13,9 +13,9 @@
 #   - /var/log/*-exporter.log (where applicable)
 #
 # Network requirements:
-#   - Reaching Loki NodePort 31100 at 10.0.20.40 requires:
+#   - Reaching Loki at 10.0.20.201:3100 requires:
 #     - Management/Services/LAN hosts: general ALLOW zone policies ✅
-#     - DMZ/Security hosts: port 31100 NOT in existing policies — deferred
+#     - DMZ/Security hosts: dedicated monitoring allow rules may still be needed
 #
 # Controlled by: monitoring_promtail_enabled (default: true in all.yml)
 # =============================================================================

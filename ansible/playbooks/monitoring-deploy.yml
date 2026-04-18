@@ -12,16 +12,16 @@
 #   monitoring_host_group: <label for Prometheus / Loki>
 #
 # Groups where monitoring is DISABLED:
-#   - rke2_cluster    → kube-prometheus-stack DaemonSet handles this
+#   - rke2_cluster    → cluster has been decommissioned; kept here as a no-op guardrail
 #   - macos_hosts     → Darwin excluded via :!darwin_hosts in hosts pattern
-#   - hetzner         → can't reach internal Loki NodePort (different network)
+#   - hetzner         → ships logs with Alloy instead of the generic Promtail role
 #
 # Groups requiring special consideration:
 #   - proxmox_nodes   → UFW skipped (proxmox_skip_ufw: true). Ensure the PVE
 #                       host firewall allows TCP/9100 from 10.0.20.0/24.
 #   - vault_cluster   → vault-2 (Security VLAN 50) needs the new UniFi zone
 #                       policy services_to_security_monitoring (Layer 00).
-#   - dmz_services    → Promtail disabled (dmz→services TCP/31100 blocked).
+#   - dmz_services    → Promtail disabled by group_vars until the DMZ → K3s Loki path is opened
 #   - rpi             → includes lab-rpi (=vault-3, run twice; idempotent)
 #                       and lab-08 (bare-metal RPi4, Default LAN).
 #
@@ -38,7 +38,7 @@
 #
 # Prerequisites:
 #   - Vault is unsealed and reachable at https://10.0.10.10:8200
-#   - Loki is running: NodePort 31100 on 10.0.20.40
+#   - Loki is running on the K3s monitoring cluster at http://10.0.20.201:3100
 #   - Export VAULT_ADDR and VAULT_TOKEN, or use standard Ansible Vault
 # =============================================================================
 
@@ -56,6 +56,9 @@
     traefik_proxy:
     dmz_services:
     rpi:!darwin_hosts
+    backup_server:
+    uptime_kuma_internal:
+    gotify:
   become: true
   gather_facts: true
   tags: [monitoring]
@@ -73,7 +76,7 @@
     _monitoring_only: true
 
 # ---------------------------------------------------------------------------
-# RKE2 cluster nodes — SKIP (kube-prometheus-stack DaemonSet is authoritative)
+# Legacy RKE2 cluster group — retained as a harmless no-op after decommission
 # ---------------------------------------------------------------------------
 - name: Monitoring agents skipped on RKE2 nodes
   hosts: rke2_cluster
@@ -83,5 +86,5 @@
       ansible.builtin.debug:
         msg: >-
           Skipping monitoring agent install on {{ inventory_hostname }}.
-          kube-prometheus-stack node_exporter DaemonSet manages these hosts.
+          The legacy RKE2 cluster has been decommissioned.
       tags: [monitoring]

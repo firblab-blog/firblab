@@ -33,6 +33,12 @@ firewall_additional_sources: "{{ gotify_firewall_sources }}"
 firewall_docker_forwarding: false
 
 # ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+monitoring_host_group: "monitoring-infra"
+monitoring_promtail_docker_logs: true
+
+# ---------------------------------------------------------------------------
 # Gotify Apps — notification apps to create (tag: seed)
 # ---------------------------------------------------------------------------
 # These apps are for INTERNAL homelab services. External services (Alertmanager,

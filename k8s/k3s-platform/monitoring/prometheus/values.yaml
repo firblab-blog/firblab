@@ -5,7 +5,7 @@
 # Sized for 3 bare-metal RPi5 nodes (8GB+8GB+4GB). Heavy workloads pinned
 # to standard (8GB) nodes via nodeSelector.
 #
-# Compared to RKE2 (k8s/platform/monitoring/prometheus/values.yaml):
+# Compared to the old RKE2 monitoring stack:
 #   - local-path instead of Longhorn StorageClass
 #   - 14d retention (from 30d), 20Gi (from 50Gi) — NVMe death recoverable
 #   - nodeExporter DaemonSet DISABLED (bare-metal port 9100 conflict)
@@ -194,11 +194,29 @@ prometheus:
           - targets: ['10.0.10.18:9100']
             labels:
               instance: backup
-              group: core-infra
+              group: backup-infra
               role: backup-lxc
               vlan: "10"
+          - targets: ['10.0.10.17:9100']
+            labels:
+              instance: traefik-proxy
+              group: traefik
+              role: reverse-proxy
+              vlan: "10"
+          - targets: ['10.0.10.19:9100']
+            labels:
+              instance: uptime-kuma-internal
+              group: monitoring-infra
+              role: uptime-kuma
+              vlan: "10"
+          - targets: ['10.0.10.20:9100']
+            labels:
+              instance: gotify
+              group: monitoring-infra
+              role: gotify
+              vlan: "10"
 
-      # ---- Restic REST server (backup LXC — Management VLAN 10) ----------------
+      # ---- Restic REST server (backup LXC — Management VLAN 10) -------------
       # --prometheus-no-auth exposes /metrics without htpasswd credentials.
       # Metrics: bytes in/out per repo, request counts by type.
       # Network path: Services VLAN 20 → Management VLAN 10 (unrestricted ALLOW).
@@ -246,29 +264,11 @@ prometheus:
               group: standalone-services
               role: dcim-ipam
               vlan: "20"
-          - targets: ['10.0.20.15:9100']
-            labels:
-              instance: patchmon
-              group: standalone-services
-              role: patch-management
-              vlan: "20"
-          - targets: ['10.0.20.16:9100']
-            labels:
-              instance: actualbudget
-              group: standalone-services
-              role: finance
-              vlan: "20"
           - targets: ['10.0.20.18:9100']
             labels:
-              instance: ai-gpu
+              instance: sonarqube
               group: standalone-services
-              role: ai-inference
-              vlan: "20"
-          - targets: ['10.0.20.19:9100']
-            labels:
-              instance: vaultwarden
-              group: standalone-services
-              role: password-manager
+              role: code-quality
               vlan: "20"
           - targets: ['10.0.20.20:9100']
             labels:
@@ -382,6 +382,10 @@ grafana:
       auth_url: https://auth.home.example-lab.org/application/o/authorize/
       token_url: https://auth.home.example-lab.org/application/o/token/
       api_url: https://auth.home.example-lab.org/application/o/userinfo/
+      login_attribute_path: preferred_username
+      name_attribute_path: name
+      email_attribute_path: email
+      groups_attribute_path: groups
       role_attribute_path: contains(groups[*], 'authentik-admins') && 'Admin' || 'Viewer'
       auto_login: false
     auth:
