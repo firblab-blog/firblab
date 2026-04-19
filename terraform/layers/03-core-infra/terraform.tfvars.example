@@ -53,7 +53,7 @@ gitlab_ip_address        = "dhcp"
 # ---------------------------------------------------------
 gitlab_runner_vm_id       = 3002
 gitlab_runner_name        = "gitlab-runner"
-gitlab_runner_cpu_cores   = 2
+gitlab_runner_cpu_cores   = 4
 gitlab_runner_memory_mb   = 4096
 gitlab_runner_disk_size_gb = 100
 gitlab_runner_ip_address  = "dhcp"

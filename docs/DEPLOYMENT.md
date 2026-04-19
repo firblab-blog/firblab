@@ -702,7 +702,7 @@ terraform apply
 | Resource | Type | IP | Network |
 |---|---|---|---|
 | GitLab CE | VM (8GB, 4 CPU) | 10.0.10.50 | Management (untagged on vmbr0) |
-| GitLab Runner | LXC (2GB, 2 CPU) | 10.0.10.51 | Management (untagged on vmbr0) |
+| GitLab Runner | LXC (2GB, 4 CPU) | 10.0.10.51 | Management (untagged on vmbr0) |
 
 Terraform reads Proxmox credentials from Vault via the Vault provider (`data "vault_kv_secret_v2"`). Cloud-init snippets require SSH to the Proxmox host (provider `ssh { agent = true }` block).
 
@@ -897,6 +897,17 @@ This creates 4 instance-level CI/CD variables (visible under **Admin > Settings 
 | `VAULT_SECRET_ID` | env_var | No | Yes | Layer 02-vault-config output |
 
 All variables are unprotected (available on all branches) so MR pipelines can run `terraform plan`.
+
+#### 4.6.3 Manage Public GitHub Repositories (Layer 03-github-public)
+
+```bash
+cd terraform/layers/03-github-public
+terraform apply
+```
+
+This layer owns public GitHub repository settings and branch protections.
+It is intentionally separate from `03-gitlab-config` so GitHub API rate limits
+do not block routine GitLab configuration changes.
 
 #### 4.6.3 Pipeline Vault Login Pattern
 

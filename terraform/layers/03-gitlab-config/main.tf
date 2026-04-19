@@ -311,40 +311,40 @@ locals {
   # Uses the setproduct pattern to create a cross-product of projects × labels.
   # ---------------------------------------------------------------------------
   common_labels = {
-    "bug"                = "#D73A4A"
-    "enhancement"        = "#A2EEEF"
-    "documentation"      = "#0075CA"
-    "security"           = "#E4E669"
-    "tech-debt"          = "#D876E3"
-    "priority::critical" = "#FF0000"
-    "priority::high"     = "#FF9900"
-    "priority::medium"   = "#FFCC00"
-    "priority::low"      = "#00CC00"
-    "type::terraform"    = "#7B42BC"
-    "type::ansible"      = "#EE0000"
-    "type::docker"       = "#2496ED"
-    "type::kubernetes"   = "#326CE5"
-    "status::wip"        = "#808080"
-    "status::review"     = "#0066CC"
-    "status::done"       = "#00AA00"
-    "severity::critical" = "#8B0000"
-    "severity::high"     = "#D35400"
-    "severity::medium"   = "#B7950B"
-    "severity::low"      = "#1E8449"
+    "bug"                  = "#D73A4A"
+    "enhancement"          = "#A2EEEF"
+    "documentation"        = "#0075CA"
+    "security"             = "#E4E669"
+    "tech-debt"            = "#D876E3"
+    "priority::critical"   = "#FF0000"
+    "priority::high"       = "#FF9900"
+    "priority::medium"     = "#FFCC00"
+    "priority::low"        = "#00CC00"
+    "type::terraform"      = "#7B42BC"
+    "type::ansible"        = "#EE0000"
+    "type::docker"         = "#2496ED"
+    "type::kubernetes"     = "#326CE5"
+    "status::wip"          = "#808080"
+    "status::review"       = "#0066CC"
+    "status::done"         = "#00AA00"
+    "severity::critical"   = "#8B0000"
+    "severity::high"       = "#D35400"
+    "severity::medium"     = "#B7950B"
+    "severity::low"        = "#1E8449"
     "type::security-audit" = "#C0392B"
-    "scope::auth"        = "#6C3483"
-    "scope::infra"       = "#2E86C1"
-    "scope::api"         = "#17A589"
-    "scope::frontend"    = "#D4AC0D"
-    "scope::cicd"        = "#CA6F1E"
-    "scope::database"    = "#2874A6"
-    "nist::ac"           = "#7D3C98"
-    "nist::sc"           = "#2E4053"
-    "nist::si"           = "#1A5276"
-    "nist::au"           = "#6E2C00"
-    "nist::sa"           = "#4A235A"
-    "nist::ia"           = "#0E6251"
-    "nist::cm"           = "#7E5109"
+    "scope::auth"          = "#6C3483"
+    "scope::infra"         = "#2E86C1"
+    "scope::api"           = "#17A589"
+    "scope::frontend"      = "#D4AC0D"
+    "scope::cicd"          = "#CA6F1E"
+    "scope::database"      = "#2874A6"
+    "nist::ac"             = "#7D3C98"
+    "nist::sc"             = "#2E4053"
+    "nist::si"             = "#1A5276"
+    "nist::au"             = "#6E2C00"
+    "nist::sa"             = "#4A235A"
+    "nist::ia"             = "#0E6251"
+    "nist::cm"             = "#7E5109"
   }
 
   # Build cross-product: each project × each label
@@ -784,86 +784,16 @@ data "vault_kv_secret_v2" "github" {
   name  = "services/github"
 }
 
+data "gitlab_project" "project_guardrails" {
+  path_with_namespace = "infrastructure/project-guardrails"
+}
+
 resource "gitlab_project_mirror" "firblab_public_to_github" {
   project                 = gitlab_project.projects["firblab_public"].id
   url                     = "https://${data.vault_kv_secret_v2.github.data["github_username"]}:${data.vault_kv_secret_v2.github.data["mirror_token"]}@github.com/${data.vault_kv_secret_v2.github.data["github_username"]}/firblab.git"
   enabled                 = true
   keep_divergent_refs     = false
   only_protected_branches = false
-}
-
-###############################################
-# GitHub Repository: example-lab-blog/firblab
-###############################################
-# Manages security and merge settings on the public GitHub
-# mirror of firblab-public. The repo was created manually
-# and imported into Terraform state.
-#
-# NOTE: security_and_analysis may cause 422 errors on some
-# user-owned public repos (provider bug #2190). If apply
-# fails on this block, remove it and enable secret scanning
-# via gh api instead.
-#
-# Fine-grained PAT permissions required (admin_token):
-#   Administration: Read & Write
-#   Contents: Read
-#   Metadata: Read (implicit)
-###############################################
-
-resource "github_repository" "firblab" {
-  name        = "firblab"
-  description = "FirbLab — production-grade homelab infrastructure platform. Terraform, Ansible, Packer, Vault, RKE2 Kubernetes, and ArgoCD GitOps."
-  visibility  = "public"
-
-  # Features
-  has_issues      = true
-  has_wiki        = false
-  has_projects    = false
-  has_downloads   = true
-  has_discussions = false
-
-  # Merge behavior
-  delete_branch_on_merge = true
-
-  # Commit signing
-  web_commit_signoff_required = true
-
-  # Dependabot vulnerability alerts
-  vulnerability_alerts = true
-
-  # Secret scanning + push protection (free for public repos)
-  security_and_analysis {
-    secret_scanning {
-      status = "enabled"
-    }
-    secret_scanning_push_protection {
-      status = "enabled"
-    }
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-###############################################
-# GitHub Branch Protection: main
-###############################################
-# Protects main from force pushes and deletion. Direct
-# pushes ARE allowed — the GitLab CI mirror pushes directly
-# to main (no PRs, no status checks in this workflow).
-###############################################
-
-resource "github_branch_protection" "firblab_main" {
-  repository_id = github_repository.firblab.node_id
-  pattern       = "main"
-
-  # Block destructive operations
-  allows_force_pushes = false
-  allows_deletions    = false
-
-  # Do NOT enforce for admins — mirror token needs to push
-  enforce_admins = false
 }
 
 ###############################################
@@ -908,6 +838,24 @@ resource "gitlab_project_variable" "sanitize_push_token" {
   masked    = true
 
   depends_on = [gitlab_project_access_token.sanitize_push]
+}
+
+resource "gitlab_project_variable" "project_guardrails_github_mirror_token" {
+  project           = data.gitlab_project.project_guardrails.id
+  key               = "GITHUB_MIRROR_TOKEN"
+  value             = data.vault_kv_secret_v2.github.data["mirror_token"]
+  protected         = true
+  masked            = true
+  environment_scope = "*"
+}
+
+resource "gitlab_project_variable" "project_guardrails_github_mirror_repo" {
+  project           = data.gitlab_project.project_guardrails.id
+  key               = "GITHUB_MIRROR_REPO"
+  value             = "https://github.com/${data.vault_kv_secret_v2.github.data["github_username"]}/project-guardrails"
+  protected         = true
+  masked            = false
+  environment_scope = "*"
 }
 
 ###############################################

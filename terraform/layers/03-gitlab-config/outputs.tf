@@ -81,12 +81,3 @@ output "cluster_agent_name" {
   description = "GitLab cluster agent name"
   value       = gitlab_cluster_agent.firblab_rke2.name
 }
-
-# ---------------------------------------------------------
-# GitHub Repository
-# ---------------------------------------------------------
-
-output "github_repo_url" {
-  description = "GitHub public repository URL"
-  value       = github_repository.firblab.html_url
-}

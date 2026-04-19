@@ -53,6 +53,7 @@ firblab/
 │   │   ├── 02-vault-config/            # Vault KV, PKI, policies, AppRole, secrets
 │   │   ├── 03-core-infra/             # GitLab VM + Runner LXC (on lab-02)
 │   │   ├── 03-gitlab-config/          # GitLab groups, projects, CI/CD vars, deploy tokens, K8s agent
+│   │   ├── 03-github-public/          # Public GitHub repos and branch protections
 │   │   ├── 04-rke2-cluster/            # RKE2 masters + workers (on lab-01)
 │   │   ├── 05-standalone-services/    # Ghost, FoundryVTT, Roundcube, Mealie, WireGuard, NetBox
 │   │   └── 06-hetzner/               # Hetzner server + all cloud services

@@ -239,7 +239,7 @@ variable "gitlab_runner_name" {
 variable "gitlab_runner_cpu_cores" {
   description = "Number of CPU cores for GitLab Runner"
   type        = number
-  default     = 2
+  default     = 4
 }
 
 variable "gitlab_runner_memory_mb" {
