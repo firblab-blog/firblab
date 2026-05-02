@@ -1,0 +1,265 @@
+---
+# =============================================================================
+# Linux Fleet Patch Playbook
+# =============================================================================
+# Applies package updates across managed Linux hosts.
+#
+# Default behavior is conservative:
+#   - targets all standard Linux inventory hosts
+#   - excludes macOS and TrueNAS management targets
+#   - skips any remaining non-Linux systems
+#   - applies security updates only
+#   - detects reboot-required state
+#   - does NOT reboot unless explicitly requested
+#
+# Usage:
+#   Run from the repo root so ansible.cfg is loaded:
+#   ansible-playbook ansible/playbooks/linux-patch.yml
+#   ansible-playbook ansible/playbooks/linux-patch.yml --limit debian_hosts
+#   ansible-playbook ansible/playbooks/linux-patch.yml -e linux_patch_mode=full
+#   ansible-playbook ansible/playbooks/linux-patch.yml -e linux_patch_reboot=true
+#
+# Variables:
+#   linux_patch_mode: security | full
+#   linux_patch_reboot: true | false
+#   linux_patch_serial: batch size / percentage
+# =============================================================================
+
+- name: Patch Linux hosts
+  hosts: all:!darwin_hosts:!macos_hosts:!truenas
+  become: true
+  gather_facts: true
+  serial: "{{ linux_patch_serial | default(5) }}"
+
+  vars:
+    linux_patch_mode: security
+    linux_patch_reboot: false
+    linux_patch_reboot_timeout: 900
+
+  pre_tasks:
+    - name: Skip non-Linux hosts
+      ansible.builtin.meta: end_host
+      when: ansible_facts.system != "Linux"
+      tags:
+        - always
+
+    - name: Validate patch mode
+      ansible.builtin.assert:
+        that:
+          - linux_patch_mode in ['security', 'full']
+        fail_msg: "linux_patch_mode must be either 'security' or 'full'."
+      tags:
+        - always
+
+    - name: Validate supported Linux OS family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          linux-patch.yml supports Debian/Ubuntu and RedHat/Rocky hosts.
+          Host {{ inventory_hostname }} reported {{ ansible_facts.os_family }}.
+      tags:
+        - always
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Debian / Ubuntu
+    # -------------------------------------------------------------------------
+    - name: Wait for apt/dpkg lock to be released
+      ansible.builtin.command:
+        cmd: fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+      register: _linux_patch_apt_locks
+      changed_when: false
+      failed_when: false
+      until: _linux_patch_apt_locks.rc != 0
+      retries: 60
+      delay: 5
+      when: ansible_facts.os_family == "Debian"
+      tags:
+        - patch
+        - packages
+
+    - name: Refresh apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      when: ansible_facts.os_family == "Debian"
+      tags:
+        - patch
+        - packages
+
+    - name: Ensure unattended-upgrades is available for security patching
+      ansible.builtin.apt:
+        name:
+          - unattended-upgrades
+          - apt-listchanges
+        state: present
+      when:
+        - ansible_facts.os_family == "Debian"
+        - linux_patch_mode == "security"
+      tags:
+        - patch
+        - packages
+
+    - name: Configure unattended-upgrades for security-only patching
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+              "${distro_id}:${distro_codename}-security";
+          };
+          Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+          Unattended-Upgrade::Automatic-Reboot "false";
+          Unattended-Upgrade::Mail "root";
+          Unattended-Upgrade::MailReport "on-change";
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - ansible_facts.os_family == "Debian"
+        - linux_patch_mode == "security"
+      tags:
+        - patch
+        - security
+
+    - name: Apply Debian/Ubuntu security updates
+      ansible.builtin.command:
+        cmd: unattended-upgrade --verbose
+      register: _linux_patch_debian_security
+      changed_when: >-
+        'No packages found that can be upgraded unattended' not in
+        ((_linux_patch_debian_security.stdout | default('')) ~
+        (_linux_patch_debian_security.stderr | default('')))
+      when:
+        - ansible_facts.os_family == "Debian"
+        - linux_patch_mode == "security"
+      tags:
+        - patch
+        - security
+
+    - name: Apply Debian/Ubuntu full package upgrades
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+      register: _linux_patch_debian_full
+      when:
+        - ansible_facts.os_family == "Debian"
+        - linux_patch_mode == "full"
+      tags:
+        - patch
+        - packages
+
+    - name: Check Debian/Ubuntu reboot-required marker
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: _linux_patch_debian_reboot_required
+      when: ansible_facts.os_family == "Debian"
+      tags:
+        - reboot
+        - verify
+
+    - name: Read Debian/Ubuntu reboot-required packages
+      ansible.builtin.command:
+        cmd: cat /var/run/reboot-required.pkgs
+      register: _linux_patch_debian_reboot_packages
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts.os_family == "Debian"
+        - _linux_patch_debian_reboot_required.stat.exists
+      tags:
+        - reboot
+        - verify
+
+    # -------------------------------------------------------------------------
+    # RedHat / Rocky
+    # -------------------------------------------------------------------------
+    - name: Ensure dnf-utils is available for patching and reboot checks
+      ansible.builtin.dnf:
+        name: dnf-utils
+        state: present
+      when: ansible_facts.os_family == "RedHat"
+      tags:
+        - patch
+        - packages
+
+    - name: Apply RedHat/Rocky security updates
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: true
+        update_only: true
+      register: _linux_patch_redhat_security
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - linux_patch_mode == "security"
+      tags:
+        - patch
+        - security
+
+    - name: Apply RedHat/Rocky full package upgrades
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_only: true
+      register: _linux_patch_redhat_full
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - linux_patch_mode == "full"
+      tags:
+        - patch
+        - packages
+
+    - name: Check RedHat/Rocky reboot-required state
+      ansible.builtin.command:
+        cmd: needs-restarting -r
+      register: _linux_patch_redhat_reboot_required
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+      tags:
+        - reboot
+        - verify
+
+    # -------------------------------------------------------------------------
+    # Reboot handling and reporting
+    # -------------------------------------------------------------------------
+    - name: Record reboot-required state
+      ansible.builtin.set_fact:
+        linux_patch_reboot_required: >-
+          {{
+            (
+              ansible_facts.os_family == 'Debian' and
+              (_linux_patch_debian_reboot_required.stat.exists | default(false))
+            ) or (
+              ansible_facts.os_family == 'RedHat' and
+              (_linux_patch_redhat_reboot_required.rc | default(0) != 0)
+            )
+          }}
+      tags:
+        - reboot
+        - verify
+
+    - name: Reboot host when requested and required
+      ansible.builtin.reboot:
+        msg: "Reboot initiated by linux-patch.yml after package updates."
+        reboot_timeout: "{{ linux_patch_reboot_timeout }}"
+      when:
+        - linux_patch_reboot | bool
+        - linux_patch_reboot_required | bool
+      tags:
+        - reboot
+
+    - name: Display patch summary
+      ansible.builtin.debug:
+        msg:
+          - "host={{ inventory_hostname }}"
+          - "os={{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "mode={{ linux_patch_mode }}"
+          - "reboot_required={{ linux_patch_reboot_required | bool }}"
+          - "reboot_performed={{ (linux_patch_reboot | bool) and (linux_patch_reboot_required | bool) }}"
+          - "debian_reboot_packages={{ _linux_patch_debian_reboot_packages.stdout_lines | default([]) }}"
+      tags:
+        - always

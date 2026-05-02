@@ -20,8 +20,9 @@ Wants=firblab-services.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do /sbin/ip link show wg0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "wg0 did not appear in time" >&2; exit 1'
 {% for subnet in gateway_homelab_subnets %}
-ExecStart=/sbin/ip route add {{ subnet }} dev wg0
+ExecStart=/sbin/ip route replace {{ subnet }} dev wg0
 {% endfor %}
 
 [Install]
