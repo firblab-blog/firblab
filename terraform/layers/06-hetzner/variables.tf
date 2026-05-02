@@ -239,7 +239,7 @@ variable "homelab_peer_name" {
 variable "homelab_subnets" {
   description = "Comma-separated homelab subnets to route through the WireGuard tunnel to the homelab peer"
   type        = string
-  default     = "10.0.20.0/24, 10.0.30.0/24"
+  default     = "10.0.20.0/24, 10.0.30.0/24, 10.0.10.16/32"
 }
 
 # ---------------------------------------------------------

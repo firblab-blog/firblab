@@ -29,11 +29,13 @@ gateway_wireguard_port: 51820
 # Homelab subnets routed through the WireGuard tunnel.
 # Must stay in sync with homelab_subnets in terraform/layers/06-hetzner/variables.tf.
 # Internal management VLANs (10, 50) are not routed here — the Hetzner gateway
-# only needs to reach service backends (VLAN 20) and the DMZ WireGuard LXC (VLAN 30).
+# only needs to reach service backends (VLAN 20), the DMZ WireGuard LXC (VLAN 30),
+# and the Authentik host route required for public OIDC.
 # Internal monitoring is handled by a separate Uptime Kuma instance inside the homelab.
 gateway_homelab_subnets:
   - "10.0.20.0/24"   # Services VLAN (RKE2, standalone VMs — Traefik backends)
   - "10.0.30.0/24"   # DMZ VLAN (WireGuard LXC)
+  - "10.0.10.16/32"  # Authentik public OIDC issuer route only
 
 # ---------------------------------------------------------------------------
 # Homelab service backends — Services VLAN 20, reached via WireGuard tunnel
@@ -43,6 +45,8 @@ gateway_homelab_subnets:
 gateway_ghost_backend: "10.0.20.10:2368"
 gateway_mealie_backend: "10.0.20.13:9000"
 gateway_foundryvtt_backend: "10.0.20.12:30000"
+gateway_actualbudget_backend: "10.0.20.16:5006"
+gateway_authentik_backend: "10.0.10.16:9000"
 
 # ---------------------------------------------------------------------------
 # Observability

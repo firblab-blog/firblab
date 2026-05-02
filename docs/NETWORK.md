@@ -188,7 +188,7 @@ See `terraform/layers/00-network/main.tf` for the full configuration.
 | Services | LAN | ALLOW | All |
 | DMZ | LAN | ALLOW | All |
 | Storage | LAN | ALLOW | All |
-| DMZ | Services | ALLOW | Homelab Service Ports (80, 443, 2368, 8080, 9000, 30000) |
+| DMZ | Services | ALLOW | Homelab Service Ports (80, 443, 2368, 5006, 8080, 9000, 30000) |
 | Services | DMZ | ALLOW | All (return traffic — zone policies are stateless) |
 | DMZ | Storage | BLOCK | All |
 | DMZ | Security | BLOCK | All |
@@ -225,7 +225,7 @@ All other cross-VLAN traffic from Services is dropped, including direct access t
 
 **DMZ (30) -- WireGuard tunnel traffic, port-filtered**
 
-The DMZ hosts the WireGuard gateway LXC (10.0.30.2) which terminates the site-to-site tunnel from Hetzner. Traffic from the tunnel is NATted (masqueraded to 10.0.30.2) and forwarded to the Services VLAN through a port-filtered zone policy. Allowed ports are defined in the `homelab_service_ports` firewall group: HTTP (80), HTTPS (443), Ghost (2368), Roundcube (8080), Mealie (9000), and FoundryVTT (30000). To expose a new service, add its port to the firewall group. The DMZ has bidirectional ALLOW with Management (required because UniFi zone policies are not stateful — Management→DMZ SSH/Ansible needs return traffic). The DMZ is blocked from reaching Storage and Security VLANs entirely. Host-level UFW on Management hosts provides the second layer of defense against DMZ-initiated connections.
+The DMZ hosts the WireGuard gateway LXC (10.0.30.2) which terminates the site-to-site tunnel from Hetzner. Traffic from the tunnel is NATted (masqueraded to 10.0.30.2) and forwarded to the Services VLAN through a port-filtered zone policy. Allowed ports are defined in the `homelab_service_ports` firewall group: HTTP (80), HTTPS (443), Ghost (2368), Actual Budget (5006), Roundcube (8080), Mealie (9000), and FoundryVTT (30000). To expose a new service, add its port to the firewall group. The DMZ has bidirectional ALLOW with Management (required because UniFi zone policies are not stateful — Management→DMZ SSH/Ansible needs return traffic). The DMZ is blocked from reaching Storage and Security VLANs entirely. Host-level UFW on Management hosts provides the second layer of defense against DMZ-initiated connections.
 
 **Storage (40) -- accept-only, no outbound**
 

@@ -266,7 +266,7 @@ resource "unifi_firewall_zone_policy" "services_to_storage_nfs" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.storage.id
     port_group_id = unifi_firewall_group.nfs_ports.id
@@ -280,7 +280,7 @@ resource "unifi_firewall_zone_policy" "services_to_storage_iscsi" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.storage.id
     port_group_id = unifi_firewall_group.iscsi_ports.id
@@ -298,7 +298,7 @@ resource "unifi_firewall_zone_policy" "services_to_security_vault" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.security.id
     port_group_id = unifi_firewall_group.vault_api_port.id
@@ -312,7 +312,7 @@ resource "unifi_firewall_zone_policy" "services_to_security_gitlab" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.security.id
     port_group_id = unifi_firewall_group.gitlab_ports.id
@@ -326,7 +326,7 @@ resource "unifi_firewall_zone_policy" "services_to_security_wazuh" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.security.id
     port_group_id = unifi_firewall_group.wazuh_agent_ports.id
@@ -343,7 +343,7 @@ resource "unifi_firewall_zone_policy" "services_to_security_monitoring" {
   # Allows Prometheus (Services VLAN) to scrape node_exporter on vault-2
   # (Security VLAN 50, 10.0.50.2:9100). Without this, port 9100 is
   # blocked by the Security VLAN's default-deny ingress policy.
-  source      = { zone_id = unifi_firewall_zone.services.id }
+  source = { zone_id = unifi_firewall_zone.services.id }
   destination = {
     zone_id       = unifi_firewall_zone.security.id
     port_group_id = unifi_firewall_group.node_exporter_port.id
@@ -499,7 +499,7 @@ resource "unifi_firewall_zone_policy" "dmz_to_services_http" {
   action   = "ALLOW"
   protocol = "tcp"
 
-  source      = { zone_id = unifi_firewall_zone.dmz.id }
+  source = { zone_id = unifi_firewall_zone.dmz.id }
   destination = {
     zone_id       = unifi_firewall_zone.services.id
     port_group_id = unifi_firewall_group.homelab_service_ports.id
@@ -706,13 +706,13 @@ resource "unifi_firewall_group" "node_exporter_port" {
 }
 
 resource "unifi_firewall_group" "homelab_service_ports" {
-  name    = "Homelab Service Ports"
-  type    = "port-group"
+  name = "Homelab Service Ports"
+  type = "port-group"
   # HTTP/HTTPS covers k8s ingress (MetalLB VIP on 10.0.20.220-.250)
-  # Standalone service ports: Ghost:2368, Roundcube:8080, Mealie:9000, FoundryVTT:30000
+  # Standalone service ports: Ghost:2368, Actual Budget:5006, Roundcube:8080, Mealie:9000, FoundryVTT:30000
   # Loki NodePort:31100 — honeypot log ingestion from Hetzner Promtail via WireGuard
   # To expose a new service through the WireGuard tunnel: add its port here.
-  members = ["80", "443", "2368", "8080", "9000", "30000", "31100"]
+  members = ["80", "443", "2368", "5006", "8080", "9000", "30000", "31100"]
 }
 
 # ---------------------------------------------------------
@@ -747,7 +747,7 @@ resource "unifi_port_profile" "storage_access" {
 
 resource "unifi_port_profile" "scanner_trunk" {
   name                  = "Scanner Trunk"
-  forward               = "all"  # UCG-Fiber zone-based firewall handles filtering — "customize" causes perpetual drift
+  forward               = "all" # UCG-Fiber zone-based firewall handles filtering — "customize" causes perpetual drift
   native_networkconf_id = local.default_lan_network_id
 
   # Trunk port for network scanner (lab-08).
@@ -763,8 +763,8 @@ resource "unifi_port_profile" "iot_access" {
 }
 
 resource "unifi_port_profile" "ap_trunk" {
-  name                  = "AP Trunk"
-  forward               = "all" # Carries AP management (VLAN 1 native) + all SSID VLANs tagged
+  name    = "AP Trunk"
+  forward = "all" # Carries AP management (VLAN 1 native) + all SSID VLANs tagged
   # forward = "all" used (not "customize") — same reason as scanner_trunk:
   # "customize" mode causes perpetual Terraform drift on this provider.
   native_networkconf_id = local.default_lan_network_id
