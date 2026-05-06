@@ -187,7 +187,7 @@ variable "gitlab_name" {
 variable "gitlab_cpu_cores" {
   description = "Number of CPU cores for GitLab CE"
   type        = number
-  default     = 4
+  default     = 6
 }
 
 variable "gitlab_memory_mb" {
