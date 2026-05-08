@@ -776,12 +776,16 @@ resource "vault_kv_secret_v2" "gitlab_homeassistant_push" {
 #
 # Pushes firblab-public to a public GitHub repo (example-lab-blog/firblab).
 # Vault path: secret/services/github
-# Keys: mirror_token (fine-grained PAT, Contents RW), github_username
+# Keys: mirror_token (fine-grained PAT, Contents RW), ghcr_token (classic PAT, write:packages), github_username
 ###############################################
 
 data "vault_kv_secret_v2" "github" {
   mount = "secret"
   name  = "services/github"
+}
+
+data "gitlab_project" "jobhunt_os" {
+  path_with_namespace = "applications/jobhunt-os"
 }
 
 data "gitlab_project" "project_guardrails" {
@@ -855,6 +859,30 @@ resource "gitlab_project_variable" "project_guardrails_github_mirror_repo" {
   value             = "https://github.com/${data.vault_kv_secret_v2.github.data["github_username"]}/project-guardrails"
   protected         = true
   masked            = false
+  environment_scope = "*"
+}
+
+resource "gitlab_tag_protection" "jobhunt_os_release_tags" {
+  project             = data.gitlab_project.jobhunt_os.id
+  tag                 = "v*"
+  create_access_level = "maintainer"
+}
+
+resource "gitlab_project_variable" "jobhunt_os_ghcr_username" {
+  project           = data.gitlab_project.jobhunt_os.id
+  key               = "GHCR_USERNAME"
+  value             = data.vault_kv_secret_v2.github.data["github_username"]
+  protected         = true
+  masked            = false
+  environment_scope = "*"
+}
+
+resource "gitlab_project_variable" "jobhunt_os_ghcr_token" {
+  project           = data.gitlab_project.jobhunt_os.id
+  key               = "GHCR_TOKEN"
+  value             = data.vault_kv_secret_v2.github.data["ghcr_token"]
+  protected         = true
+  masked            = true
   environment_scope = "*"
 }
 
