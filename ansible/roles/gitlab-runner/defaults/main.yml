@@ -44,6 +44,8 @@ gitlab_runner_executor: "docker"
 gitlab_runner_docker_image: "alpine:latest"
 gitlab_runner_docker_privileged: true  # Required for Docker-in-Docker (DinD) builds
 gitlab_runner_docker_volumes:
+  # Share DinD TLS client certificates from the docker:dind service into job containers.
+  - "/certs/client"
   - "/cache"
 
 # ---------------------------------------------------------------------------
