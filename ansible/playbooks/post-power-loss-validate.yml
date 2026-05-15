@@ -1,0 +1,278 @@
+---
+# =============================================================================
+# Post-Power-Loss Validation Playbook
+# =============================================================================
+# Validates the recovery path that matters after a house power event:
+#   - Proxmox nodes reachable
+#   - Proxmox cluster quorum healthy
+#   - lab-03 blog-critical guests running
+#   - Ghost serving locally
+#   - WireGuard tunnel up with a recent handshake
+#   - Hetzner gateway can reach Ghost through the tunnel
+#   - Public blog URL answers over HTTPS
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/post-power-loss-validate.yml
+#
+# Optional break-glass quorum override, only when you have physically verified
+# the missing nodes are powered off and this is not a split-brain partition:
+#   ansible-playbook -i inventory/hosts.yml playbooks/post-power-loss-validate.yml \
+#     -e post_power_loss_force_expected_votes=true \
+#     -e post_power_loss_expected_votes=2
+# =============================================================================
+
+- name: "Post Power Loss: Verify Proxmox node reachability"
+  hosts: proxmox_nodes
+  gather_facts: false
+
+  tasks:
+    - name: Wait briefly for each Proxmox node to answer SSH
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ post_power_loss_node_wait_timeout | default(90) }}"
+
+    - name: Confirm node identity
+      ansible.builtin.command:
+        cmd: hostname
+      register: post_power_loss_hostname
+      changed_when: false
+
+    - name: Report reachable Proxmox node
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is reachable as {{ post_power_loss_hostname.stdout }}."
+
+- name: "Post Power Loss: Verify Proxmox cluster quorum"
+  hosts: lab-01
+  become: true
+  gather_facts: false
+
+  vars:
+    post_power_loss_required_votes: 4
+    post_power_loss_force_expected_votes: false
+
+  tasks:
+    - name: Read Proxmox cluster status
+      ansible.builtin.command:
+        cmd: pvecm status
+      register: post_power_loss_pvecm_status_before
+      changed_when: false
+      failed_when: false
+
+    - name: Temporarily set expected votes when explicitly requested
+      ansible.builtin.command:
+        cmd: "pvecm expected {{ post_power_loss_expected_votes }}"
+      when:
+        - post_power_loss_force_expected_votes | bool
+        - post_power_loss_pvecm_status_before.stdout is not search('Quorate:\\s+Yes')
+        - post_power_loss_expected_votes is defined
+      changed_when: true
+
+    - name: Re-read Proxmox cluster status
+      ansible.builtin.command:
+        cmd: pvecm status
+      register: post_power_loss_pvecm_status
+      changed_when: false
+
+    - name: Assert Proxmox cluster is quorate
+      ansible.builtin.assert:
+        that:
+          - post_power_loss_pvecm_status.stdout is search('Quorate:\\s+Yes')
+          - post_power_loss_pvecm_status.stdout is search('Total votes:\\s+' ~ post_power_loss_required_votes)
+        fail_msg: |
+          Proxmox cluster is not fully healthy after power recovery.
+
+          Expected:
+            Quorate: Yes
+            Total votes: {{ post_power_loss_required_votes }}
+
+          Actual pvecm status:
+          {{ post_power_loss_pvecm_status.stdout }}
+        success_msg: "Proxmox cluster is quorate with {{ post_power_loss_required_votes }} total votes."
+
+- name: "Post Power Loss: Ensure lab-03 blog-critical guests are running"
+  hosts: lab-03
+  become: true
+  gather_facts: false
+
+  vars:
+    post_power_loss_start_critical_guests: true
+    post_power_loss_critical_guests:
+      - name: ghost
+        vmid: 5010
+      - name: wireguard
+        vmid: 5020
+
+  tasks:
+    - name: Read current critical guest status
+      ansible.builtin.command:
+        cmd: "pct status {{ item.vmid }}"
+      loop: "{{ post_power_loss_critical_guests }}"
+      register: post_power_loss_guest_status_before
+      changed_when: false
+      failed_when: false
+
+    - name: Start stopped critical guests
+      ansible.builtin.command:
+        cmd: "pct start {{ item.item.vmid }}"
+      loop: "{{ post_power_loss_guest_status_before.results }}"
+      when:
+        - post_power_loss_start_critical_guests | bool
+        - item.stdout is not search('status:\\s+running')
+      changed_when: true
+
+    - name: Wait for critical guests to report running
+      ansible.builtin.command:
+        cmd: "pct status {{ item.vmid }}"
+      loop: "{{ post_power_loss_critical_guests }}"
+      register: post_power_loss_guest_status_after
+      retries: 18
+      delay: 5
+      until: post_power_loss_guest_status_after.stdout is search('status:\\s+running')
+      changed_when: false
+
+    - name: Verify critical guests are onboot-enabled
+      ansible.builtin.command:
+        cmd: "pct config {{ item.vmid }}"
+      loop: "{{ post_power_loss_critical_guests }}"
+      register: post_power_loss_guest_config
+      changed_when: false
+
+    - name: Assert critical guests are running and configured for boot
+      ansible.builtin.assert:
+        that:
+          - item.stdout is search('onboot:\\s+1')
+        fail_msg: "CT {{ item.item.vmid }} ({{ item.item.name }}) is not configured with onboot: 1."
+        success_msg: "CT {{ item.item.vmid }} ({{ item.item.name }}) is running and onboot-enabled."
+      loop: "{{ post_power_loss_guest_config.results }}"
+
+- name: "Post Power Loss: Verify Ghost local health"
+  hosts: ghost
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for Ghost container SSH
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ post_power_loss_guest_wait_timeout | default(120) }}"
+
+    - name: Verify Ghost Compose services are running
+      ansible.builtin.command:
+        cmd: docker compose -f /opt/ghost/docker-compose.yml ps --services --status running
+      register: post_power_loss_ghost_compose
+      changed_when: false
+
+    - name: Assert Ghost and MySQL containers are running
+      ansible.builtin.assert:
+        that:
+          - "'ghost' in post_power_loss_ghost_compose.stdout_lines"
+          - "'mysql' in post_power_loss_ghost_compose.stdout_lines"
+        fail_msg: |
+          Ghost Docker Compose stack is not fully running.
+          Running services:
+          {{ post_power_loss_ghost_compose.stdout }}
+
+    - name: Verify Ghost answers inside the container
+      ansible.builtin.uri:
+        url: http://127.0.0.1:2368/
+        method: HEAD
+        follow_redirects: none
+        status_code:
+          - 200
+          - 301
+          - 302
+        timeout: 10
+      register: post_power_loss_ghost_local
+      changed_when: false
+
+- name: "Post Power Loss: Verify WireGuard tunnel health"
+  hosts: wireguard
+  become: true
+  gather_facts: false
+
+  vars:
+    post_power_loss_wireguard_handshake_max_age_seconds: 300
+
+  tasks:
+    - name: Wait for WireGuard container SSH
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ post_power_loss_guest_wait_timeout | default(120) }}"
+
+    - name: Verify wg-quick service is active
+      ansible.builtin.command:
+        cmd: systemctl is-active wg-quick@wg0
+      register: post_power_loss_wg_service
+      changed_when: false
+
+    - name: Verify WireGuard has a recent handshake
+      ansible.builtin.shell: |
+        set -euo pipefail
+        latest="$(wg show wg0 latest-handshakes | awk '{print $2}' | sort -nr | head -1)"
+        now="$(date +%s)"
+        test -n "${latest}"
+        test "${latest}" -gt 0
+        test "$((now - latest))" -le "{{ post_power_loss_wireguard_handshake_max_age_seconds }}"
+      args:
+        executable: /bin/bash
+      register: post_power_loss_wg_handshake
+      changed_when: false
+
+    - name: Verify IPv4 forwarding is enabled
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.ip_forward
+      register: post_power_loss_ip_forward
+      changed_when: false
+
+    - name: Assert IPv4 forwarding is enabled
+      ansible.builtin.assert:
+        that:
+          - post_power_loss_ip_forward.stdout == "1"
+        fail_msg: "WireGuard container has net.ipv4.ip_forward={{ post_power_loss_ip_forward.stdout }}, expected 1."
+
+- name: "Post Power Loss: Verify Hetzner-to-Ghost path"
+  hosts: lab-hetzner
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Verify Hetzner gateway reaches Ghost through WireGuard
+      ansible.builtin.uri:
+        url: http://10.0.20.10:2368/
+        method: HEAD
+        follow_redirects: none
+        status_code:
+          - 200
+          - 301
+          - 302
+        timeout: 10
+      register: post_power_loss_hetzner_to_ghost
+      changed_when: false
+
+    - name: Verify public blog URL from the Hetzner gateway
+      ansible.builtin.uri:
+        url: https://blog.example-lab.org/
+        method: HEAD
+        status_code: 200
+        timeout: 10
+      register: post_power_loss_blog_from_gateway
+      changed_when: false
+
+- name: "Post Power Loss: Verify public blog URL from operator workstation"
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Verify public blog URL from local workstation
+      ansible.builtin.uri:
+        url: https://blog.example-lab.org/
+        method: HEAD
+        status_code: 200
+        timeout: 10
+      register: post_power_loss_blog_from_local
+      changed_when: false
+
+    - name: Report post-power-loss validation success
+      ansible.builtin.debug:
+        msg:
+          - "Post-power-loss validation passed."
+          - "Proxmox quorum, lab-03 critical guests, Ghost, WireGuard, Hetzner path, and public blog URL are healthy."

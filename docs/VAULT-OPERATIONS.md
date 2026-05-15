@@ -173,6 +173,9 @@ Manual fallback on the Mac Mini:
 # Step 1: SSH to the Mac Mini
 ssh admin@10.0.10.10
 
+# Step 1a: escalate to root so the unseal Vault TLS directory is readable
+sudo su -
+
 # Step 2: Check the unseal vault status
 VAULT_ADDR=https://127.0.0.1:8210 vault status
 ```

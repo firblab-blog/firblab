@@ -20,12 +20,14 @@
     vault_unseal_health_url: "https://127.0.0.1:{{ vault_unseal_port | default(8210) }}/v1/sys/health"
     vault_primary_health_url: "https://127.0.0.1:{{ vault_api_port | default(8200) }}/v1/sys/health"
     vault_recovery_restart_if_needed: true
+    vault_unseal_cli_addr: "https://127.0.0.1:{{ vault_unseal_port | default(8210) }}"
+    vault_unseal_ca_cert: "{{ vault_unseal_tls_dir | default('/opt/unseal-vault/tls') }}/ca.pem"
 
   pre_tasks:
     - name: Verify this is the macOS transit-unseal host
       ansible.builtin.assert:
         that:
-          - ansible_os_family == "Darwin"
+          - ansible_facts["os_family"] == "Darwin"
           - inventory_hostname == "vault-1"
         fail_msg: "This playbook must run against vault-1 on macOS."
 
@@ -79,20 +81,50 @@
         msg: "Transit Vault on vault-1 is not initialized (HTTP 501). Initialize it before using this recovery playbook."
       when: transit_vault_health_before.status == 501
 
-    - name: Unseal transit Vault
+    - name: Check transit Vault CLI connectivity before unseal
       ansible.builtin.command:
         argv:
           - "{{ vault_unseal_binary_path | default('/opt/unseal-vault/vault') }}"
-          - operator
-          - unseal
-          - "{{ vault_unseal_key_effective }}"
+          - status
       environment:
-        VAULT_ADDR: "https://127.0.0.1:{{ vault_unseal_port | default(8210) }}"
-        VAULT_CACERT: "{{ vault_unseal_tls_dir | default('/opt/unseal-vault/tls') }}/ca.pem"
+        VAULT_ADDR: "{{ vault_unseal_cli_addr }}"
+        VAULT_CACERT: "{{ vault_unseal_ca_cert }}"
+      register: transit_vault_cli_status
+      when: transit_vault_health_before.status == 503
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if transit Vault CLI cannot connect cleanly
+      ansible.builtin.fail:
+        msg: >
+          Transit Vault CLI preflight failed with rc {{ transit_vault_cli_status.rc }}.
+          stdout={{ transit_vault_cli_status.stdout | default('') | trim | default('<empty>', true) }}.
+          stderr={{ transit_vault_cli_status.stderr | default('') | trim | default('<empty>', true) }}.
+      when:
+        - transit_vault_health_before.status == 503
+        - transit_vault_cli_status.rc != 2
+
+    - name: Unseal transit Vault
+      ansible.builtin.shell: >
+        "{{ vault_unseal_binary_path | default('/opt/unseal-vault/vault') }}" operator unseal "$VAULT_UNSEAL_KEY"
+      environment:
+        VAULT_ADDR: "{{ vault_unseal_cli_addr }}"
+        VAULT_CACERT: "{{ vault_unseal_ca_cert }}"
+        VAULT_UNSEAL_KEY: "{{ vault_unseal_key_effective }}"
       register: transit_vault_unseal
       when: transit_vault_health_before.status == 503
-      changed_when: true
-      no_log: true
+      changed_when: transit_vault_unseal.rc == 0
+      failed_when: false
+
+    - name: Stop if transit Vault unseal command failed
+      ansible.builtin.fail:
+        msg: >
+          Transit Vault unseal failed with rc {{ transit_vault_unseal.rc }}.
+          stdout={{ transit_vault_unseal.stdout | default('') | trim | default('<empty>', true) }}.
+          stderr={{ transit_vault_unseal.stderr | default('') | trim | default('<empty>', true) }}.
+      when:
+        - transit_vault_health_before.status == 503
+        - transit_vault_unseal.rc != 0
 
     - name: Wait for transit Vault to become unsealed
       ansible.builtin.uri:
