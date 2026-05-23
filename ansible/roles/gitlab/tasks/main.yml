@@ -85,6 +85,19 @@
   tags:
     - install
 
+# Trigger a kernel rescan of the SCSI device so the guest OS sees the new
+# hypervisor-level disk size before resize2fs is called. This is safe on a
+# live, mounted volume — no I/O interruption, no unmount required.
+- name: Rescan data disk to detect new size from hypervisor
+  ansible.builtin.shell:
+    cmd: echo 1 > /sys/class/block/sdb/device/rescan
+  changed_when: false
+  failed_when: false
+  when: data_disk.stat.exists
+  tags:
+    - install
+    - data_disk
+
 - name: Grow ext4 filesystem on data disk after Terraform resize
   ansible.builtin.command:
     cmd: resize2fs /dev/sdb

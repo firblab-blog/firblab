@@ -1,0 +1,120 @@
+---
+# =============================================================================
+# macOS collector (Mac Mini — vault-1)
+# =============================================================================
+# macOS exposes much less drive telemetry than Linux. We capture:
+#   - system_profiler hardware + NVMe + storage data (JSON)
+#   - diskutil list -plist (full partition tree)
+#   - fdesetup status (FileVault on/off)
+#   - smartctl output if Homebrew smartmontools is installed
+# =============================================================================
+
+- name: "drive_audit/macos | tool probe"
+  ansible.builtin.shell: |
+    set +e
+    for t in smartctl brew diskutil system_profiler fdesetup; do
+      if command -v "$t" >/dev/null 2>&1; then echo "$t=present"; else echo "$t=missing"; fi
+    done
+  register: _macos_tools
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | parse tools"
+  ansible.builtin.set_fact:
+    audit_macos_tools: "{{ dict(_macos_tools.stdout_lines | map('split', '=') | list) }}"
+
+- name: "drive_audit/macos | system_profiler hardware (JSON)"
+  ansible.builtin.command: "system_profiler SPHardwareDataType -json"
+  register: _sp_hardware
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | system_profiler NVMe (JSON)"
+  ansible.builtin.command: "system_profiler SPNVMeDataType -json"
+  register: _sp_nvme
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | system_profiler Storage (JSON)"
+  ansible.builtin.command: "system_profiler SPStorageDataType -json"
+  register: _sp_storage
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | diskutil list (plist)"
+  ansible.builtin.command: "diskutil list -plist"
+  register: _diskutil_list
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | diskutil apfs list (plist)"
+  ansible.builtin.command: "diskutil apfs list -plist"
+  register: _diskutil_apfs
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | fdesetup status (FileVault)"
+  ansible.builtin.command: "fdesetup status"
+  register: _fdesetup
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | enumerate physical disks via diskutil"
+  ansible.builtin.shell: |
+    set +e
+    diskutil list | awk '/^\/dev\/disk[0-9]+ \(/{print $1}'
+  args:
+    executable: /bin/bash
+  register: _macos_disks
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | smartctl per disk (if smartmontools present)"
+  ansible.builtin.shell: |
+    set +e
+    if ! command -v smartctl >/dev/null 2>&1; then
+      echo '{"_unavailable":"smartctl not installed (brew install smartmontools)"}'
+      exit 0
+    fi
+    smartctl -ja "{{ item }}" 2>/dev/null || smartctl -a "{{ item }}"
+  args:
+    executable: /bin/bash
+  loop: "{{ _macos_disks.stdout_lines | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _macos_smart
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/macos | attach macOS data"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'block_devices': [{
+          'name': 'system_profiler',
+          'path': '(see system_profiler.SPNVMeDataType)',
+          'model': (_sp_nvme.stdout | default('{}') | from_json).get('SPNVMeDataType', [{}])[0].get('_name', 'unknown') if _sp_nvme.rc == 0 else 'unknown',
+          'serial': '',
+          'transport': 'nvme',
+          'rotational': false,
+          'macos_only': true
+        }],
+        'host_config': {
+          'platform': 'macos',
+          'tools_present': audit_macos_tools,
+          'filevault_status': _fdesetup.stdout | default('unknown')
+        },
+        'mounts': [],
+        'macos_raw': {
+          'hardware': (_sp_hardware.stdout | default('{}')) if _sp_hardware.rc == 0 else '{}',
+          'nvme': (_sp_nvme.stdout | default('{}')) if _sp_nvme.rc == 0 else '{}',
+          'storage': (_sp_storage.stdout | default('{}')) if _sp_storage.rc == 0 else '{}',
+          'diskutil_list': _diskutil_list.stdout | default(''),
+          'apfs_list': _diskutil_apfs.stdout | default(''),
+          'smart_per_disk': dict(
+            (_macos_disks.stdout_lines | default([])) | zip(
+              (_macos_smart.results | default([])) | map(attribute='stdout') | list
+            )
+          )
+        }
+      }) }}

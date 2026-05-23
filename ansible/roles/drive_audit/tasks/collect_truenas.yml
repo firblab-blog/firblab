@@ -1,0 +1,195 @@
+---
+# =============================================================================
+# TrueNAS collector
+# =============================================================================
+# TrueNAS SCALE is Debian under the hood. Canonical source of truth for
+# disks, pools, and scheduled tests is the middleware (`midclt`). We use
+# midclt for that PLUS standard Linux tools (lsblk + smartctl) so the
+# block_devices list matches the same shape as the Linux collector — keeps
+# the report template happy.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Middleware-level: canonical TrueNAS view
+# ---------------------------------------------------------------------------
+- name: "drive_audit/truenas | midclt disk.query"
+  ansible.builtin.command: "midclt call disk.query"
+  register: _midclt_disks
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | midclt pool.query"
+  ansible.builtin.command: "midclt call pool.query"
+  register: _midclt_pools
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | midclt smart.test.query"
+  ansible.builtin.command: "midclt call smart.test.query"
+  register: _midclt_smart_tests
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | midclt smart.test.results"
+  ansible.builtin.command: "midclt call smart.test.results"
+  register: _midclt_smart_results
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | midclt pool.scrub.query"
+  ansible.builtin.command: "midclt call pool.scrub.query"
+  register: _midclt_scrubs
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | midclt sharing.nfs.query"
+  ansible.builtin.command: "midclt call sharing.nfs.query"
+  register: _midclt_nfs
+  changed_when: false
+  failed_when: false
+  become: true
+
+# ---------------------------------------------------------------------------
+# Linux-level: same shape as the Linux collector so the report template
+# can reuse the same iteration logic.
+# ---------------------------------------------------------------------------
+- name: "drive_audit/truenas | lsblk -J (raw block device tree)"
+  ansible.builtin.command: >
+    lsblk -J -b -o NAME,SIZE,MODEL,SERIAL,WWN,TRAN,ROTA,TYPE,MOUNTPOINT,FSTYPE,VENDOR,REV,RM,STATE
+  register: _truenas_lsblk
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | parse lsblk + filter to physical disks"
+  ansible.builtin.set_fact:
+    audit_truenas_disks: >-
+      {{ (_truenas_lsblk.stdout | from_json).blockdevices
+          | default([])
+          | selectattr('type', 'equalto', 'disk')
+          | list }}
+
+- name: "drive_audit/truenas | run smartctl per disk (always emits JSON)"
+  ansible.builtin.shell: |
+    set +e
+    DEV="/dev/{{ item.name }}"
+    TRAN="{{ item.tran | default('') }}"
+    if ! command -v smartctl >/dev/null 2>&1; then
+      printf '{"_unavailable":"smartctl not installed"}\n'
+      exit 0
+    fi
+    if [ "$TRAN" = "nvme" ]; then
+      OUT=$(smartctl -ja "$DEV" -d nvme 2>/dev/null)
+    else
+      OUT=$(smartctl -ja "$DEV" 2>/dev/null)
+    fi
+    if [ -z "$OUT" ] || [ "${OUT#\{}" = "$OUT" ]; then
+      printf '{"_error":"smartctl_no_json","device":"%s"}\n' "$DEV"
+    else
+      printf '%s\n' "$OUT"
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ audit_truenas_disks }}"
+  loop_control:
+    label: "/dev/{{ item.name }}"
+  register: _truenas_smart
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/truenas | seed smart map"
+  ansible.builtin.set_fact:
+    audit_truenas_smart_by_dev: {}
+
+- name: "drive_audit/truenas | parse smartctl output (safe per-item)"
+  ansible.builtin.set_fact:
+    audit_truenas_smart_by_dev: >-
+      {{ audit_truenas_smart_by_dev | combine({
+          item.item.name: (item.stdout | from_json)
+        }) }}
+  loop: "{{ _truenas_smart.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: "drive_audit/truenas | normalize block_devices to common shape"
+  ansible.builtin.set_fact:
+    audit_truenas_devices_norm: >-
+      {{ audit_truenas_devices_norm | default([]) + [{
+        'name': item.name,
+        'path': '/dev/' ~ item.name,
+        'size_bytes': item.size | default(0),
+        'size_human': (item.size | default(0) | int / (1024**3)) | round(1) | string ~ ' GB',
+        'model': item.model | default('') | trim,
+        'serial': item.serial | default('') | trim,
+        'wwn': item.wwn | default(''),
+        'vendor': item.vendor | default('') | trim,
+        'transport': item.tran | default(''),
+        'rotational': (item.rota | default(0) | int) == 1,
+        'removable': (item.rm | default(0) | int) == 1,
+        'state': item.state | default(''),
+        'fstype': item.fstype | default(''),
+        'mountpoint': item.mountpoint | default(''),
+        'children': item.children | default([]) | map(attribute='name') | list,
+        'smart': audit_truenas_smart_by_dev.get(item.name, {}),
+        'nvme_smart': {},
+        'truenas_managed': true
+      }] }}
+  loop: "{{ audit_truenas_disks }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------------------
+# ZFS (raw fallback alongside the middleware view)
+# ---------------------------------------------------------------------------
+- name: "drive_audit/truenas | zpool list / status / zfs list (raw fallback)"
+  ansible.builtin.shell: |
+    set +e
+    echo "=== zpool list ==="
+    zpool list -Hp -o name,size,alloc,free,frag,cap,dedup,health,autotrim 2>/dev/null
+    echo "=== zpool status ==="
+    zpool status 2>/dev/null
+    echo "=== zfs list ==="
+    zfs list -Hp -o name,used,avail,refer,mountpoint,recordsize,compression,atime,sync,dedup,xattr,acltype 2>/dev/null
+  args:
+    executable: /bin/bash
+  register: _truenas_zfs
+  changed_when: false
+  failed_when: false
+  become: true
+
+# ---------------------------------------------------------------------------
+# Attach everything to host_audit
+# ---------------------------------------------------------------------------
+- name: "drive_audit/truenas | attach data"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'block_devices': audit_truenas_devices_norm | default([]),
+        'storage_topology': {
+          'lvm': {},
+          'zfs': {
+            'available': true,
+            'pools_raw': _truenas_zfs.stdout | default(''),
+            'pool_status_raw': '',
+            'datasets_raw': '',
+            'pools_midclt': _midclt_pools.stdout | default('[]') if _midclt_pools.rc == 0 else '[]'
+          }
+        },
+        'mounts': [],
+        'host_config': {
+          'platform': 'truenas',
+          'middleware_disks': _midclt_disks.stdout | default('[]') if _midclt_disks.rc == 0 else '[]',
+          'smart_tests_scheduled': _midclt_smart_tests.stdout | default('[]') if _midclt_smart_tests.rc == 0 else '[]',
+          'smart_test_results': _midclt_smart_results.stdout | default('[]') if _midclt_smart_results.rc == 0 else '[]',
+          'scrub_tasks': _midclt_scrubs.stdout | default('[]') if _midclt_scrubs.rc == 0 else '[]',
+          'nfs_shares': _midclt_nfs.stdout | default('[]') if _midclt_nfs.rc == 0 else '[]',
+          'tools_present': {'midclt': 'present', 'zpool': 'present', 'smartctl': 'present'},
+          'systemd_units': {}
+        }
+      }) }}

@@ -1,0 +1,237 @@
+{# =============================================================================
+   Per-host drive audit report
+   ============================================================================= #}
+# Drive Audit — {{ host_audit.meta.hostname }}
+
+**Captured:** {{ host_audit.meta.timestamp }}
+**Host:** {{ host_audit.meta.product_vendor }} {{ host_audit.meta.product_name }}
+**OS:** {{ host_audit.meta.os_distribution }} {{ host_audit.meta.os_version }} ({{ host_audit.meta.kernel }}, {{ host_audit.meta.architecture }})
+**CPU/RAM:** {{ host_audit.meta.cpu_model }} — {{ host_audit.meta.cpu_cores }} vCPU, {{ host_audit.meta.memory_mb }} MB
+**Virtualization:** {{ host_audit.meta.virtualization_role }}{% if host_audit.meta.virtualization_type %} ({{ host_audit.meta.virtualization_type }}){% endif %}
+
+{% if host_audit.errors | length > 0 %}
+> ⚠️ **Collection errors:** {{ host_audit.errors | join('; ') }}
+{% endif %}
+
+---
+
+## Physical Drives
+
+{% if host_audit.block_devices | length == 0 %}
+_No physical drives discovered._
+{% else %}
+| Device | Size | Model / Serial | Transport | Rotational | Health | Wear | Notes |
+|--------|------|----------------|-----------|-----------|--------|------|-------|
+{% for d in host_audit.block_devices %}
+{# Pull common SMART fields if present #}
+{%- set s = d.smart | default({}) -%}
+{%- set n = d.nvme_smart | default({}) -%}
+{%- set health = s.smart_status.passed if s.smart_status is defined else 'unknown' -%}
+{%- set pu = n.get('percentage_used') if n else (s.nvme_smart_health_information_log.percentage_used if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set dw = n.get('data_units_written') if n else (s.nvme_smart_health_information_log.data_units_written if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set us = n.get('unsafe_shutdowns') if n else (s.nvme_smart_health_information_log.unsafe_shutdowns if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set poh = s.power_on_time.hours if s.power_on_time is defined else (n.get('power_on_hours') if n else none) -%}
+{%- set wear_str = '' -%}
+{%- if pu is not none -%}{%- set wear_str = pu | string ~ '% used' -%}{%- endif -%}
+{%- set notes_parts = [] -%}
+{%- if dw is not none -%}{%- set _ = notes_parts.append((dw * 512000 / (1024**4)) | round(2) | string ~ ' TB written') -%}{%- endif -%}
+{%- if us is not none -%}{%- set _ = notes_parts.append('unsafe shutdowns: ' ~ us) -%}{%- endif -%}
+{%- if poh is not none -%}{%- set _ = notes_parts.append('POH: ' ~ poh) -%}{%- endif -%}
+| `{{ d.path | default('/dev/' ~ d.get('name', '?')) }}` | {{ d.get('size_human', '?') }} | {{ d.get('model', '?') }}{% if d.get('serial') %} / `{{ d.serial }}`{% endif %} | {{ d.get('transport', '?') }} | {{ 'HDD' if d.get('rotational', false) else 'SSD/NVMe' }} | {{ 'PASSED' if health else ('FAILED' if health is sameas false else 'unknown') }} | {{ wear_str if wear_str else '?' }} | {{ notes_parts | join(' · ') if notes_parts else '' }} |
+{% endfor %}
+
+### Per-drive SMART detail
+
+{% for d in host_audit.block_devices %}
+{%- set s = d.smart | default({}) -%}
+{%- set n = d.nvme_smart | default({}) -%}
+#### {{ d.path | default('/dev/' ~ d.name) }} — {{ d.model | default('?') }}
+
+{% if s.get('_unavailable') or s.get('_parse_error') %}
+> ⚠️ SMART data unavailable: {{ s.get('_unavailable') or s.get('_parse_error') }}
+{% elif s | length == 0 and n | length == 0 %}
+> No SMART data captured.
+{% else %}
+{% if d.get('transport', '') == 'nvme' %}
+- **Model:** {{ s.model_name | default(d.model) }} (firmware {{ s.firmware_version | default('?') }})
+- **Serial:** `{{ s.serial_number | default(d.serial) }}`
+- **NVMe version:** {{ s.nvme_version.string | default('?') }}
+- **Health (smartctl):** {{ 'PASSED' if (s.smart_status.passed | default(false)) else 'FAILED/UNKNOWN' }}
+{# nvme-cli reports temperature in Kelvin; smartctl reports Celsius. Prefer smartctl. #}
+{%- set temp_c = s.temperature.current if s.temperature is defined else (n.get('temperature', 0) | int - 273 if n.get('temperature') else '?') -%}
+- **Critical warnings:** {{ n.get('critical_warning', s.nvme_smart_health_information_log.critical_warning | default('?')) }}
+- **Temperature:** {{ temp_c }} °C
+- **Available spare:** {{ n.get('available_spare', s.nvme_smart_health_information_log.available_spare | default('?')) }}% (threshold {{ n.get('available_spare_threshold', s.nvme_smart_health_information_log.available_spare_threshold | default('?')) }}%)
+- **Percentage used:** {{ n.get('percentage_used', s.nvme_smart_health_information_log.percentage_used | default('?')) }}%
+- **Data units written:** {{ n.get('data_units_written', s.nvme_smart_health_information_log.data_units_written | default(0)) }} (~{{ ((n.get('data_units_written', s.nvme_smart_health_information_log.data_units_written | default(0))) * 512000 / (1024**4)) | round(2) }} TB)
+- **Data units read:** {{ n.get('data_units_read', s.nvme_smart_health_information_log.data_units_read | default(0)) }} (~{{ ((n.get('data_units_read', s.nvme_smart_health_information_log.data_units_read | default(0))) * 512000 / (1024**4)) | round(2) }} TB)
+- **Power-on hours:** {{ n.get('power_on_hours', s.nvme_smart_health_information_log.power_on_hours | default('?')) }}
+- **Power cycles:** {{ n.get('power_cycles', s.nvme_smart_health_information_log.power_cycles | default('?')) }}
+{%- set pc = n.get('power_cycles', s.nvme_smart_health_information_log.power_cycles | default(0)) | int %}
+{%- set us2 = n.get('unsafe_shutdowns', s.nvme_smart_health_information_log.unsafe_shutdowns | default(0)) | int %}
+- **Unsafe shutdowns:** {{ us2 }}{% if pc > 0 and us2 > 0 %} ({{ ((us2 / pc) * 100) | round(0) }}% of power cycles){% endif %}
+- **Media errors:** {{ n.get('media_errors', s.nvme_smart_health_information_log.media_errors | default('?')) }}
+- **Error log entries:** {{ n.get('num_err_log_entries', s.nvme_smart_health_information_log.num_err_log_entries | default('?')) }}
+{% else %}
+- **Model:** {{ s.model_name | default(s.model_family | default(d.model)) }} (firmware {{ s.firmware_version | default('?') }})
+- **Serial:** `{{ s.serial_number | default(d.serial) }}`
+- **Rotation rate:** {{ s.rotation_rate | default('?') }} RPM
+- **Health (smartctl):** {{ 'PASSED' if (s.smart_status.passed | default(false)) else 'FAILED/UNKNOWN' }}
+- **Power-on hours:** {{ s.power_on_time.hours | default('?') }}
+- **Power cycles:** {{ s.power_cycle_count | default('?') }}
+- **Temperature:** {{ s.temperature.current | default('?') }} °C
+{% if s.ata_smart_attributes is defined %}
+{% set interesting = ['Reallocated_Sector_Ct', 'Wear_Leveling_Count', 'Total_LBAs_Written', 'Power_On_Hours', 'Unexpected_Power_Loss_Count', 'Reported_Uncorrect', 'Current_Pending_Sector', 'Offline_Uncorrectable', 'UDMA_CRC_Error_Count', 'Media_Wearout_Indicator'] %}
+{% for a in s.ata_smart_attributes.table | default([]) | selectattr('name', 'in', interesting) %}
+- **{{ a.name }}** (id {{ a.id }}): raw={{ a.raw.string | default(a.raw.value | default('?')) }}, normalized={{ a.value | default('?') }}{% if a.name == 'Total_LBAs_Written' and a.raw.value is defined %} (~{{ (a.raw.value * 512 / (1024**4)) | round(2) }} TB){% endif +%}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endif %}
+
+{% endfor %}
+{% endif %}
+
+---
+
+## Storage Topology
+
+### LVM
+
+{% if host_audit.storage_topology.lvm.pvs | default([]) | length == 0 %}
+_No LVM physical volumes found._
+{% else %}
+**Physical Volumes:**
+
+| PV | VG | Size | Free | Used |
+|----|----|------|------|------|
+{% for pv in host_audit.storage_topology.lvm.pvs %}
+| `{{ pv.pv_name }}` | {{ pv.vg_name | default('-') }} | {{ ((pv.pv_size | int) / (1024**3)) | round(1) }} GB | {{ ((pv.pv_free | int) / (1024**3)) | round(1) }} GB | {{ ((pv.pv_used | int) / (1024**3)) | round(1) }} GB |
+{% endfor %}
+
+**Volume Groups:**
+
+| VG | Size | Free | PVs | LVs |
+|----|------|------|-----|-----|
+{% for vg in host_audit.storage_topology.lvm.vgs | default([]) %}
+| {{ vg.vg_name }} | {{ ((vg.vg_size | int) / (1024**3)) | round(1) }} GB | {{ ((vg.vg_free | int) / (1024**3)) | round(1) }} GB | {{ vg.pv_count }} | {{ vg.lv_count }} |
+{% endfor %}
+
+**Logical Volumes (including thin pools and VM disks):**
+
+| LV | VG | Size | Data% | Meta% | Pool | Attr |
+|----|----|------|-------|-------|------|------|
+{% for lv in host_audit.storage_topology.lvm.lvs | default([]) %}
+| {{ lv.lv_name }} | {{ lv.vg_name }} | {{ ((lv.lv_size | int) / (1024**3)) | round(1) }} GB | {{ lv.data_percent | default('-') }} | {{ lv.metadata_percent | default('-') }} | {{ lv.pool_lv | default('-') }} | `{{ lv.lv_attr | default('') }}` |
+{% endfor %}
+{% endif %}
+
+### ZFS
+
+{% if not host_audit.storage_topology.zfs.available | default(false) %}
+_ZFS not present on this host._
+{% else %}
+**Pools (raw `zpool list -Hp`):**
+
+```
+{{ host_audit.storage_topology.zfs.pools_raw | default('(none)') }}
+```
+
+**Pool status:**
+
+```
+{{ host_audit.storage_topology.zfs.pool_status_raw | default('(none)') }}
+```
+
+**Datasets (`zfs list` with key props):**
+
+```
+{{ host_audit.storage_topology.zfs.datasets_raw | default('(none)') }}
+```
+{% endif %}
+
+---
+
+## Mounts (real filesystems)
+
+{% if host_audit.mounts | length == 0 %}
+_No mount data captured._
+{% else %}
+| Target | Source | FS | Size | Used | Avail | Use% | Options |
+|--------|--------|----|------|------|-------|------|---------|
+{% for m in host_audit.mounts %}
+| {{ m.target }} | {{ m.source }} | {{ m.fstype }} | {{ m.size | default('-') }} | {{ m.used | default('-') }} | {{ m.avail | default('-') }} | {{ m['use%'] | default('-') }} | `{{ m.options | default('') | truncate(60, true, '...') }}` |
+{% endfor %}
+{% endif %}
+
+---
+
+## Host Configuration (SSD hygiene)
+
+{% if host_audit.host_config.platform | default('') == 'macos' %}
+- **Platform:** macOS
+- **FileVault:** {{ host_audit.host_config.filevault_status | default('?') }}
+- **Tools present:** {{ host_audit.host_config.tools_present | default({}) | dict2items | selectattr('value', 'equalto', 'present') | map(attribute='key') | list | join(', ') | default('none', true) }}
+{% set missing_macos = host_audit.host_config.tools_present | default({}) | dict2items | selectattr('value', 'equalto', 'missing') | map(attribute='key') | list %}
+{% if missing_macos %}
+- ⚠️ **Missing tools:** {{ missing_macos | join(', ') }} (install Homebrew + `brew install smartmontools`, or re-run with `-e audit_install_tools=true`)
+{% endif %}
+{% elif host_audit.host_config.platform | default('') == 'truenas' %}
+- **Platform:** TrueNAS (middleware-managed)
+- See JSON for full `midclt` outputs (disk inventory, scheduled SMART tests, scrub tasks).
+{% else %}
+- **LVM `issue_discards`:** `{{ host_audit.host_config.lvm_issue_discards | default('?') }}` {% if host_audit.host_config.lvm_issue_discards | default('') in ['0', 'default'] %}⚠️ TRIM may not pass through to underlying device{% elif host_audit.host_config.lvm_issue_discards | default('') == '1' %}✓{% endif %}
+- **systemd units:**
+{% for unit, state in host_audit.host_config.systemd_units | default({}) | dictsort %}
+  - `{{ unit }}`: {{ state }}
+{% endfor %}
+{% if host_audit.host_config.smartd_conf_active_lines %}
+- **`/etc/smartd.conf` (active lines):**
+  ```
+  {{ host_audit.host_config.smartd_conf_active_lines | indent(2) }}
+  ```
+{% endif %}
+- **Diagnostic tools present:** {{ host_audit.host_config.tools_present | default({}) | dict2items | selectattr('value', 'equalto', 'present') | map(attribute='key') | list | join(', ') | default('none', true) }}
+{% set missing = host_audit.host_config.tools_present | default({}) | dict2items | selectattr('value', 'equalto', 'missing') | map(attribute='key') | list %}
+{% if missing %}
+- ⚠️ **Missing tools:** {{ missing | join(', ') }} (re-run with `-e audit_install_tools=true`)
+{% endif %}
+{% endif %}
+
+{% if host_audit.proxmox.pveversion is defined %}
+---
+
+## Proxmox Inventory (this node)
+
+**PVE version:** `{{ host_audit.proxmox.pveversion.split('\n')[0] | default('?') }}`
+
+**VMs ({{ host_audit.proxmox.vm_ids | length }}):** {{ host_audit.proxmox.vm_ids | join(', ') | default('none', true) }}
+**LXCs ({{ host_audit.proxmox.ct_ids | length }}):** {{ host_audit.proxmox.ct_ids | join(', ') | default('none', true) }}
+
+**Storage pools (`pvesm status`):**
+
+```
+{{ host_audit.proxmox.pvesm_status | default('(none)') }}
+```
+
+### VM disk placement
+
+{% for vmid in host_audit.proxmox.vm_ids | default([]) %}
+**VM {{ vmid }}:**
+```
+{{ host_audit.proxmox.vm_configs[vmid] | default('(no config)') | regex_findall('^(?:name|scsi\d+|virtio\d+|ide\d+|sata\d+|cores|memory|net\d+):.*', multiline=true) | join('\n') }}
+```
+{% endfor %}
+
+### LXC disk placement
+{% for ctid in host_audit.proxmox.ct_ids | default([]) %}
+**CT {{ ctid }}:**
+```
+{{ host_audit.proxmox.ct_configs[ctid] | default('(no config)') | regex_findall('^(?:hostname|rootfs|mp\d+|cores|memory):.*', multiline=true) | join('\n') }}
+```
+{% endfor %}
+{% endif %}
+
+---
+
+_Raw JSON: see `{{ inventory_hostname }}.json` next to this file._

@@ -1,0 +1,126 @@
+{# =============================================================================
+   Aggregate cross-host drive audit
+   Rendered on localhost AFTER all per-host runs complete. Reads each
+   per-host JSON file from audit_run_dir and rolls them up.
+   ============================================================================= #}
+# Homelab Drive Audit — Aggregate Report
+
+**Run ID:** `{{ audit_run_id }}`
+**Generated:** {{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}
+**Hosts audited:** {{ audited_hosts | length }}
+
+{% if audited_hosts | length == 0 %}
+> No host data was found in `{{ audit_run_dir }}`.
+{% else %}
+
+## Quick health summary
+
+| Host | Hardware | OS | Drives | Tools | Notes |
+|------|----------|-----|--------|-------|-------|
+{% for h in audited_hosts %}
+{%- set tools = h.host_config.tools_present | default({}) -%}
+{%- set missing = tools | dict2items | selectattr('value', 'equalto', 'missing') | map(attribute='key') | list -%}
+| {{ h.meta.hostname }} | {{ h.meta.product_vendor }} {{ h.meta.product_name }} | {{ h.meta.os_distribution }} {{ h.meta.os_version }} | {{ h.block_devices | length }} | {% if missing %}⚠️ missing: {{ missing | join(', ') }}{% else %}✓{% endif %} | {{ h.errors | join('; ') if h.errors | length else '' }} |
+{% endfor %}
+
+---
+
+## Every physical drive in the lab
+
+| Host | Device | Size | Model | Serial | Transport | HDD? | Health | Wear / TBW | Notes |
+|------|--------|------|-------|--------|-----------|------|--------|------------|-------|
+{% for h in audited_hosts %}
+{% for d in h.block_devices %}
+{%- set s = d.smart | default({}) -%}
+{%- set n = d.nvme_smart | default({}) -%}
+{%- set health = 'PASSED' if (s.smart_status.passed | default(false)) else ('FAILED' if s.smart_status is defined and s.smart_status.passed is sameas false else '?') -%}
+{%- set pu = n.get('percentage_used') if n else (s.nvme_smart_health_information_log.percentage_used if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set dw = n.get('data_units_written') if n else (s.nvme_smart_health_information_log.data_units_written if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set us = n.get('unsafe_shutdowns') if n else (s.nvme_smart_health_information_log.unsafe_shutdowns if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set pc = n.get('power_cycles') if n else (s.nvme_smart_health_information_log.power_cycles if s.nvme_smart_health_information_log is defined else none) -%}
+{%- set poh = s.power_on_time.hours if s.power_on_time is defined else (n.get('power_on_hours') if n else none) -%}
+{%- set ratio = ((us | int / pc | int) * 100) | round(0) if us is not none and pc is not none and pc | int > 0 else none -%}
+{%- set notes_parts = [] -%}
+{%- if poh is not none -%}{%- set _ = notes_parts.append(poh ~ ' hrs') -%}{%- endif -%}
+{%- if dw is not none -%}{%- set _ = notes_parts.append(((dw * 512000 / (1024**4)) | round(1)) | string ~ ' TB W') -%}{%- endif -%}
+{%- if us is not none and ratio is not none -%}{%- set _ = notes_parts.append('unsafe shutdowns: ' ~ us ~ ' (' ~ ratio | int ~ '% of cycles)') -%}{%- endif -%}
+{# SATA: pull Total_LBAs_Written from ATA attributes #}
+{%- if d.get('transport', '') != 'nvme' and s.ata_smart_attributes is defined -%}
+  {%- for a in s.ata_smart_attributes.table | default([]) -%}
+    {%- if a.name == 'Total_LBAs_Written' and a.raw.value is defined -%}
+      {%- set _ = notes_parts.append(((a.raw.value * 512 / (1024**4)) | round(1)) | string ~ ' TB W') -%}
+    {%- elif a.name == 'Wear_Leveling_Count' -%}
+      {%- set _ = notes_parts.append('wear-norm ' ~ a.value | default('?')) -%}
+    {%- elif a.name == 'Reallocated_Sector_Ct' and (a.raw.value | int) > 0 -%}
+      {%- set _ = notes_parts.append('⚠️ ' ~ a.raw.value ~ ' reallocated sectors') -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endif -%}
+| {{ h.meta.hostname }} | `{{ d.path | default('/dev/' ~ d.get('name', '?')) }}` | {{ d.get('size_human', '?') }} | {{ d.get('model', '?') | truncate(28, true, '…') }} | `{{ d.get('serial', '') | truncate(20, true, '…') }}` | {{ d.get('transport', '?') }} | {{ 'Y' if d.get('rotational', false) else 'N' }} | {{ health }} | {% if pu is not none %}{{ pu }}% used{% endif %} | {{ notes_parts | join(' · ') }} |
+{% endfor %}
+{% endfor %}
+
+---
+
+## Cross-host risk flags
+
+{% set flagged = namespace(items=[]) %}
+{% for h in audited_hosts %}
+{% for d in h.block_devices %}
+{%- set s = d.smart | default({}) -%}
+{%- set n = d.nvme_smart | default({}) -%}
+{%- set us = n.get('unsafe_shutdowns') if n else (s.nvme_smart_health_information_log.unsafe_shutdowns if s.nvme_smart_health_information_log is defined else 0) | int -%}
+{%- set pc = n.get('power_cycles') if n else (s.nvme_smart_health_information_log.power_cycles if s.nvme_smart_health_information_log is defined else 0) | int -%}
+{%- set pu = n.get('percentage_used') if n else (s.nvme_smart_health_information_log.percentage_used if s.nvme_smart_health_information_log is defined else 0) | int -%}
+{%- set me = n.get('media_errors') if n else (s.nvme_smart_health_information_log.media_errors if s.nvme_smart_health_information_log is defined else 0) | int -%}
+{%- if pc and pc > 0 and us and (us | int / pc | int) > 0.10 -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, d.name, 'High unsafe-shutdown ratio: ' ~ us ~ '/' ~ pc ~ ' (' ~ ((us | int / pc | int) * 100) | round(0) | int ~ '%) — PLP / power-stability concern')) -%}
+{%- endif -%}
+{%- if pu and pu | int >= 80 -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, d.name, 'High wear: ' ~ pu ~ '% used')) -%}
+{%- endif -%}
+{%- if me and me | int > 0 -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, d.name, '⚠️ Media errors: ' ~ me)) -%}
+{%- endif -%}
+{# SATA reallocated sectors #}
+{%- if d.get('transport', '') != 'nvme' and s.ata_smart_attributes is defined -%}
+  {%- for a in s.ata_smart_attributes.table | default([]) -%}
+    {%- if a.name == 'Reallocated_Sector_Ct' and (a.raw.value | int) > 0 -%}
+      {%- set _ = flagged.items.append((h.meta.hostname, d.name, '⚠️ Reallocated sectors: ' ~ a.raw.value)) -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endif -%}
+{% endfor %}
+{# Host config flags #}
+{%- if h.host_config.lvm_issue_discards is defined and h.host_config.lvm_issue_discards in ['0', 'default'] -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, '(host)', 'LVM `issue_discards` not set to 1 — TRIM may not reach physical SSD/NVMe')) -%}
+{%- endif -%}
+{%- set sm = h.host_config.systemd_units | default({}) -%}
+{%- if sm.get('smartd.service', '') not in ['enabled/active', 'static/active'] and (sm.get('smartmontools.service', '') not in ['enabled/active', 'static/active']) and h.host_config.platform | default('') not in ['macos', 'truenas'] -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, '(host)', 'smartd is not running — no proactive SMART monitoring')) -%}
+{%- endif -%}
+{%- set mt = h.host_config.tools_present | default({}) | dict2items | selectattr('value', 'equalto', 'missing') | map(attribute='key') | list -%}
+{%- if mt and 'smartctl' in mt -%}
+  {%- set _ = flagged.items.append((h.meta.hostname, '(host)', 'smartctl not installed — drive health is invisible')) -%}
+{%- endif -%}
+{% endfor %}
+
+{% if flagged.items | length == 0 %}
+✅ No risk flags raised.
+{% else %}
+| Host | Where | Issue |
+|------|-------|-------|
+{% for f in flagged.items %}
+| {{ f[0] }} | {{ f[1] }} | {{ f[2] }} |
+{% endfor %}
+{% endif %}
+
+---
+
+## Per-host reports
+
+{% for h in audited_hosts %}
+- [{{ h.meta.hostname }}]({{ h.meta.hostname }}.md) — {{ h.block_devices | length }} drive(s)
+{% endfor %}
+
+{% endif %}

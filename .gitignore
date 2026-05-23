@@ -62,3 +62,5 @@ Thumbs.db
 
 # Sensitive files
 files/sensitive
+# Drive audit reports (contain drive serial numbers — keep local)
+reports/drive-audit/

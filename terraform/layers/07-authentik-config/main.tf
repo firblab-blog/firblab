@@ -445,6 +445,11 @@ locals {
       external_host = "https://ai-platform.home.example-lab.org"
       app_group     = "Infrastructure"
     }
+    firb_ai_operator_ui = {
+      name          = "Firb AI Operator UI"
+      external_host = "https://ai.home.example-lab.org"
+      app_group     = "Infrastructure"
+    }
 
   }
 

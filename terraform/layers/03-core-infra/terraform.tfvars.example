@@ -45,7 +45,7 @@ gitlab_name              = "gitlab"
 gitlab_cpu_cores         = 4
 gitlab_memory_mb         = 8192
 gitlab_os_disk_size_gb   = 80
-gitlab_data_disk_size_gb = 200
+gitlab_data_disk_size_gb = 400
 gitlab_ip_address        = "dhcp"
 
 # ---------------------------------------------------------

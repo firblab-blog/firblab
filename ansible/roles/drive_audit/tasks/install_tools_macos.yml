@@ -1,0 +1,25 @@
+---
+# =============================================================================
+# Install smartmontools on macOS via Homebrew. Only runs when
+# audit_install_tools=true. macOS SMART access is limited (Apple's NVMe
+# driver hides many attributes) but smartctl still surfaces what it can.
+# =============================================================================
+
+- name: "drive_audit | locate Homebrew"
+  ansible.builtin.command: "which brew"
+  register: _brew_check
+  failed_when: false
+  changed_when: false
+
+- name: "drive_audit | brew install smartmontools"
+  community.general.homebrew:
+    name: smartmontools
+    state: present
+  when: _brew_check.rc == 0
+  failed_when: false
+  register: _brew_install
+
+- name: "drive_audit | warn if Homebrew not present"
+  ansible.builtin.set_fact:
+    host_audit: "{{ host_audit | combine({'errors': host_audit.errors + ['Homebrew not found — install manually if SMART data is needed']}) }}"
+  when: _brew_check.rc != 0

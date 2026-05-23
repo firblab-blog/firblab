@@ -205,7 +205,7 @@ variable "gitlab_os_disk_size_gb" {
 variable "gitlab_data_disk_size_gb" {
   description = "Data disk size in GB for GitLab CE (repositories, artifacts)"
   type        = number
-  default     = 200
+  default     = 400
 }
 
 variable "gitlab_ip_address" {

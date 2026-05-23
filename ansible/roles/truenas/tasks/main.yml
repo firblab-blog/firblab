@@ -10,6 +10,7 @@
 #   ansible-playbook truenas-deploy.yml --tags snapshots
 #   ansible-playbook truenas-deploy.yml --tags smart
 #   ansible-playbook truenas-deploy.yml --tags scrubs
+#   ansible-playbook truenas-deploy.yml --tags replication
 # =============================================================================
 
 - name: Configure TrueNAS services
@@ -43,3 +44,8 @@
   ansible.builtin.include_tasks: scrubs.yml
   tags:
     - scrubs
+
+- name: Configure ZFS replication tasks
+  ansible.builtin.include_tasks: replication.yml
+  tags:
+    - replication

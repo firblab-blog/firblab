@@ -1,0 +1,45 @@
+---
+# =============================================================================
+# Install smartmontools / nvme-cli / zfsutils-linux on Debian-family hosts.
+# Only runs when audit_install_tools=true. Safe to re-run (idempotent apt).
+# =============================================================================
+
+- name: "drive_audit | check apt is available"
+  ansible.builtin.command: "which apt-get"
+  register: _apt_check
+  failed_when: false
+  changed_when: false
+
+- name: "drive_audit | install diagnostics packages (Debian-family)"
+  ansible.builtin.apt:
+    name:
+      - smartmontools
+      - nvme-cli
+      - util-linux       # provides lsblk
+      - lvm2             # provides pvs/vgs/lvs
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when: _apt_check.rc == 0
+  register: _apt_install
+  failed_when: false
+
+# zfsutils-linux is intentionally NOT installed by this role — it triggers
+# DKMS / module builds that we don't want pushed onto hosts that don't run
+# ZFS. Hosts that *do* use ZFS (Proxmox, TrueNAS) already have the tools.
+
+- name: "drive_audit | check if zpool is now reachable (post-install)"
+  ansible.builtin.command: "which zpool"
+  register: _zpool_check
+  failed_when: false
+  changed_when: false
+
+- name: "drive_audit | record install result"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'meta': host_audit.meta | combine({
+          'tools_installed_this_run': (_apt_install is defined and (_apt_install.changed | default(false)))
+        })
+      }) }}

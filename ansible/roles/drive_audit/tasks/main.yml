@@ -1,0 +1,127 @@
+---
+# =============================================================================
+# drive_audit — dispatcher
+# =============================================================================
+# Detects host class and routes to the right collector. All collectors must
+# build a single `host_audit` dict that the render templates consume.
+# =============================================================================
+
+- name: "drive_audit | ensure local output dir exists"
+  ansible.builtin.file:
+    path: "{{ audit_run_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+
+- name: "drive_audit | gather minimal facts (network only) for hostname"
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - network
+      - hardware
+      - virtual
+  when: ansible_facts.keys() | length == 0
+
+- name: "drive_audit | seed host_audit dict"
+  ansible.builtin.set_fact:
+    host_audit:
+      meta:
+        hostname: "{{ inventory_hostname }}"
+        ansible_host: "{{ ansible_host | default('') }}"
+        timestamp: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+        os_family: "{{ ansible_os_family | default('Unknown') }}"
+        os_distribution: "{{ ansible_distribution | default('Unknown') }}"
+        os_version: "{{ ansible_distribution_version | default('Unknown') }}"
+        kernel: "{{ ansible_kernel | default('Unknown') }}"
+        architecture: "{{ ansible_architecture | default('Unknown') }}"
+        virtualization_role: "{{ ansible_virtualization_role | default('host') }}"
+        virtualization_type: "{{ ansible_virtualization_type | default('') }}"
+        memory_mb: "{{ ansible_memtotal_mb | default(0) }}"
+        cpu_cores: "{{ ansible_processor_vcpus | default(ansible_processor_cores | default(0)) }}"
+        # CPU model: Linux fills ansible_processor as [idx, vendor, brand, idx, vendor, brand, ...]
+        # — index 2 has the brand string. macOS fills it as just [brand]. RPi often has [brand]
+        # too. So: prefer index 2 if list length > 2, else index 0, else 'Unknown'.
+        cpu_model: >-
+          {%- set p = ansible_processor | default([]) -%}
+          {%- if p | length > 2 -%}{{ p[2] }}
+          {%- elif p | length > 0 -%}{{ p[0] }}
+          {%- else -%}Unknown
+          {%- endif -%}
+        product_name: "{{ ansible_product_name | default('Unknown') }}"
+        product_vendor: "{{ ansible_system_vendor | default('Unknown') }}"
+      block_devices: []
+      storage_topology:
+        lvm: {}
+        zfs: {}
+      mounts: []
+      host_config: {}
+      proxmox: {}
+      errors: []
+
+- name: "drive_audit | mark TrueNAS hosts"
+  ansible.builtin.set_fact:
+    audit_is_truenas: "{{ 'truenas' in (group_names | default([])) }}"
+
+# ---------------------------------------------------------------------------
+# Optional: install missing tools BEFORE collection
+# ---------------------------------------------------------------------------
+- name: "drive_audit | install tools (Linux)"
+  ansible.builtin.include_tasks: install_tools_linux.yml
+  when:
+    - audit_install_tools | bool
+    - ansible_system == 'Linux'
+    - not audit_is_truenas | default(false)
+
+- name: "drive_audit | install tools (macOS)"
+  ansible.builtin.include_tasks: install_tools_macos.yml
+  when:
+    - audit_install_tools | bool
+    - ansible_system == 'Darwin'
+
+# ---------------------------------------------------------------------------
+# Dispatch to per-OS collector
+# ---------------------------------------------------------------------------
+- name: "drive_audit | collect (TrueNAS)"
+  ansible.builtin.include_tasks: collect_truenas.yml
+  when: audit_is_truenas | default(false)
+
+- name: "drive_audit | collect (Linux, non-TrueNAS)"
+  ansible.builtin.include_tasks: collect_linux.yml
+  when:
+    - ansible_system == 'Linux'
+    - not audit_is_truenas | default(false)
+
+- name: "drive_audit | collect Proxmox extras"
+  ansible.builtin.include_tasks: collect_proxmox_extras.yml
+  when:
+    - ansible_system == 'Linux'
+    - "'proxmox_nodes' in (group_names | default([]))"
+
+- name: "drive_audit | collect (macOS)"
+  ansible.builtin.include_tasks: collect_macos.yml
+  when: ansible_system == 'Darwin'
+
+# ---------------------------------------------------------------------------
+# Persist per-host JSON + render per-host Markdown
+# ---------------------------------------------------------------------------
+- name: "drive_audit | write per-host JSON facts"
+  ansible.builtin.copy:
+    content: "{{ host_audit | to_nice_json }}"
+    dest: "{{ audit_host_json }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: "drive_audit | render per-host Markdown report"
+  ansible.builtin.template:
+    src: host-report.md.j2
+    dest: "{{ audit_host_md }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  changed_when: false

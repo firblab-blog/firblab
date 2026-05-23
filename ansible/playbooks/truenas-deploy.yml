@@ -33,6 +33,7 @@
 #   ansible-playbook ... --tags snapshots   # Only snapshot tasks
 #   ansible-playbook ... --tags smart       # Only SMART test scheduling
 #   ansible-playbook ... --tags scrubs      # Only scrub task config
+#   ansible-playbook ... --tags replication # Bootstrap + replication task setup
 #   ansible-playbook ... --tags verify      # Only post-deploy checks
 # =============================================================================
 
@@ -177,6 +178,14 @@
       tags:
         - verify
 
+    - name: Query replication tasks
+      ansible.builtin.command:
+        cmd: midclt call replication.query
+      register: verify_replication
+      changed_when: false
+      tags:
+        - verify
+
     - name: Display deployment summary
       ansible.builtin.debug:
         msg: |
@@ -187,6 +196,7 @@
           SMB Shares:    {{ (verify_smb.stdout | from_json) | length }}
           Snap Tasks:    {{ (verify_snapshots.stdout | from_json) | length }}
           SMART Tests:   {{ (verify_smart.stdout | from_json) | length }}
+          Replic Tasks:  {{ (verify_replication.stdout | from_json) | length }}
 
           Security Fixes Applied:
             - NFS shares restricted to Management + LAN subnets
@@ -194,7 +204,8 @@
             - SMB shares restricted via hostsallow
 
           Protection Added:
-            - Daily snapshots: backups (2 week retention), media (1 week)
+            - Daily snapshots: backups (2-week retention), media (30-day retention)
+            - ZFS replication: media → backups/truenas-media, daily 02:00, 30-day dest retention
             - SMART SHORT test: weekly (Saturdays 06:00)
             - SMART LONG test: monthly (1st of month, 02:00)
       tags:

@@ -373,3 +373,14 @@ traefik_backends:
     forwardauth: true
     insecure_backend: false
     websocket: true
+  # -------------------------------------------------------------------------
+  # Firb AI operator UI (runtime-service VM on Management VLAN 10)
+  # Access follows the existing Cogit / AI Platform pattern: standalone
+  # Traefik route plus Authentik ForwardAuth, with no public edge route.
+  # -------------------------------------------------------------------------
+  firb_ai_operator_ui:
+    subdomain: ai
+    backend_url: "http://10.0.10.147:18087"
+    forwardauth: true
+    insecure_backend: false
+    websocket: true

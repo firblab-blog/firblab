@@ -1,0 +1,345 @@
+---
+# =============================================================================
+# Linux collector (Proxmox hosts, RPi, ZimaBlade, generic Debian/Ubuntu)
+# =============================================================================
+# Read-only. Requires sudo for smartctl, nvme, lvm reads against /dev. Failure
+# of an individual gather is appended to host_audit.errors and the run
+# continues — partial data is better than no data.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Tooling probe
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | probe for required tools"
+  ansible.builtin.shell: |
+    set +e
+    for t in lsblk smartctl nvme pvs vgs lvs zpool zfs findmnt systemctl; do
+      if command -v "$t" >/dev/null 2>&1; then
+        echo "$t=present"
+      else
+        echo "$t=missing"
+      fi
+    done
+  register: _tools_probe
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/linux | parse tools probe"
+  ansible.builtin.set_fact:
+    audit_tools: "{{ dict(_tools_probe.stdout_lines | map('split', '=') | list) }}"
+
+# ---------------------------------------------------------------------------
+# Block devices — single lsblk -J call, parsed as JSON
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | lsblk -J (block device tree)"
+  ansible.builtin.command: >
+    lsblk -J -b -o NAME,SIZE,MODEL,SERIAL,WWN,TRAN,ROTA,TYPE,MOUNTPOINT,FSTYPE,VENDOR,REV,RM,STATE
+  register: _lsblk
+  changed_when: false
+  become: true
+
+- name: "drive_audit/linux | parse lsblk"
+  ansible.builtin.set_fact:
+    audit_lsblk: "{{ (_lsblk.stdout | from_json).blockdevices }}"
+
+# ---------------------------------------------------------------------------
+# Per-physical-device SMART collection
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | enumerate physical disks"
+  ansible.builtin.set_fact:
+    audit_physical_disks: >-
+      {{ audit_lsblk
+         | selectattr('type', 'equalto', 'disk')
+         | list }}
+
+- name: "drive_audit/linux | run smartctl on each physical disk (always emits JSON)"
+  ansible.builtin.shell: |
+    set +e
+    DEV="/dev/{{ item.name }}"
+    TRAN="{{ item.tran | default('') }}"
+    if ! command -v smartctl >/dev/null 2>&1; then
+      printf '{"_unavailable":"smartctl not installed"}\n'
+      exit 0
+    fi
+    if [ "$TRAN" = "nvme" ]; then
+      OUT=$(smartctl -ja "$DEV" -d nvme 2>/dev/null)
+    else
+      OUT=$(smartctl -ja "$DEV" 2>/dev/null)
+    fi
+    # smartctl with -j always emits JSON on success; if empty or non-JSON, emit a sentinel
+    if [ -z "$OUT" ] || [ "${OUT#\{}" = "$OUT" ]; then
+      printf '{"_error":"smartctl_no_json","device":"%s"}\n' "$DEV"
+    else
+      printf '%s\n' "$OUT"
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ audit_physical_disks }}"
+  loop_control:
+    label: "/dev/{{ item.name }}"
+  register: _smart
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/linux | parse smartctl output (safe per-item)"
+  ansible.builtin.set_fact:
+    audit_smart_by_dev: >-
+      {{ audit_smart_by_dev | default({}) | combine({
+          item.item.name: (item.stdout | from_json)
+        }) }}
+  loop: "{{ _smart.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+# NVMe also gets the nvme-cli view (some fields aren't in smartctl JSON)
+- name: "drive_audit/linux | nvme smart-log for each NVMe (always emits JSON)"
+  ansible.builtin.shell: |
+    set +e
+    if ! command -v nvme >/dev/null 2>&1; then
+      printf '{"_unavailable":"nvme-cli not installed"}\n'
+      exit 0
+    fi
+    OUT=$(nvme smart-log "/dev/{{ item.name }}" -o json 2>/dev/null)
+    if [ -z "$OUT" ] || [ "${OUT#\{}" = "$OUT" ]; then
+      printf '{"_error":"nvme_no_json","device":"/dev/%s"}\n' "{{ item.name }}"
+    else
+      printf '%s\n' "$OUT"
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ audit_physical_disks | selectattr('tran', 'equalto', 'nvme') | list }}"
+  loop_control:
+    label: "/dev/{{ item.name }}"
+  register: _nvme_smart
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/linux | seed empty nvme_by_dev"
+  ansible.builtin.set_fact:
+    audit_nvme_by_dev: {}
+
+- name: "drive_audit/linux | parse nvme smart-log (safe per-item)"
+  ansible.builtin.set_fact:
+    audit_nvme_by_dev: >-
+      {{ audit_nvme_by_dev | combine({
+          item.item.name: (item.stdout | from_json)
+        }) }}
+  loop: "{{ _nvme_smart.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+# ---------------------------------------------------------------------------
+# Build normalized block_devices list with derived wear metrics
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | normalize block device data"
+  ansible.builtin.set_fact:
+    audit_block_devices_norm: >-
+      {{ audit_block_devices_norm | default([]) + [{
+        'name': item.name,
+        'path': '/dev/' ~ item.name,
+        'size_bytes': item.size | default(0),
+        'size_human': (item.size | default(0) | int / (1024**3)) | round(1) | string ~ ' GB',
+        'model': item.model | default('') | trim,
+        'serial': item.serial | default('') | trim,
+        'wwn': item.wwn | default(''),
+        'vendor': item.vendor | default('') | trim,
+        'transport': item.tran | default(''),
+        'rotational': (item.rota | default(0) | int) == 1,
+        'removable': (item.rm | default(0) | int) == 1,
+        'state': item.state | default(''),
+        'fstype': item.fstype | default(''),
+        'mountpoint': item.mountpoint | default(''),
+        'children': item.children | default([]) | map(attribute='name') | list,
+        'smart': audit_smart_by_dev.get(item.name, {}),
+        'nvme_smart': audit_nvme_by_dev.get(item.name, {})
+      }] }}
+  loop: "{{ audit_physical_disks }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "drive_audit/linux | attach normalized devices to host_audit"
+  ansible.builtin.set_fact:
+    host_audit: "{{ host_audit | combine({'block_devices': audit_block_devices_norm | default([])}) }}"
+
+# ---------------------------------------------------------------------------
+# LVM topology
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | pvs --reportformat json"
+  ansible.builtin.command: "pvs --reportformat json --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free,pv_used"
+  register: _pvs
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.pvs | default('missing') == 'present'
+
+- name: "drive_audit/linux | vgs --reportformat json"
+  ansible.builtin.command: "vgs --reportformat json --units b --nosuffix -o vg_name,vg_size,vg_free,pv_count,lv_count"
+  register: _vgs
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.vgs | default('missing') == 'present'
+
+- name: "drive_audit/linux | lvs --reportformat json"
+  ansible.builtin.command: >
+    lvs --reportformat json --units b --nosuffix
+    -o lv_name,vg_name,lv_size,data_percent,metadata_percent,pool_lv,origin,lv_attr,lv_dm_path
+  register: _lvs
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.lvs | default('missing') == 'present'
+
+- name: "drive_audit/linux | capture LVM into host_audit"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'storage_topology': host_audit.storage_topology | combine({
+          'lvm': {
+            'pvs': (_pvs.stdout | default('{"report":[{"pv":[]}]}') | from_json).report[0].pv | default([]),
+            'vgs': (_vgs.stdout | default('{"report":[{"vg":[]}]}') | from_json).report[0].vg | default([]),
+            'lvs': (_lvs.stdout | default('{"report":[{"lv":[]}]}') | from_json).report[0].lv | default([])
+          }
+        })
+      }) }}
+
+# ---------------------------------------------------------------------------
+# ZFS topology (if present)
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | zpool list"
+  ansible.builtin.command: "zpool list -Hp -o name,size,alloc,free,frag,cap,dedup,health,autotrim"
+  register: _zpool_list
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.zpool | default('missing') == 'present'
+
+- name: "drive_audit/linux | zpool status (per-pool, vdev layout)"
+  ansible.builtin.command: "zpool status"
+  register: _zpool_status
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.zpool | default('missing') == 'present'
+
+- name: "drive_audit/linux | zfs list with key properties"
+  ansible.builtin.command: >
+    zfs list -Hp -o name,used,avail,refer,mountpoint,recordsize,compression,atime,sync,dedup,xattr,acltype
+  register: _zfs_list
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_tools.zfs | default('missing') == 'present'
+
+- name: "drive_audit/linux | capture ZFS into host_audit"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'storage_topology': host_audit.storage_topology | combine({
+          'zfs': {
+            'available': audit_tools.zpool | default('missing') == 'present',
+            'pools_raw': _zpool_list.stdout | default(''),
+            'pool_status_raw': _zpool_status.stdout | default(''),
+            'datasets_raw': _zfs_list.stdout | default('')
+          }
+        })
+      }) }}
+
+# ---------------------------------------------------------------------------
+# Mounts
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | findmnt JSON"
+  ansible.builtin.command: "findmnt -J --real -o TARGET,SOURCE,FSTYPE,OPTIONS,SIZE,USED,AVAIL,USE%"
+  register: _findmnt
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/linux | attach mounts"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'mounts': (_findmnt.stdout | default('{"filesystems":[]}') | from_json).filesystems | default([])
+      }) }}
+
+# ---------------------------------------------------------------------------
+# Host config — TRIM passthrough, fstrim, smartd
+# ---------------------------------------------------------------------------
+- name: "drive_audit/linux | inspect /etc/lvm/lvm.conf for issue_discards"
+  ansible.builtin.shell: |
+    set +e
+    F=/etc/lvm/lvm.conf
+    if [ ! -f "$F" ]; then echo "missing"; exit 0; fi
+    # Show effective setting from `lvmconfig` if present, else raw grep
+    if command -v lvmconfig >/dev/null 2>&1; then
+      lvmconfig --type current devices/issue_discards 2>/dev/null \
+        | awk -F= '/issue_discards/{gsub(/ /,"",$2); print $2; found=1} END{if(!found)print "default"}'
+    else
+      grep -E '^[[:space:]]*issue_discards[[:space:]]*=' "$F" \
+        | awk -F= '{gsub(/[ \t]/,"",$2); print $2}' \
+        | tail -1
+    fi
+  args:
+    executable: /bin/bash
+  register: _issue_discards
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/linux | systemd unit states"
+  ansible.builtin.shell: |
+    set +e
+    # tail -1: systemctl is-enabled may emit SysV-sync warnings before the answer
+    # tr -d '\n': belt-and-suspenders against multi-line capture
+    for unit in fstrim.timer smartd.service smartmontools.service; do
+      if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "$unit"; then
+        EN=$(systemctl is-enabled "$unit" 2>/dev/null | tail -1 | tr -d '\n' || echo "unknown")
+        AC=$(systemctl is-active  "$unit" 2>/dev/null | tail -1 | tr -d '\n' || echo "unknown")
+        EN=${EN:-unknown}
+        AC=${AC:-unknown}
+        printf '%s=%s/%s\n' "$unit" "$EN" "$AC"
+      else
+        printf '%s=absent/absent\n' "$unit"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: _systemd_units
+  changed_when: false
+  failed_when: false
+
+- name: "drive_audit/linux | smartd.conf snippet"
+  ansible.builtin.shell: |
+    set +e
+    F=/etc/smartd.conf
+    if [ -f "$F" ]; then
+      grep -vE '^[[:space:]]*(#|$)' "$F" | head -50
+    else
+      echo "missing"
+    fi
+  args:
+    executable: /bin/bash
+  register: _smartd_conf
+  changed_when: false
+  failed_when: false
+  become: true
+  when: audit_capture_configs | bool
+
+- name: "drive_audit/linux | attach host_config"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'host_config': {
+          'lvm_issue_discards': _issue_discards.stdout | default('unknown') | trim,
+          'systemd_units': dict(
+            _systemd_units.stdout_lines | default([])
+              | select('search', '=')
+              | map('split', '=', 1)
+              | list
+          ),
+          'smartd_conf_active_lines': _smartd_conf.stdout | default('') if audit_capture_configs else '',
+          'tools_present': audit_tools
+        }
+      }) }}

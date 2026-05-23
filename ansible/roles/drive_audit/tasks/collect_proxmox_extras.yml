@@ -1,0 +1,100 @@
+---
+# =============================================================================
+# Proxmox-only extras: VM/CT inventory + storage pool registration
+# =============================================================================
+# Runs on hosts in the `proxmox_nodes` group AFTER collect_linux.yml.
+# Provides the IaC-vs-reality cross-check: which VM disks actually exist
+# on which storage pool, mapped to the LVs we already collected.
+# =============================================================================
+
+- name: "drive_audit/pve | pveversion"
+  ansible.builtin.command: "pveversion -v"
+  register: _pveversion
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | qm list (VMs on this node)"
+  ansible.builtin.command: "qm list --full"
+  register: _qm_list
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | parse qm list into VM IDs"
+  ansible.builtin.set_fact:
+    audit_pve_vm_ids: >-
+      {{ _qm_list.stdout_lines | default([])
+         | reject('search', '^[[:space:]]*VMID')
+         | reject('equalto', '')
+         | map('regex_search', '^\s*(\d+)', '\1')
+         | select('truthy')
+         | map('first')
+         | list }}
+
+- name: "drive_audit/pve | qm config for each VM"
+  ansible.builtin.command: "qm config {{ item }} --current"
+  loop: "{{ audit_pve_vm_ids | default([]) }}"
+  loop_control:
+    label: "VM {{ item }}"
+  register: _qm_configs
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | pct list (LXCs on this node)"
+  ansible.builtin.command: "pct list"
+  register: _pct_list
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | parse pct list into CT IDs"
+  ansible.builtin.set_fact:
+    audit_pve_ct_ids: >-
+      {{ _pct_list.stdout_lines | default([])
+         | reject('search', '^[[:space:]]*VMID')
+         | reject('equalto', '')
+         | map('regex_search', '^\s*(\d+)', '\1')
+         | select('truthy')
+         | map('first')
+         | list }}
+
+- name: "drive_audit/pve | pct config for each CT"
+  ansible.builtin.command: "pct config {{ item }}"
+  loop: "{{ audit_pve_ct_ids | default([]) }}"
+  loop_control:
+    label: "CT {{ item }}"
+  register: _pct_configs
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | pvesm status (storage pools as PVE sees them)"
+  ansible.builtin.command: "pvesm status"
+  register: _pvesm
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: "drive_audit/pve | attach Proxmox facts to host_audit"
+  ansible.builtin.set_fact:
+    host_audit: >-
+      {{ host_audit | combine({
+        'proxmox': {
+          'pveversion': _pveversion.stdout | default('unknown'),
+          'vm_ids': audit_pve_vm_ids | default([]),
+          'ct_ids': audit_pve_ct_ids | default([]),
+          'vm_configs': dict(
+            (audit_pve_vm_ids | default([])) | zip(
+              (_qm_configs.results | default([])) | map(attribute='stdout') | list
+            )
+          ),
+          'ct_configs': dict(
+            (audit_pve_ct_ids | default([])) | zip(
+              (_pct_configs.results | default([])) | map(attribute='stdout') | list
+            )
+          ),
+          'pvesm_status': _pvesm.stdout | default('')
+        }
+      }) }}

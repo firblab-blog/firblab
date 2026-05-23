@@ -1,0 +1,132 @@
+---
+# =============================================================================
+# TrueNAS — ZFS Replication Task Configuration
+# =============================================================================
+# Sets up LOCAL ZFS replication from the media pool to backups/truenas-media.
+# Provides the first layer of backup for the media pool's app data (Plex DB,
+# Immich photos, Linkwarden/Paperless/mail-archiver Postgres, ix-apps Docker).
+#
+# Execution flow:
+#   1. Bootstrap (one-time): zfs send -Rv media@bootstrap → backups/truenas-media
+#      Skipped on subsequent runs if the destination dataset already exists.
+#   2. Snapshot task: daily at 01:00 naming auto-YYYY-MM-DD_HH-MM (30-day retain)
+#      Managed by tasks/snapshots.yml — this file only creates the replication task.
+#   3. Replication task: daily at 02:00, incremental, 30-day retention on dest.
+#      Idempotent: created only if a task with the same name doesn't exist yet.
+#
+# arensb.truenas has no replication module — tasks use midclt call directly.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Bootstrap: one-time full send if destination doesn't exist yet
+# ---------------------------------------------------------------------------
+
+- name: Check if replication destination dataset exists
+  ansible.builtin.command:
+    cmd: zfs list backups/truenas-media
+  register: replication_dest_check
+  failed_when: false
+  changed_when: false
+  tags:
+    - replication
+
+- name: Bootstrap replication — initial full send (one-time, ~1-2h)
+  when: replication_dest_check.rc != 0
+  tags:
+    - replication
+    - replication_bootstrap
+  block:
+    - name: Take atomic bootstrap snapshot of entire media pool
+      ansible.builtin.command:
+        cmd: "zfs snapshot -r media@bootstrap-{{ ansible_facts['date_time']['date'] }}"
+      changed_when: true
+
+    - name: Stream bootstrap snapshot to backups/truenas-media
+      # -R = recursive (children + properties + snapshots)
+      # -v = verbose progress to stdout (visible in Ansible output)
+      # Piped into receive -F which forces destroy + re-receive if partially
+      # started before. Safe because we only reach here when dest doesn't exist.
+      ansible.builtin.shell: >-
+        zfs send -Rv media@bootstrap-{{ ansible_facts['date_time']['date'] }} |
+        zfs receive -F backups/truenas-media
+      register: bootstrap_result
+      changed_when: bootstrap_result.rc == 0
+
+    - name: Remove .system clone from replication destination
+      # media/.system is TrueNAS-internal state (netdata, samba, etc.) and
+      # should NOT be replicated — it would conflict if ever used for recovery.
+      ansible.builtin.command:
+        cmd: zfs destroy -r backups/truenas-media/.system
+      register: destroy_system
+      failed_when: destroy_system.rc != 0 and 'dataset does not exist' not in destroy_system.stderr
+      changed_when: destroy_system.rc == 0
+
+    - name: Verify bootstrap destination was created
+      ansible.builtin.command:
+        cmd: zfs list -r backups/truenas-media
+      register: bootstrap_verify
+      changed_when: false
+
+    - name: Display bootstrap result
+      ansible.builtin.debug:
+        msg: |
+          Bootstrap complete. Datasets created on backups:
+          {{ bootstrap_verify.stdout }}
+
+# ---------------------------------------------------------------------------
+# Replication task: idempotent create via midclt
+# ---------------------------------------------------------------------------
+
+- name: Query existing replication tasks
+  ansible.builtin.command:
+    cmd: midclt call replication.query
+  register: replication_query
+  changed_when: false
+  tags:
+    - replication
+
+- name: Set existing replication task names
+  ansible.builtin.set_fact:
+    existing_replication_names: "{{ replication_query.stdout | from_json | map(attribute='name') | list }}"
+  tags:
+    - replication
+
+- name: "Create replication task: {{ item.name }}"
+  ansible.builtin.command:
+    cmd: >-
+      midclt call replication.create
+      '{{ replication_payload | to_json }}'
+  vars:
+    replication_payload:
+      name: "{{ item.name }}"
+      direction: "{{ item.direction }}"
+      transport: "{{ item.transport }}"
+      source_datasets: "{{ item.source_datasets }}"
+      target_dataset: "{{ item.target_dataset }}"
+      exclude: "{{ item.exclude | default([]) }}"
+      recursive: "{{ item.recursive }}"
+      auto: "{{ item.auto }}"
+      schedule: "{{ item.schedule }}"
+      retention_policy: "{{ item.retention_policy }}"
+      name_regex: "{{ item.name_regex }}"
+      allow_from_scratch: "{{ item.allow_from_scratch }}"
+      readonly: "{{ item.readonly }}"
+      enabled: "{{ item.enabled }}"
+  when: item.name not in existing_replication_names
+  loop: "{{ truenas_replication_tasks }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: replication_create_result
+  changed_when: replication_create_result.rc == 0
+  tags:
+    - replication
+
+- name: "Replication task already exists: {{ item.name }}"
+  ansible.builtin.debug:
+    msg: "Skipping — task '{{ item.name }}' already exists. Delete it via TrueNAS UI or midclt to recreate."
+  when: item.name in existing_replication_names
+  loop: "{{ truenas_replication_tasks }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags:
+    - replication

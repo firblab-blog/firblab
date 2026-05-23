@@ -117,11 +117,11 @@ truenas_snapshot_tasks:
 
   - dataset: media
     recursive: true
-    lifetime_value: 1
-    lifetime_unit: week
+    lifetime_value: 30
+    lifetime_unit: day
     name_format: "auto-%Y-%m-%d_%H-%M"
-    minute: "30"
-    hour: "0"
+    minute: "0"
+    hour: "1"
     day: "*"
     month: "*"
     weekday: "*"
@@ -182,4 +182,48 @@ truenas_scrub_tasks:
     day: "*"
     month: "*"
     weekday: "7"
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# ZFS Replication Tasks
+# ---------------------------------------------------------------------------
+# LOCAL replication: media → backups/truenas-media
+# Runs daily at 02:00, 30-day retention on destination.
+# Source snapshots are named "auto-*" (produced by the media snapshot task
+# above at 01:00). The 1-hour gap ensures snapshots always exist before
+# replication runs.
+#
+# idempotency: tasks/replication.yml queries existing tasks by name and only
+# calls replication.create when the task is absent. To force recreation,
+# remove the task in the TrueNAS UI or run:
+#   midclt call replication.delete <id>
+# then re-run the playbook.
+#
+# Bootstrap: the first run creates backups/truenas-media via zfs send -Rv
+# (one-time full copy, ~1-2 hours on same-box HDD-to-HDD). Subsequent runs
+# are incremental (near-instant). Bootstrap is skipped if the destination
+# dataset already exists.
+truenas_replication_tasks:
+  - name: "media-to-backups-daily"
+    direction: PUSH
+    transport: LOCAL
+    source_datasets:
+      - media
+    target_dataset: "backups/truenas-media"
+    exclude:
+      - "media/.system"
+    recursive: true
+    auto: true
+    schedule:
+      minute: "0"
+      hour: "2"
+      dom: "*"
+      month: "*"
+      dow: "*"
+    # name_regex requires SOURCE or NONE — CUSTOM lifetime is only valid with
+    # naming schemas. SOURCE inherits the 30-day retention from the snapshot task.
+    retention_policy: SOURCE
+    name_regex: "^auto-"
+    allow_from_scratch: false
+    readonly: SET
     enabled: true

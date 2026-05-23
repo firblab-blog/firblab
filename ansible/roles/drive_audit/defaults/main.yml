@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# drive_audit role — defaults
+# =============================================================================
+# Read-only by default. Set audit_install_tools=true to apt-get install
+# smartmontools / nvme-cli / zfsutils-linux on Linux hosts (or brew install
+# on macOS) before collecting. Off by default so a first run is safe.
+# =============================================================================
+
+# Install missing tools (smartmontools, nvme-cli, zfsutils-linux) on Linux,
+# or `smartmontools` via Homebrew on macOS. Off by default.
+audit_install_tools: false
+
+# Local directory (on the Ansible control node) where collected facts and
+# rendered reports land. The role creates a timestamped subdirectory.
+audit_output_root: "{{ lookup('env', 'PWD') }}/reports/drive-audit"
+
+# Run identifier — single shared value for the whole play so every host
+# in one run lands in the same subdir. Override on the CLI to label a run
+# (e.g. `-e audit_run_id=pre-vlan-cutover`). Default is an ISO-ish timestamp.
+audit_run_id: "{{ ansible_date_time.iso8601_basic_short | default(lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ')) }}"
+
+# Per-host output paths (derived).
+audit_run_dir: "{{ audit_output_root }}/{{ audit_run_id }}"
+audit_host_json: "{{ audit_run_dir }}/{{ inventory_hostname }}.json"
+audit_host_md: "{{ audit_run_dir }}/{{ inventory_hostname }}.md"
+
+# Render aggregate report at end of run (runs on localhost in the playbook).
+audit_render_aggregate: true
+
+# Command timeout (seconds) — long SMART self-test reads can take time on USB.
+audit_command_timeout: 60
+
+# Whether to capture the smartd.conf and lvm.conf snippets verbatim into the
+# JSON facts. Useful for diffing across runs.
+audit_capture_configs: true

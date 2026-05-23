@@ -1,0 +1,127 @@
+---
+# =============================================================================
+# Drive Audit — comprehensive hardware drive health + topology survey
+# =============================================================================
+# Runs the drive_audit role against every physical host in the lab and writes
+# per-host JSON + Markdown reports plus an aggregate roll-up to:
+#   ./reports/drive-audit/<RUN_ID>/
+#
+# Usage:
+#   # Read-only audit (default — safest first run):
+#   ansible-playbook -i ansible/inventory/hosts.yml \
+#     ansible/playbooks/drive-audit.yml
+#
+#   # Install smartmontools / nvme-cli where missing first, then audit:
+#   ansible-playbook -i ansible/inventory/hosts.yml \
+#     ansible/playbooks/drive-audit.yml \
+#     -e audit_install_tools=true
+#
+#   # Target a single host or group:
+#   ansible-playbook -i ansible/inventory/hosts.yml \
+#     ansible/playbooks/drive-audit.yml \
+#     --limit lab-02
+#
+#   # Label the run (e.g. before/after a change):
+#   ansible-playbook -i ansible/inventory/hosts.yml \
+#     ansible/playbooks/drive-audit.yml \
+#     -e audit_run_id=pre-vlan-cutover
+#
+# Targets the meta group `homelab_hardware` which spans Proxmox, Mac Mini,
+# RPi, K3s nodes, ZimaBlade, and TrueNAS. Excludes cloud hosts (Hetzner)
+# and guest VMs/LXCs — those live inside hardware already audited.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: resolve audit_run_id ONCE on the control node so every host shares
+# the same value (avoids per-host clock-drift creating divergent directories).
+# ---------------------------------------------------------------------------
+- name: "Drive audit — resolve run id"
+  hosts: localhost
+  gather_facts: true
+  become: false
+  tasks:
+    - name: "resolve | compute or accept run id"
+      ansible.builtin.set_fact:
+        audit_run_id_resolved: >-
+          {{ audit_run_id
+             | default(lookup('env', 'AUDIT_RUN_ID'), true)
+             | default(ansible_date_time.iso8601_basic_short ~ 'Z', true) }}
+        audit_output_root_resolved: >-
+          {{ audit_output_root | default(lookup('env', 'PWD') ~ '/reports/drive-audit') }}
+
+    - name: "resolve | derive run directory"
+      ansible.builtin.set_fact:
+        audit_run_dir_resolved: "{{ audit_output_root_resolved }}/{{ audit_run_id_resolved }}"
+
+    - name: "resolve | create run directory"
+      ansible.builtin.file:
+        path: "{{ audit_run_dir_resolved }}"
+        state: directory
+        mode: "0755"
+
+    - name: "resolve | announce"
+      ansible.builtin.debug:
+        msg: "Drive audit run ID: {{ audit_run_id_resolved }} → {{ audit_run_dir_resolved }}"
+
+# ---------------------------------------------------------------------------
+# Play 2: collect from every hardware host using the shared run id.
+# ---------------------------------------------------------------------------
+- name: "Drive audit — homelab hardware"
+  hosts: homelab_hardware
+  gather_facts: true
+  any_errors_fatal: false
+  serial: 6  # cap parallelism so slow SMART scans don't fan out unboundedly
+  vars:
+    audit_run_id: "{{ hostvars['localhost'].audit_run_id_resolved }}"
+    audit_output_root: "{{ hostvars['localhost'].audit_output_root_resolved }}"
+    audit_run_dir: "{{ hostvars['localhost'].audit_run_dir_resolved }}"
+  roles:
+    - drive_audit
+
+# ---------------------------------------------------------------------------
+# Play 3: render aggregate report on the control node.
+# ---------------------------------------------------------------------------
+- name: "Drive audit — aggregate roll-up"
+  hosts: localhost
+  gather_facts: true
+  become: false
+  vars:
+    audit_run_id: "{{ hostvars['localhost'].audit_run_id_resolved }}"
+    audit_output_root: "{{ hostvars['localhost'].audit_output_root_resolved }}"
+    audit_run_dir: "{{ hostvars['localhost'].audit_run_dir_resolved }}"
+  tasks:
+    - name: "aggregate | list per-host JSON files"
+      ansible.builtin.find:
+        paths: "{{ audit_run_dir }}"
+        patterns: "*.json"
+      register: _audit_jsons
+
+    - name: "aggregate | load each JSON"
+      ansible.builtin.set_fact:
+        audited_hosts: "{{ (audited_hosts | default([])) + [(lookup('file', item.path) | from_json)] }}"
+      loop: "{{ _audit_jsons.files | sort(attribute='path') }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: "aggregate | render aggregate report"
+      ansible.builtin.template:
+        src: "../roles/drive_audit/templates/aggregate-report.md.j2"
+        dest: "{{ audit_run_dir }}/AGGREGATE.md"
+        mode: "0644"
+      when: audited_hosts is defined and (audited_hosts | length) > 0
+
+    - name: "aggregate | symlink 'latest' → this run"
+      ansible.builtin.file:
+        src: "{{ audit_run_id }}"
+        dest: "{{ audit_output_root }}/latest"
+        state: link
+        force: true
+
+    - name: "aggregate | summary"
+      ansible.builtin.debug:
+        msg: |
+          Drive audit complete.
+          Hosts audited: {{ audited_hosts | default([]) | length }}
+          Output:        {{ audit_run_dir }}
+          Aggregate:     {{ audit_run_dir }}/AGGREGATE.md
+          Latest:        {{ audit_output_root }}/latest
